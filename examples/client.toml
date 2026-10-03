@@ -1,0 +1,22 @@
+# Run hibiki init on each device; never copy another device's identity.bin.
+server = "wss://hibiki.example.com/hibiki"
+allow_insecure = false
+operation_timeout_seconds = 120
+gpgconf_program = "gpgconf"
+# hibiki use NAME stores the immutable channel ID. Each adapter session keeps
+# the selection it started with.
+# default_channel = "..."
+
+# These switches control local providers. Remote requests work with both off.
+# Restart hibiki daemon after changing configuration.
+[scdaemon]
+enabled = false
+# Omit program to locate the native binary with gpgconf --list-components.
+# scdaemon runs with --server and a dedicated home under HIbiki's data directory.
+# program = "/usr/lib/gnupg/scdaemon"
+
+[pinentry]
+enabled = false
+# Choose a GUI Pinentry available here. Terminal input requires this device's
+# GPG_TTY and TERM in the daemon environment.
+# program = "/opt/homebrew/bin/pinentry-mac"

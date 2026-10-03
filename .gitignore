@@ -1,0 +1,15 @@
+# Build output and Python caches
+/target/
+__pycache__/
+*.py[cod]
+
+# Local deployment, credentials, and databases
+/deploy/
+.env
+.env.*
+!.env.example
+identity.bin
+*.sqlite*
+
+# macOS metadata
+.DS_Store

@@ -1,0 +1,245 @@
+//! Local, fail-closed presentation of a signed admission request.
+use anyhow::{Context, Result, bail};
+use hibiki_lib::{
+    channel::{JoinRequest, VerifiedChannelState},
+    identity::Device,
+    now,
+};
+use std::io::{BufRead, Read, Write};
+
+pub fn show_device(output: &mut impl Write, device: &Device) -> Result<()> {
+    let words = device.public_key_words()?;
+    // Debug formatting escapes terminal control sequences in untrusted display names.
+    writeln!(output, "Device name: {:?}", device.name)?;
+    writeln!(output, "Device ID: {}", device.id())?;
+    writeln!(output, "Ed25519 public-key words: {words}")?;
+    writeln!(
+        output,
+        "These 24 words encode a public identity key, not a recovery phrase or an OpenPGP key."
+    )?;
+    output.flush()?;
+    Ok(())
+}
+fn answer(input: &mut impl BufRead, output: &mut impl Write, prompt: &str) -> Result<String> {
+    write!(output, "{prompt}")?;
+    output.flush()?;
+    let mut response = String::new();
+    input.take(1025).read_line(&mut response)?;
+    if response.len() > 1024 {
+        bail!("answer too long");
+    }
+    Ok(response.trim().to_owned())
+}
+
+pub fn choose_approval(
+    requests: Vec<JoinRequest>,
+    state: &VerifiedChannelState,
+    request_id: Option<&str>,
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+) -> Result<Option<JoinRequest>> {
+    let mut candidates = Vec::new();
+    for request in requests {
+        request.verify()?;
+        let body = &request.body;
+        if body.channel_id != state.id
+            || body.genesis_hash != state.genesis_hash
+            || body.psk_epoch != state.psk_epoch
+            || body.expires_at <= now()
+            || body.created_at > now() + 30
+        {
+            bail!("pending request does not match the current channel or has expired");
+        }
+        let id = request.id()?;
+        if request_id.is_none_or(|wanted| wanted == id) {
+            candidates.push((id, request));
+        }
+    }
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    if candidates.is_empty() {
+        if request_id.is_some() {
+            bail!("request ID not found; it may have expired or been approved");
+        }
+        writeln!(output, "No pending requests.")?;
+        return Ok(None);
+    }
+    writeln!(output, "Channel: {:?} ({})", state.name, state.id)?;
+    let index = if candidates.len() == 1 {
+        0
+    } else {
+        for (index, (id, request)) in candidates.iter().enumerate() {
+            writeln!(
+                output,
+                "{}) {:?}  device={}  request={id}",
+                index + 1,
+                request.body.device.name,
+                request.body.device.id()
+            )?;
+        }
+        let selected = answer(input, output, "Select request number (Enter to cancel): ")?;
+        if selected.is_empty() {
+            return Ok(None);
+        }
+        selected
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|n| *n < candidates.len())
+            .context("invalid request selection; nothing approved")?
+    };
+    let (id, request) = candidates.swap_remove(index);
+    writeln!(output, "Request ID: {id}")?;
+    show_device(output, &request.body.device)?;
+    writeln!(
+        output,
+        "Compare all 24 words and the request ID with the joining device using a trusted channel."
+    )?;
+    if answer(input, output, "Approve this device? [y/N]: ")?.eq_ignore_ascii_case("y") {
+        return Ok(Some(request));
+    }
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hibiki_lib::{
+        channel::{ChannelGenesis, MembershipProof},
+        identity::Identity,
+    };
+    use std::io::Cursor;
+
+    fn fixture() -> (VerifiedChannelState, JoinRequest) {
+        let founder = Identity::generate("founder".into()).unwrap();
+        let applicant = Identity::generate("new device".into()).unwrap();
+        let proof = MembershipProof {
+            genesis: ChannelGenesis::create(&founder, "test".into(), "verifier").unwrap(),
+            events: vec![],
+        };
+        let state = proof.verify().unwrap();
+        let request = JoinRequest::create(&applicant, &state).unwrap();
+        (state, request)
+    }
+    #[test]
+    fn approval_defaults_to_no_and_requires_explicit_y() {
+        let (state, request) = fixture();
+        for response in ["", "\n", "n\n", "N\n", "yes\n", "unexpected\n"] {
+            let mut output = Vec::new();
+            assert!(
+                choose_approval(
+                    vec![request.clone()],
+                    &state,
+                    None,
+                    &mut Cursor::new(response),
+                    &mut output
+                )
+                .unwrap()
+                .is_none()
+            );
+            let text = String::from_utf8(output).unwrap();
+            assert!(text.contains(&request.body.device.public_key_words().unwrap()));
+            assert!(text.contains("[y/N]"));
+        }
+        for response in ["y\n", "Y\n"] {
+            let result = choose_approval(
+                vec![request.clone()],
+                &state,
+                Some(&request.id().unwrap()),
+                &mut Cursor::new(response),
+                &mut Vec::new(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(result, request);
+        }
+    }
+    #[test]
+    fn interactive_selection_approves_only_the_displayed_request() {
+        let (state, first) = fixture();
+        let second =
+            JoinRequest::create(&Identity::generate("second".into()).unwrap(), &state).unwrap();
+        let mut expected = [first.clone(), second.clone()];
+        expected.sort_by_key(|r| r.id().unwrap());
+        let mut output = Vec::new();
+        let result = choose_approval(
+            vec![first.clone(), second.clone()],
+            &state,
+            None,
+            &mut Cursor::new("2\ny\n"),
+            &mut output,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result, expected[1]);
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains(&expected[1].body.device.public_key_words().unwrap())
+        );
+        assert!(
+            choose_approval(
+                vec![first.clone(), second.clone()],
+                &state,
+                None,
+                &mut Cursor::new("\n"),
+                &mut Vec::new()
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            choose_approval(
+                vec![first, second],
+                &state,
+                None,
+                &mut Cursor::new("0\ny\n"),
+                &mut Vec::new()
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn foreign_or_tampered_requests_never_reach_confirmation() {
+        let (state, mut request) = fixture();
+        request.signature[0] ^= 1;
+        let mut output = Vec::new();
+        assert!(
+            choose_approval(
+                vec![request],
+                &state,
+                None,
+                &mut Cursor::new("y\n"),
+                &mut output
+            )
+            .is_err()
+        );
+        assert!(output.is_empty());
+        let (_, foreign) = fixture();
+        assert!(
+            choose_approval(
+                vec![foreign],
+                &state,
+                None,
+                &mut Cursor::new("y\n"),
+                &mut output
+            )
+            .is_err()
+        );
+        assert!(output.is_empty());
+    }
+    #[test]
+    fn display_names_cannot_inject_terminal_instructions() {
+        let device = Identity::generate("\x1b[2J\nApprove fake?".into())
+            .unwrap()
+            .device
+            .clone();
+        let mut output = Vec::new();
+        show_device(&mut output, &device).unwrap();
+        assert!(!output.contains(&0x1b));
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("\\nApprove fake?")
+        );
+    }
+}

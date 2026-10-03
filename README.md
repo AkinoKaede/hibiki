@@ -1,0 +1,237 @@
+# HIbiki
+
+Use an OpenPGP Card on another device and enter its PIN on any participating device. HIbiki forwards **scdaemon and pinentry over Assuan stdio**, while your native `gpg`, `gpg-agent`, and Git signing workflow stay on the requesting machine.
+
+For example, laptop A can sign a commit using a card attached to desktop B, with the PIN entered on device C. A's agent receives the PIN and passes it to B's selected card session. Multiple devices can offer input at once; the first successful response wins and the other prompts close.
+
+Each device independently chooses whether to provide card access, password entry, both, or neither. Both services are **disabled by default**. Remote traffic is encrypted end to end through a WebSocket relay.
+
+## Requirements and build
+
+- macOS or Linux
+- Rust 1.96 or later
+- GnuPG 2.4 or 2.5
+- Native scdaemon on devices providing card access; native Pinentry on devices providing input
+
+```sh
+cargo build --locked --release --workspace
+export PATH="$PWD/target/release:$PATH"
+```
+
+| Program | Purpose |
+| --- | --- |
+| `hibiki` | Device setup, channel management, and the local daemon |
+| `hibiki-server` | Authentication, channel membership, and encrypted traffic relay |
+| `hibiki-scdaemon` | Stdio adapter used by the requesting device's agent |
+| `hibiki-pinentry` | Stdio adapter used by the requesting device's agent |
+
+## Setup
+
+### 1. Run a relay
+
+Copy the [server configuration](examples/server.toml) into a private directory, then start the server:
+
+```sh
+mkdir -m 700 deploy
+cp examples/server.toml deploy/server.toml
+hibiki-server --config deploy/server.toml
+```
+
+The server runs in the foreground and listens on `127.0.0.1:7749` by default. It serves WebSocket traffic at `/hibiki` and a health endpoint at `/healthz`. For remote use, expose it through a TLS endpoint and use a `wss://` URL. Channel admission relies on TLS to protect the pre-shared key (PSK).
+
+The example stores its database at `deploy/data/hibiki.sqlite3`. If `database` is omitted, the default is `$XDG_DATA_HOME/hibiki/server/hibiki.sqlite3`, or `~/.local/share/hibiki/server/hibiki.sqlite3` when XDG is unset. Relative database paths resolve against the configuration file's directory.
+
+The following steps use `wss://hibiki.example.com/hibiki`; replace it with your relay URL. For local development, use `ws://127.0.0.1:7749/hibiki` and add `--allow-insecure` to each `hibiki init` command.
+
+### 2. Pair devices in a channel
+
+On the first device:
+
+```sh
+hibiki init --server wss://hibiki.example.com/hibiki --name laptop
+hibiki channel create personal
+hibiki channel invite personal
+```
+
+Keep the PSK printed by `create`. Share the invitation and PSK separately through trusted channels.
+
+On each additional device:
+
+```sh
+hibiki init --server wss://hibiki.example.com/hibiki --name desktop
+hibiki channel join 'hibiki-v1:...'
+```
+
+`join` prompts for the PSK and waits for approval. In another terminal on an existing member device, run:
+
+```sh
+hibiki channel approve personal
+```
+
+Compare the joining device's 24 public-key verification words before answering `y`. Approval defaults to No, and pending requests expire after 10 minutes. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
+
+### 3. Enable the services each device will provide
+
+Edit `~/.config/hibiki/client.toml`, or the corresponding XDG path. See the complete [client configuration](examples/client.toml).
+
+```toml
+[scdaemon]
+enabled = true
+# program = "/usr/lib/gnupg/scdaemon"
+
+[pinentry]
+enabled = true
+# program = "/opt/homebrew/bin/pinentry-mac"
+```
+
+These switches control whether the device accepts requests and participates as a provider. They do not restrict its ability to request services from other devices.
+
+| Device role | `scdaemon.enabled` | `pinentry.enabled` |
+| --- | --- | --- |
+| Request services only | `false` | `false` |
+| Provide a card | `true` | `false` |
+| Offer password input | `false` | `true` |
+| Provide both | `true` | `true` |
+
+When `program` is omitted, HIbiki locates the native program using `gpgconf --list-components`. A native program path must not point to a HIbiki adapter.
+
+Pinentry uses the providing device's display environment. Choose a GUI Pinentry available on that device, or set its local `GPG_TTY` and `TERM` in the daemon's environment for terminal input. Requesting devices cannot supply remote display, TTY, owner, or filesystem settings.
+
+Run the daemon on every participating device:
+
+```sh
+hibiki daemon
+```
+
+The daemon runs in the foreground. Restart it after changing service configuration. Providing a service does not require changes to that device's `gpg-agent.conf`.
+
+### 4. Connect the requesting device's agent
+
+Choose the channel on each requesting device:
+
+```sh
+hibiki use personal
+```
+
+Joining a channel does not select it automatically. Each new adapter session keeps the channel selection it started with.
+
+Add either or both lines to the requesting device's `gpg-agent.conf`, using the absolute paths of your built binaries:
+
+```text
+scdaemon-program /absolute/path/hibiki-scdaemon
+pinentry-program /absolute/path/hibiki-pinentry
+```
+
+Use only the pinentry line for remote password entry with local keys. Use only the scdaemon line for remote card access with your existing local Pinentry. Use both to allow a third device to enter the card PIN.
+
+Restart the agent for the GnuPG home you configured, including after changing the default channel for an existing card session:
+
+```sh
+gpgconf --homedir /your/gnupg/home --kill gpg-agent
+```
+
+The next GPG operation starts the agent again. For a custom HIbiki configuration, set `HIBIKI_CONFIG` before starting the agent so the adapters inherit it. Management commands also accept `--config PATH`.
+
+## Sign and decrypt
+
+Import the card's public key on the requesting device, then let the agent learn the card:
+
+```sh
+gpg --import public.asc
+gpg --card-status
+```
+
+Continue using native GPG:
+
+```sh
+printf 'hello\n' > message.txt
+gpg --local-user YOUR_FINGERPRINT --armor --detach-sign message.txt
+gpg --verify message.txt.asc message.txt
+
+gpg --trust-model always --recipient YOUR_FINGERPRINT --encrypt message.txt
+gpg --decrypt message.txt.gpg
+```
+
+For Git signing, run these commands in your repository:
+
+```sh
+git config gpg.program "$(command -v gpg)"
+git config user.signingkey YOUR_FINGERPRINT
+git config commit.gpgsign true
+git commit -S -m 'Signed with HIbiki'
+```
+
+## Session behavior and limits
+
+**Card access.** HIbiki discovers enabled providers in parallel and selects the first OpenPGP Card matching the requested serial number or keygrip. Without a target, it selects the first available card. Once selected, card state, data, PIN inquiries, signing, and decryption stay on that backend until an explicit reset or card selection. A failure does not switch cards or replay a private operation.
+
+Each device grants one exclusive scdaemon session at a time; busy devices reject additional sessions. HIbiki starts its own native scdaemon with `--server` in `$XDG_DATA_HOME/hibiki/scdaemon`. Reader settings can go in that directory's `scdaemon.conf`. It does not connect to existing agent/scdaemon sockets or terminate other services holding a reader.
+
+**Password entry.** Each `GETPIN`, `CONFIRM`, or `MESSAGE` request starts a fresh race among enabled local and remote providers. The first complete successful response wins. A canceled or failed window only eliminates that candidate; remaining candidates can still succeed. Losing processes are closed, and their partial input is discarded.
+
+The native agent or card validates the password. A retry starts a new race; HIbiki never tries the losing candidates' passwords. Answers go only to the requester. Multiple Pinentry inquiries are serialized upstream, with each answer routed back to its original candidate.
+
+**Transport and lifecycle.** Both agent-to-adapter and HIbiki-to-native-program connections use stdio. The adapters reach the local daemon through a private Unix socket. Assuan inquiries preserve their parameters, binary data, percent escapes, and native error codes.
+
+- No extra scdaemon socket is exposed. `GETINFO socket_name` returns no data, and additional concurrent card connections from the same agent are unsupported.
+- Card discovery, public-key reading, signing, and decryption are supported. PIN changes, key writing, key generation, and raw APDU commands are rejected on both ends.
+- Each active command has a 120-second default timeout, configurable from 1 to 3600 seconds. Idle time does not consume the next command's deadline.
+- Caller exit, timeout, disconnect, revocation, or channel deletion closes affected sessions and owned backends. Reconnection enables new requests without replaying unfinished operations.
+- The daemon currently needs a relay connection even when only local providers are used.
+
+## Channel administration
+
+```sh
+hibiki channel list
+hibiki device list
+hibiki channel pending personal
+hibiki channel rotate-psk personal
+hibiki channel revoke personal DEVICE_ID
+hibiki channel leave personal
+```
+
+PSKs control admission. The relay stores Argon2id verifiers; rotating a PSK invalidates pending requests but preserves approved membership. Use `--psk-file` for automation. A revoked identity cannot rejoin the same channel; a device that voluntarily leaves can request admission again.
+
+To reserve channel creation for the server administrator, set `allow_client_channel_creation = false` in the server configuration:
+
+```sh
+hibiki-server --config deploy/server.toml channel create personal --server wss://hibiki.example.com/hibiki
+hibiki-server --config deploy/server.toml channel list
+hibiki-server --config deploy/server.toml channel delete personal
+```
+
+Server-side creation prints a single-use `hibiki-init-v1:...` invitation and a PSK. The first device claims it with `hibiki channel join`; later devices use ordinary invitations. A running relay checks for administrator deletions every second and closes affected sessions. Recreating a channel name produces a new channel ID.
+
+## Trust and storage
+
+Devices authenticate with Ed25519 identities and establish `Noise_XX_25519_ChaChaPoly_BLAKE2s` sessions bound to the protocol, channel, device identities, and session ID. Signed membership histories and saved checkpoints detect rollback, identity substitution, and conflicting histories. Service discovery is encrypted too.
+
+The relay can see membership, routing, timing, and ciphertext sizes, but cannot read Assuan traffic. It does not queue operations for offline devices. Approved channel members can use enabled services and approve additional members.
+
+Card private keys stay on the card; software private keys stay on the requesting device. PINs and passphrases pass through the input device and requester, and card PINs also reach the selected card provider. HIbiki clears secret buffers after use, does not cache passwords or enable Pinentry's external password cache, and keeps protocol bodies and secrets out of logs. Native agent caching still applies.
+
+| Data | Location |
+| --- | --- |
+| Configuration | `$XDG_CONFIG_HOME/hibiki` (default `~/.config/hibiki`) |
+| Identity and trust | `$XDG_DATA_HOME/hibiki` (default `~/.local/share/hibiki`) |
+| Local IPC | `$XDG_RUNTIME_DIR/hibiki`, or a private per-user temporary directory |
+
+Private files use mode `0600` and directories use `0700`. Back up identity and trust records together.
+
+The protocol identifier remains **`hibiki/1`** and the WebSocket path is **`/hibiki`**. This stdio implementation is incompatible with the previous agent proxy despite retaining that identifier. Update every device and initialize fresh identities and pairing. Old configuration and invitations are not loaded or migrated; historical files outside the workspace are left untouched.
+
+## Development and testing
+
+Tests require Python 3 and Git in addition to the build requirements.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo build --locked --workspace
+python3 tests/integration.py
+```
+
+CI runs on Ubuntu 24.04 and macOS. Integration tests use temporary identities and GnuPG homes, controlled stdio Pinentry processes, and an OpenPGP Card emulator. Real GnuPG exercises card learning, RSA signing and decryption, Git signing, password races and retries, cancellation, revocation, disconnects, and process cleanup.
+
+Emulation does not replace hardware testing. Validate PIN retries, touch requirements, card removal, reader contention, and interrupted operations on real test cards on each target platform, respecting the card's PIN retry limit.
