@@ -132,7 +132,7 @@ docker run -d --name hibiki-server --restart unless-stopped \
   ghcr.io/OWNER/REPOSITORY/hibiki-server:0.1.0
 ```
 
-Mount a customized copy of `server/container.toml` read-only at
+Mount a customized copy of `server/server.toml` read-only at
 `/etc/hibiki/server.toml` to change relay policy. Preserve the container listen
 address and persistent database path unless intentionally changing the deployment.
 CLI flags override environment variables, which override the TOML configuration:

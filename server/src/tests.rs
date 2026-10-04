@@ -7,7 +7,7 @@ fn server_defaults_and_shipped_configs_use_system_storage_and_admin_creation() {
         super::Config::default(),
         toml::from_str("").unwrap(),
         toml::from_str(include_str!("../../examples/server.toml")).unwrap(),
-        toml::from_str(include_str!("../container.toml")).unwrap(),
+        toml::from_str(include_str!("../server.toml")).unwrap(),
     ] {
         assert_eq!(
             config.database,

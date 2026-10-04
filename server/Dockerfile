@@ -17,7 +17,7 @@ RUN apt-get update \
     && useradd --uid 10001 --gid hibiki --home-dir /var/lib/hibiki --no-create-home hibiki \
     && install -d -o hibiki -g hibiki -m 0700 /var/lib/hibiki
 COPY --from=builder /src/target/release/hibiki-server /usr/local/bin/hibiki-server
-COPY server/container.toml /etc/hibiki/server.toml
+COPY server/server.toml /etc/hibiki/server.toml
 ENV HOME=/var/lib/hibiki RUST_LOG=info HIBIKI_SERVER_CONFIG=/etc/hibiki/server.toml
 USER 10001:10001
 VOLUME ["/var/lib/hibiki"]
