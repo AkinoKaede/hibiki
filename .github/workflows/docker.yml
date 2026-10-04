@@ -79,8 +79,8 @@ jobs:
       - name: Image name
         id: image
         env:
-          REPOSITORY: ${{ github.repository }}
-        run: echo "name=ghcr.io/${REPOSITORY,,}/hibiki-server" >> "$GITHUB_OUTPUT"
+          IMAGE_OWNER: ${{ github.repository_owner }}
+        run: echo "name=ghcr.io/${IMAGE_OWNER,,}/hibiki-server" >> "$GITHUB_OUTPUT"
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3

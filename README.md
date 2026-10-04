@@ -106,7 +106,7 @@ There are three GitHub Actions workflows:
 - **docker** runs only after you publish the draft Release (or promote a
   prerelease to a full release). It smoke-tests the container on native amd64 and arm64 Linux runners and publishes a
   multi-platform `linux/amd64,linux/arm64` image to
-  `ghcr.io/OWNER/REPOSITORY/hibiki-server` (owner/repository are lowercase).
+  `ghcr.io/OWNER/hibiki-server` (owner is lowercase).
   Every image receives a version tag. Full releases update both `latest` and
   `prereleased`; prereleases update only `prereleased`.
 
@@ -137,7 +137,7 @@ To run a published image:
 docker run -d --name hibiki-server --restart unless-stopped \
   -p 127.0.0.1:7749:7749 \
   -v hibiki-server-data:/var/lib/hibiki \
-  ghcr.io/OWNER/REPOSITORY/hibiki-server:0.1.0
+  ghcr.io/OWNER/hibiki-server:0.1.0
 ```
 
 Mount a customized copy of `server/server.toml` read-only at
