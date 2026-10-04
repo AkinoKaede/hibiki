@@ -8,7 +8,7 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::{
-    connect_async_with_config,
+    connect_async_tls_with_config,
     tungstenite::{Message, protocol::WebSocketConfig},
 };
 use tokio_util::sync::CancellationToken;
@@ -50,13 +50,22 @@ impl Connection {
         insecure: bool,
         identity: &Identity,
     ) -> Result<(Arc<Self>, mpsc::Receiver<Event>)> {
-        validate_url(url, insecure)?;
+        Self::open_with_tls_options(url, insecure, false, identity).await
+    }
+    pub async fn open_with_tls_options(
+        url: &str,
+        allow_plaintext: bool,
+        skip_tls_certificate_validation: bool,
+        identity: &Identity,
+    ) -> Result<(Arc<Self>, mpsc::Receiver<Event>)> {
+        validate_url(url, allow_plaintext)?;
+        let connector = skip_tls_certificate_validation.then(crate::tls::connector);
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_WIRE))
             .max_frame_size(Some(MAX_WIRE));
         let (mut ws, _) = tokio::time::timeout(
             Duration::from_secs(10),
-            connect_async_with_config(url, Some(config), false),
+            connect_async_tls_with_config(url, Some(config), false, connector),
         )
         .await??;
         let hello = tokio::time::timeout(Duration::from_secs(10), ws.next())

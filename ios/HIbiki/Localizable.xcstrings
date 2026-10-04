@@ -11,16 +11,6 @@
         }
       }
     },
-    "Allow insecure local relay (Debug)": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "允许不加密的本地中继（调试）"
-          }
-        }
-      }
-    },
     "Approve device": {
       "localizations": {
         "zh-Hans": {
@@ -1267,6 +1257,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "有线连接包括 USB 和 Lightning。"
+          }
+        }
+      }
+    },
+    "Advanced": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高级"
+          }
+        }
+      }
+    },
+    "Skip TLS Certificate Validation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跳过 TLS 证书校验"
           }
         }
       }

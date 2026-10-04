@@ -29,6 +29,7 @@ jobs:
       - run: cargo build --locked --workspace
       - run: python3 tests/integration.py
       - run: python3 tests/mobile.py
+      - run: python3 tests/mobile_tls.py
 
   ios:
     runs-on: macos-latest

@@ -19,3 +19,4 @@ libc.workspace = true
 url.workspace = true
 tracing.workspace = true
 zeroize.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

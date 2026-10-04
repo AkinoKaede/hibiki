@@ -1247,6 +1247,7 @@ dependencies = [
  "futures-util",
  "hibiki-lib",
  "libc",
+ "rustls",
  "serde",
  "tempfile",
  "tokio",

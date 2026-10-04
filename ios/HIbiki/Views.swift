@@ -49,11 +49,13 @@ struct SetupView: View {
                 Text("Enter passwords and use your security key for GPG operations on your trusted computers.").foregroundStyle(.secondary)
             }
             Section("Connect to your relay") {
-                TextField("wss://relay.example.com/hibiki", text: $model.server).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("relayURL")
+                TextField("wss://hibiki.akinokaede.com/hibiki", text: $model.server).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("relayURL")
                 TextField("Device name", text: $model.name).accessibilityIdentifier("deviceName")
-                #if DEBUG
-                Toggle("Allow insecure local relay (Debug)", isOn: $model.insecure)
-                #endif
+            }
+            Section {
+                DisclosureGroup("Advanced") {
+                    Toggle("Skip TLS Certificate Validation", isOn: $model.skipTLSCertificateValidation)
+                }
             }
             Section {
                 Button { Task { await model.setup() } } label: {

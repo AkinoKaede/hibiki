@@ -26,8 +26,8 @@ python3 ios/scripts/generate-project.py
 
 `build-rust.sh` generates UniFFI Swift bindings and `HIbikiCore.xcframework`; these
 are build artifacts and are not committed. Re-run it after Rust changes. Use
-`./ios/scripts/build-rust.sh Release` before an Archive/Release build. A Release
-Rust library rejects plaintext relays regardless of the Swift setting.
+`./ios/scripts/build-rust.sh Release` before an Archive/Release build. Both Debug and Release accept `ws://` and `wss://` relays. TLS certificate
+validation is enabled by default.
 
 Choose your own development team in Xcode to run on a physical device. Enable
 NFC Tag Reading for the matching App ID and provisioning profile. The app declares
@@ -45,8 +45,12 @@ xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
 
 ## Pairing
 
-1. Enter the same `wss://…/hibiki` relay URL used by your computers, and a device
-   name. Debug builds can explicitly opt into a local `ws://` relay.
+1. The default relay is `wss://hibiki.akinokaede.com/hibiki`. Enter a device name
+   and use the same relay as your computers. Plaintext `ws://` is accepted without
+   a switch. Under the collapsed **Advanced** section, **Skip TLS Certificate
+   Validation** disables certificate trust, hostname and validity checks for TLS
+   when explicitly enabled. It is off by default and does not affect plaintext
+   connections. The previous Debug plaintext preference does not enable it.
 2. Create a channel, or paste a `hibiki-v1:` / `hibiki-init-v1:` invitation and
    enter the separately shared PSK.
 3. For member invitations, compare **all 24 public-key words and the request ID**
@@ -130,6 +134,7 @@ cargo test --locked --workspace
 cargo build --locked --workspace
 python3 tests/integration.py
 python3 tests/mobile.py
+python3 tests/mobile_tls.py
 xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
   CODE_SIGNING_ALLOWED=NO test
@@ -139,6 +144,10 @@ xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
 with isolated software APDU responses and temporary test keys. It never opens a
 reader or the user's GnuPG home. Public keygrip vectors were independently produced
 with libgcrypt. The simulator tests exercise the Swift bridge and onboarding.
+`tests/mobile_tls.py` verifies default rejection of a self-signed, wrong-host TLS
+certificate, successful connection with explicit bypass, and plaintext connection
+without bypass, using only a local test relay.
+
 The GnuPG/APDU tests cover RSA 2048/3072/4096, Ed25519/X25519 and all three
 supported NIST curves, plus channel admission, rotation, revocation, cancellation,
 wrong-PIN handling and per-operation card confirmation. These are software tests, not

@@ -14,9 +14,9 @@ final class AppModel {
     var prompts: [PinPrompt] = []
     var usbPresent = false
     var foreground = true
-    var server = UserDefaults.standard.string(forKey: "server") ?? ""
+    var server = UserDefaults.standard.string(forKey: "server") ?? "wss://hibiki.akinokaede.com/hibiki"
     var name = UserDefaults.standard.string(forKey: "deviceName") ?? UIDevice.current.name
-    var insecure = UserDefaults.standard.bool(forKey: "insecure")
+    var skipTLSCertificateValidation = UserDefaults.standard.bool(forKey: "skipTLSCertificateValidation")
     var pinEnabled = UserDefaults.standard.bool(forKey: "pinEnabled")
     var cardEnabled = UserDefaults.standard.bool(forKey: "cardEnabled")
     var initialized = false
@@ -39,7 +39,7 @@ final class AppModel {
         }
     }
     func restore() async {
-        guard !server.isEmpty else { return }
+        guard UserDefaults.standard.string(forKey: "server") != nil, !server.isEmpty else { return }
         do {
             if let identity = try SecureStorage.identity() {
                 try configure(identity: identity)
@@ -55,26 +55,19 @@ final class AppModel {
             if identity == nil {
                 let generated = try createIdentity(name: self.name)
                 // Validate the relay before committing the first identity.
-                _ = try MobileClient(directory: SecureStorage.directory().path, server: self.server, identity: generated, allowInsecure: self.allowedInsecure)
+                _ = try MobileClient(directory: SecureStorage.directory().path, server: self.server, identity: generated, skipTlsCertificateValidation: self.skipTLSCertificateValidation)
                 try SecureStorage.saveIdentity(generated)
                 identity = generated
             }
             try self.configure(identity: identity!)
             UserDefaults.standard.set(self.server, forKey: "server")
             UserDefaults.standard.set(self.name, forKey: "deviceName")
-            UserDefaults.standard.set(self.allowedInsecure, forKey: "insecure")
+            UserDefaults.standard.set(self.skipTLSCertificateValidation, forKey: "skipTLSCertificateValidation")
             await self.activate()
         }
     }
-    private var allowedInsecure: Bool {
-        #if DEBUG
-        return insecure
-        #else
-        return false
-        #endif
-    }
     private func configure(identity: Data) throws {
-        let core = try MobileClient(directory: SecureStorage.directory().path, server: server, identity: identity, allowInsecure: allowedInsecure)
+        let core = try MobileClient(directory: SecureStorage.directory().path, server: server, identity: identity, skipTlsCertificateValidation: skipTLSCertificateValidation)
         client = core
         device = try core.device()
         card = core.selectedCard()

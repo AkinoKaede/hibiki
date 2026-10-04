@@ -14,7 +14,8 @@ async fn main() -> anyhow::Result<()> {
         args[1].clone(),
         args[2].clone(),
         create_identity("mobile-fixture".into())?,
-        true,
+        args.get(3)
+            .is_some_and(|arg| arg == "--skip-tls-certificate-validation"),
     )?;
     let event_client = client.clone();
     tokio::spawn(async move {

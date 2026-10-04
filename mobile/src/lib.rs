@@ -52,6 +52,7 @@ fn device_info(device: &hibiki_lib::identity::Device, online: bool) -> Result<De
 #[derive(uniffi::Object)]
 pub struct MobileClient {
     app: Arc<App>,
+    skip_tls_certificate_validation: bool,
     broker: Arc<Broker>,
     provider: Arc<MobileProvider>,
     slots: Arc<Semaphore>,
@@ -106,7 +107,7 @@ impl MobileClient {
             let _ = self.broker.emit(NativeEvent::Connection {
                 state: "connecting".into(),
             });
-            let opened = tokio::select! {_=stop.cancelled()=>break,result=Connection::open(&self.app.config.server,self.app.config.allow_insecure,&self.app.identity)=>result};
+            let opened = tokio::select! {_=stop.cancelled()=>break,result=Connection::open_with_tls_options(&self.app.config.server,true,self.skip_tls_certificate_validation,&self.app.identity)=>result};
             if let Ok((connection, mut events)) = opened {
                 let hub = Hub::new(
                     self.app.clone(),
@@ -167,13 +168,10 @@ impl MobileClient {
         directory: String,
         server: String,
         identity: Vec<u8>,
-        allow_insecure: bool,
+        skip_tls_certificate_validation: bool,
     ) -> MobileResult<Arc<Self>> {
         (|| {
-            if allow_insecure && !cfg!(debug_assertions) {
-                bail!("plaintext relay is only available in Debug builds");
-            }
-            hibiki_core::network::validate_url(&server, allow_insecure)?;
+            hibiki_core::network::validate_url(&server, true)?;
             let identity = Zeroizing::new(identity);
             let identity: Identity = decode(&identity)?;
             identity.validate()?;
@@ -196,7 +194,7 @@ impl MobileClient {
             }
             let config = Config {
                 server,
-                allow_insecure,
+                allow_insecure: true,
                 ..Config::default()
             };
             let app = Arc::new(App {
@@ -230,6 +228,7 @@ impl MobileClient {
             );
             Ok(Arc::new(Self {
                 app,
+                skip_tls_certificate_validation,
                 broker,
                 provider,
                 slots: Arc::new(Semaphore::new(1)),
