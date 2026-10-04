@@ -29,8 +29,11 @@ final class AppModel {
     private var lifecycleTask: Task<Void, Never>?
 
     var currentPrompt: PinPrompt? { prompts.first }
-    var selectedWiredAvailable: Bool {
-        usbPresent && registeredCards.contains { $0.card.serial == card?.serial && $0.usbEnabled }
+    var selectedUSBSupported: Bool {
+        registeredCards.contains { $0.card.serial == card?.serial && $0.usbEnabled }
+    }
+    var selectedUSBAvailable: Bool {
+        usbPresent && selectedUSBSupported
     }
     var statusText: String {
         switch connection {
@@ -100,13 +103,15 @@ final class AppModel {
         pollingTask?.cancel()
         pollingTask = Task {
             while !Task.isCancelled {
-                let available = await hardware.usbAvailable()
-                usbPresent = available
-                client.usbPresent(present: available)
+                await refreshUSBAvailability()
                 await refresh()
                 try? await Task.sleep(for: .seconds(3))
             }
         }
+    }
+    func refreshUSBAvailability() async {
+        usbPresent = await hardware.usbAvailable()
+        client?.usbPresent(present: usbPresent)
     }
     func deactivate() async {
         pollingTask?.cancel(); pollingTask = nil

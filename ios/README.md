@@ -4,7 +4,7 @@ SwiftUI client for iOS 18 and later. Bundle identifier: `com.akinokaede.hibiki`.
 
 The app uses the same Rust authentication, signed channel histories, Noise sessions,
 and Assuan protocol as the desktop client. It provides native password entry and
-OpenPGP card access through wired connections (CryptoTokenKit) or NFC (Core NFC). It does not
+OpenPGP card access through USB or Lightning connections (CryptoTokenKit) or NFC (Core NFC). It does not
 run GnuPG or a background daemon on iOS.
 
 ## Build
@@ -70,7 +70,7 @@ certificate on the requesting computer. The app does not create or import privat
 keys, change PINs, reset the key, or expose remote raw APDU commands.
 
 The registration form shows only the other transport's support switch: **NFC
-support** when reading over a wired connection, or **Wired connection support** when reading over NFC. It is
+support** when reading over a USB connection, or **USB connection support** when reading over NFC. It is
 on by default; turn it off for keys without that interface. This is a declared
 capability, not a claim that the other transport was physically tested.
 
@@ -82,13 +82,20 @@ a registration; removing the selected card does not automatically select another
 Only the selected card participates in discovery, and registrations cannot change
 during a card session. Public records and the selection are saved atomically.
 
-**Wired (USB or Lightning):** connect the key, then choose **Register wired security key**. Connect
-only one smart card recognized by the system. When wired support is enabled, the wired connection takes precedence even for a key registered over NFC;
-the card identity must still match. When already connected, private operations proceed without
+**USB (including Lightning):** connect the key, then open the **+** menu in Security Keys
+and choose **Register USB security key**. Connect
+only one smart card recognized by the system. When USB support is enabled, the USB connection takes precedence even for a key registered over NFC;
+the card identity must still match. If USB is initially absent, you can insert the
+key while confirming the request or entering its PIN. The app checks USB again
+when you submit and chooses the connection after receiving the PIN. For keys
+supporting both interfaces, USB takes precedence if now connected; otherwise,
+tap the key using NFC. This also applies to keys originally registered over USB.
+The app never switches interfaces after a card operation fails.
+When already connected, private operations proceed without
 an extra availability prompt. Otherwise, the app asks you to insert it and continue
 or cancel. The actual card and key are checked before sending the PIN.
 
-**NFC:** choose **Register NFC security key** and tap once to read public information;
+**NFC:** open the **+** menu and choose **Register NFC security key** and tap once to read public information;
 registration does not require a PIN or change the key. Registered public data can
 answer discovery while the card service is enabled. Every private operation asks
 whether you want to use the key; there is no persistent readiness switch. Canceling
@@ -111,6 +118,9 @@ Supported key families: RSA 2048/3072/4096, Ed25519, X25519, NIST P-256/P-384/P-
 The key's firmware and configured OpenPGP algorithms determine what it can use.
 Password input still follows the desktop agent: it may be supplied by the iPhone,
 the requesting computer, or another enabled participant.
+The iPhone form collects the password once, with an X to cancel and an in-form
+Continue button to submit. Any confirmation required when setting a new passphrase
+remains the requesting agent's responsibility; HIbiki does not report `PIN_REPEATED`.
 
 ## Lifecycle and storage
 
@@ -153,15 +163,15 @@ without bypass, using only a local test relay.
 The GnuPG/APDU tests cover RSA 2048/3072/4096, Ed25519/X25519 and all three
 supported NIST curves, plus channel admission, rotation, revocation, cancellation,
 wrong-PIN handling and per-operation card confirmation. These are software tests, not
-physical wired or NFC acceptance tests. Unsigned simulator builds can show a
+physical USB or NFC acceptance tests. Unsigned simulator builds can show a
 Keychain entitlement error during identity creation; use a signed build for
 end-to-end app pairing and Keychain validation.
 
 Hardware release checklist (must run on an actual iPhone and YubiKey):
 
-- NFC entitlement and permission handling; wired detection and reader contention.
+- NFC entitlement and permission handling; USB detection and reader contention.
 - Register, learn public keys, sign/verify, encrypt/decrypt using the installed key
-  algorithms over both wired and NFC.
+  algorithms over both USB and NFC.
 - PIN from the phone, computer, and third device; cancellation and competing inputs.
 - Touch-required operations, removal, changing the presented key, NFC timeout,
   locked phone, backgrounding, relay disconnection, revocation and channel deletion.

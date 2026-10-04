@@ -96,7 +96,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "频道 ID"
+            "value": "频道ID"
           }
         }
       }
@@ -136,7 +136,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请在审批设备上核对全部 24 个校验词及请求 ID。"
+            "value": "请在审批设备上核对全部24个校验词及请求ID。"
           }
         }
       }
@@ -156,7 +156,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请只连接你要使用的 安全密钥。"
+            "value": "请只连接你要使用的安全密钥。"
           }
         }
       }
@@ -166,7 +166,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "连接到中继"
+            "value": "连接到服务器"
           }
         }
       }
@@ -176,7 +176,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请连接 安全密钥"
+            "value": "请连接安全密钥"
           }
         }
       }
@@ -186,7 +186,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "通过 USB 或 Lightning 连接 OpenPGP 安全密钥，或使用 NFC 轻触读卡。"
+            "value": "通过USB或Lightning连接OpenPGP安全密钥，或使用NFC轻触读卡。"
           }
         }
       }
@@ -276,7 +276,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "输入口令，或使用 安全密钥 为受信任电脑上的 GPG 操作提供服务。"
+            "value": "输入口令，或使用安全密钥为受信任电脑上的GPG操作提供服务。"
           }
         }
       }
@@ -306,7 +306,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "HIbiki 仅在应用打开时连接。各项服务默认关闭，由你主动启用。"
+            "value": "HIbiki仅在应用打开时连接。各项服务默认关闭，由你主动启用。"
           }
         }
       }
@@ -316,7 +316,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "HIbiki 请求"
+            "value": "HIbiki请求"
           }
         }
       }
@@ -326,7 +326,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请将 安全密钥 靠近 iPhone 顶部，直到操作完成。"
+            "value": "请将安全密钥靠近iPhone顶部，直到操作完成。"
           }
         }
       }
@@ -336,7 +336,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "我已核对全部 24 个校验词及请求 ID"
+            "value": "我已核对全部24个校验词及请求ID"
           }
         }
       }
@@ -406,7 +406,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "保持 HIbiki 打开以接收请求。返回应用后会重新连接，已中断的操作不会自动重试。"
+            "value": "保持HIbiki打开以接收请求。返回应用后会重新连接，已中断的操作不会自动重试。"
           }
         }
       }
@@ -456,7 +456,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "NFC：轻触一次以登记公开信息。之后签名或解密时，先输入 PIN，再轻触同一把 安全密钥。"
+            "value": "NFC：轻触一次以注册公开信息。之后签名或解密时，先输入PIN，再轻触同一把安全密钥。"
           }
         }
       }
@@ -471,12 +471,12 @@
         }
       }
     },
-    "No wired card": {
+    "No USB card": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "未连接有线卡"
+            "value": "未连接USB安全密钥"
           }
         }
       }
@@ -536,7 +536,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请分别从受信任成员获取邀请和预共享密钥。邀请中的中继地址须与当前配置一致。"
+            "value": "请分别从受信任成员获取邀请和预共享密钥。邀请中的服务器地址须与当前配置一致。"
           }
         }
       }
@@ -566,7 +566,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "OpenPGP 卡"
+            "value": "OpenPGP卡"
           }
         }
       }
@@ -576,7 +576,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "OpenPGP 密钥"
+            "value": "OpenPGP密钥"
           }
         }
       }
@@ -586,7 +586,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "PIN 或口令"
+            "value": "PIN或口令"
           }
         }
       }
@@ -596,7 +596,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "不保存 PIN。私钥留在卡中或发起请求的电脑上。"
+            "value": "不保存PIN。私钥留在卡中或发起请求的电脑上。"
           }
         }
       }
@@ -646,7 +646,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请只靠近一把 OpenPGP 安全密钥。"
+            "value": "请只靠近一把OpenPGP安全密钥。"
           }
         }
       }
@@ -656,7 +656,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "私钥始终留在 安全密钥 中。"
+            "value": "私钥始终留在安全密钥中。"
           }
         }
       }
@@ -696,17 +696,17 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "登记 NFC 安全密钥"
+            "value": "注册NFC安全密钥"
           }
         }
       }
     },
-    "Register wired security key": {
+    "Register USB security key": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "登记有线安全密钥"
+            "value": "注册USB安全密钥"
           }
         }
       }
@@ -716,7 +716,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "登记你的 安全密钥"
+            "value": "注册你的安全密钥"
           }
         }
       }
@@ -726,7 +726,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请先在 安全密钥 页面登记你的卡。"
+            "value": "请先在安全密钥页面注册你的卡。"
           }
         }
       }
@@ -736,7 +736,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "中继"
+            "value": "服务器"
           }
         }
       }
@@ -756,7 +756,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请求 ID"
+            "value": "请求ID"
           }
         }
       }
@@ -886,7 +886,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请妥善保存预共享密钥，并与邀请分开分享。HIbiki 不会保存此密钥。"
+            "value": "请妥善保存预共享密钥，并与邀请分开分享。HIbiki不会保存此密钥。"
           }
         }
       }
@@ -931,12 +931,12 @@
         }
       }
     },
-    "Wired connection detected": {
+    "USB connection detected": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已检测到有线连接"
+            "value": "已检测到USB连接"
           }
         }
       }
@@ -1026,17 +1026,17 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "使用你的安全密钥完成本次操作？继续后先输入 PIN，再轻触安全密钥。"
+            "value": "使用你的安全密钥完成本次操作？继续后先输入PIN，再轻触安全密钥。"
           }
         }
       }
     },
-    "Wired reader reports a card": {
+    "USB reader reports a card": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有线读卡器检测到卡"
+            "value": "USB读卡器检测到卡"
           }
         }
       }
@@ -1046,7 +1046,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已登记的安全密钥"
+            "value": "已注册的安全密钥"
           }
         }
       }
@@ -1056,7 +1056,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "尚未登记安全密钥"
+            "value": "尚未注册安全密钥"
           }
         }
       }
@@ -1066,17 +1066,17 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "登记后保存公开信息，私钥始终留在安全密钥中。"
+            "value": "注册后保存公开信息，私钥始终留在安全密钥中。"
           }
         }
       }
     },
-    "One entry per security key. Wired and NFC connections share the same public information. Only the selected key provides card services.": {
+    "One entry per security key. USB and NFC connections share the same public information. Only the selected key provides card services.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "每张卡只显示一条记录，有线连接 和 NFC 共用公开信息。只有当前选中的卡提供卡服务。"
+            "value": "每张卡只显示一条记录，USB和NFC共用公开信息。只有当前选中的卡提供卡服务。"
           }
         }
       }
@@ -1116,17 +1116,17 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "NFC 支持"
+            "value": "NFC支持"
           }
         }
       }
     },
-    "Wired connection support": {
+    "USB connection support": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有线连接支持"
+            "value": "USB支持"
           }
         }
       }
@@ -1136,7 +1136,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "如果卡不支持另一种连接方式，请关闭此开关。登记只读取当前连接，实际使用时会再次核对卡身份。"
+            "value": "如果卡不支持另一种连接方式，请关闭此开关。注册只读取当前连接，实际使用时会再次核对卡身份。"
           }
         }
       }
@@ -1146,7 +1146,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "读取并登记"
+            "value": "读取并注册"
           }
         }
       }
@@ -1156,7 +1156,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请插入安全密钥以读取公开信息，无需 PIN。"
+            "value": "请插入安全密钥以读取公开信息，无需PIN。"
           }
         }
       }
@@ -1166,7 +1166,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请轻触安全密钥以读取公开信息，无需 PIN。"
+            "value": "请轻触安全密钥以读取公开信息，无需PIN。"
           }
         }
       }
@@ -1176,7 +1176,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "登记安全密钥"
+            "value": "注册安全密钥"
           }
         }
       }
@@ -1196,7 +1196,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "登记读取方式"
+            "value": "注册读取方式"
           }
         }
       }
@@ -1216,7 +1216,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "移除登记"
+            "value": "移除注册"
           }
         }
       }
@@ -1226,7 +1226,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "移除登记？"
+            "value": "移除注册？"
           }
         }
       }
@@ -1241,22 +1241,22 @@
         }
       }
     },
-    "Wired": {
+    "USB": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有线连接"
+            "value": "USB"
           }
         }
       }
     },
-    "Wired connections include USB and Lightning.": {
+    "USB and Lightning connectors are supported.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有线连接包括 USB 和 Lightning。"
+            "value": "支持USB和Lightning接口。"
           }
         }
       }
@@ -1276,7 +1276,57 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "跳过 TLS 证书校验"
+            "value": "跳过TLS证书校验"
+          }
+        }
+      }
+    },
+    "Invite device": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "邀请"
+          }
+        }
+      }
+    },
+    "Channel actions": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "频道操作"
+          }
+        }
+      }
+    },
+    "Enter the PIN, then tap your security key using NFC.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入PIN后，通过NFC轻触安全密钥。"
+          }
+        }
+      }
+    },
+    "Connect using USB, or enter the PIN and use NFC.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可现场连接USB，或输入PIN后使用NFC。"
+          }
+        }
+      }
+    },
+    "USB connection detected. Continue to enter the PIN.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已检测到USB连接，继续输入PIN。"
           }
         }
       }

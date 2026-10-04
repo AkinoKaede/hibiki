@@ -96,8 +96,10 @@ impl Pinentry {
                     description: get("SETDESC"),
                     label: get("SETPROMPT"),
                     error: get("SETERROR"),
-                    repeat: get("SETREPEAT"),
-                    repeat_error: get("SETREPEATERROR"),
+                    // Collect one value. The requesting agent owns any new-passphrase
+                    // confirmation; do not claim PIN_REPEATED without comparing inputs.
+                    repeat: String::new(),
+                    repeat_error: String::new(),
                     ok: get("SETOK"),
                     cancel: get("SETCANCEL"),
                     not_ok: get("SETNOTOK"),
@@ -120,9 +122,6 @@ impl Pinentry {
                         } else {
                             vec![]
                         };
-                        if cmd == "GETPIN" && !get("SETREPEAT").is_empty() {
-                            lines.push("S PIN_REPEATED".into());
-                        }
                         lines.push("OK".into());
                         AssuanResult { lines }
                     }
@@ -203,6 +202,7 @@ mod tests {
             "SETDESC first%0Asecond%25",
             "OPTION default-ok=Allow",
             "SETREPEAT Repeat",
+            "SETREPEATERROR Mismatch",
         ] {
             ep.command(cmd.into()).await.unwrap();
             assert_eq!(&*ep.next().await.unwrap(), b"OK");
@@ -213,6 +213,8 @@ mod tests {
         };
         assert_eq!(prompt.description, "first\nsecond%");
         assert_eq!(prompt.ok, "Allow");
+        assert!(prompt.repeat.is_empty());
+        assert!(prompt.repeat_error.is_empty());
         assert_eq!(prompt.device_id, client.app.identity.device.id());
         let secret = b"p%\na\rss";
         client
@@ -224,7 +226,6 @@ mod tests {
             panic!()
         };
         assert_eq!(&*assuan::unescape(raw).unwrap(), secret);
-        assert_eq!(&*ep.next().await.unwrap(), b"S PIN_REPEATED");
         assert_eq!(&*ep.next().await.unwrap(), b"OK");
         assert!(
             client

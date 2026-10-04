@@ -116,13 +116,9 @@ impl Provider for MobileProvider {
                                     let (cmd, args) = assuan::command(&line)?;
                                     if matches!(cmd, "PKSIGN" | "PKDECRYPT") {
                                         let key = card.private_key(cmd, args)?;
-                                        // Choose once for this operation; never switch transports after failure.
                                         let mut info = card.info.clone();
                                         let connected_usb = usb_enabled.load(Ordering::Acquire)
                                             && usb_present.load(Ordering::Acquire);
-                                        if connected_usb {
-                                            info.transport = CardTransport::Usb;
-                                        }
                                         if !connected_usb {
                                             let state = app.proof(&context.channel)?.verify()?;
                                             let device = state.member(&context.peer)?;
@@ -173,6 +169,13 @@ impl Provider for MobileProvider {
                                         )
                                         .await?;
                                         let pin = read_pin(&mut inputs, request).await?;
+                                        // USB may have been inserted while confirming or entering the PIN.
+                                        // Choose before opening the card; never switch after a failure.
+                                        if usb_enabled.load(Ordering::Acquire)
+                                            && usb_present.load(Ordering::Acquire)
+                                        {
+                                            info.transport = CardTransport::Usb;
+                                        }
                                         let broker = broker.clone();
                                         let stop = command_stop.clone();
                                         let signing = cmd == "PKSIGN";

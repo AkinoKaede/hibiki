@@ -82,7 +82,7 @@ struct StatusView: View {
                 Toggle("OpenPGP card", isOn: $model.cardEnabled).onChange(of: model.cardEnabled) { _, _ in model.updateServices() }
                 if model.cardEnabled, model.card == nil { Text("Register your security key in the Security Keys tab.").foregroundStyle(.secondary) }
                 if let card = model.card, model.cardEnabled {
-                    Label(model.selectedWiredAvailable ? "Wired connection detected" : "Confirmation required for each operation", systemImage: card.transport == .nfc ? "wave.3.right" : "cable.connector")
+                    Label(model.selectedUSBAvailable ? "USB connection detected" : (card.transport == .nfc ? (model.selectedUSBSupported ? "Connect using USB, or enter the PIN and use NFC." : "Enter the PIN, then tap your security key using NFC.") : "Confirmation required for each operation"), systemImage: model.selectedUSBAvailable || card.transport == .usb ? "cable.connector" : "wave.3.right")
                 }
             }
             if let pairing = model.pairing {
@@ -166,16 +166,28 @@ struct CreateChannelView: View {
                     await model.refresh()
                 } } }.disabled(name.isEmpty || model.busy || model.connection != "online")
             }
-        }.navigationTitle("Create channel").onDisappear { result = nil }
+        }
+        .navigationTitle("Create channel")
+        .toolbar {
+            if let result {
+                ToolbarItem(placement: .topBarTrailing) {
+                    ShareLink(item: result.invite) { Label("Share invitation", systemImage: "square.and.arrow.up") }
+                        .labelStyle(.iconOnly)
+                        .accessibilityIdentifier("shareInvitation")
+                }
+            }
+        }
+        .onDisappear { result = nil }
     }
 }
 struct InvitationSections: View {
     let invite: String
     let psk: String
     var body: some View {
-        Section("Invitation") {
-            Text(verbatim: invite).font(.system(.caption, design: .monospaced)).lineLimit(5).textSelection(.enabled)
-            ShareLink("Share invitation", item: invite)
+        if !invite.isEmpty {
+            Section("Invitation") {
+                Text(verbatim: invite).font(.system(.caption, design: .monospaced)).lineLimit(5).textSelection(.enabled)
+            }
         }
         if !psk.isEmpty {
             Section {
@@ -184,6 +196,14 @@ struct InvitationSections: View {
             } header: { Text("Save your PSK") } footer: { Text("Store this PSK safely. Share it separately from the invitation; HIbiki does not save it.") }
         }
     }
+}
+
+struct InvitationShareSheet: UIViewControllerRepresentable {
+    let invitation: String
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [invitation], applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 
 struct ChannelView: View {
@@ -216,16 +236,41 @@ struct ChannelView: View {
                         NavigationLink { ApprovalView(request: request, model: model) } label: { Text(verbatim: request.device.name) }
                     }
                 }
-                Section {
-                    Button("Generate invitation") { Task { await model.perform { invitation = try await model.client?.invitation(channel: channelID) ?? "" } } }
-                    Button("Rotate PSK") { rotating = true }
-                    Button("Leave channel", role: .destructive) { leaving = true }
-                }.disabled(model.connection != "online" || model.busy)
             }
-            if !invitation.isEmpty || !psk.isEmpty { InvitationSections(invite: invitation, psk: psk) }
+            if !psk.isEmpty { InvitationSections(invite: "", psk: psk) }
             Section("Channel ID") { Text(verbatim: channelID).font(.caption.monospaced()).textSelection(.enabled) }
         }
         .navigationTitle(channel?.name ?? String(localized: "Channel"))
+        .toolbar {
+            if channel?.active == true {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            Task { await model.perform { invitation = try await model.client?.invitation(channel: channelID) ?? "" } }
+                        } label: { Label("Invite device", systemImage: "square.and.arrow.up") }
+                        .accessibilityIdentifier("inviteDevice")
+                        Button { rotating = true } label: { Label("Rotate PSK", systemImage: "arrow.triangle.2.circlepath") }
+                        Divider()
+                        Button(role: .destructive) { leaving = true } label: {
+                            Label {
+                                Text("Leave channel")
+                            } icon: {
+                                if let icon = UIImage(systemName: "rectangle.portrait.and.arrow.right") {
+                                    Image(uiImage: icon.withTintColor(.systemRed, renderingMode: .alwaysOriginal))
+                                        .renderingMode(.original)
+                                }
+                            }
+                        }
+                    } label: { Label("Channel actions", systemImage: "ellipsis") }
+                    .disabled(model.connection != "online" || model.busy)
+                    .accessibilityIdentifier("channelActions")
+                }
+            }
+        }
+        .sheet(isPresented: Binding(get: { !invitation.isEmpty }, set: { if !$0 { invitation = "" } })) {
+            InvitationShareSheet(invitation: invitation)
+                .presentationDetents([.medium, .large])
+        }
         .task { await load() }.refreshable { await load() }
         .confirmationDialog("Revoke this device?", isPresented: Binding(get: { revoke != nil }, set: { if !$0 { revoke = nil } }), titleVisibility: .visible) {
             if let device = revoke { Button("Revoke", role: .destructive) { Task { await model.perform { try await model.client?.revoke(channel: channelID, device: device.id); await load() } } } }
@@ -267,18 +312,19 @@ struct ApprovalView: View {
 
 extension RegisteredCard: Identifiable {
     public var id: String { card.serial }
-    var connections: String { [usbEnabled ? String(localized: "Wired") : nil, nfcEnabled ? "NFC" : nil].compactMap { $0 }.joined(separator: " · ") }
+    var connections: String { [usbEnabled ? String(localized: "USB") : nil, nfcEnabled ? "NFC" : nil].compactMap { $0 }.joined(separator: " · ") }
 }
 
 struct CardView: View {
     @Bindable var model: AppModel
+    @State private var registrationTransport: CardTransport?
     var body: some View {
         List {
             Section {
-                Label(model.usbPresent ? "Wired reader reports a card" : "No wired card", systemImage: "cable.connector")
-                Text("Wired connections include USB and Lightning.").font(.caption).foregroundStyle(.secondary)
+                Label(model.usbPresent ? "USB reader reports a card" : "No USB card", systemImage: "cable.connector")
+                Text("USB and Lightning connectors are supported.").font(.caption).foregroundStyle(.secondary)
             }
-            Section("Registered security keys") {
+            Section {
                 if model.registeredCards.isEmpty {
                     ContentUnavailableView("No security keys registered", systemImage: "key.horizontal", description: Text("Register once to save public information. Private keys stay on your security key."))
                 }
@@ -296,14 +342,34 @@ struct CardView: View {
                         }.padding(.vertical, 4)
                     }
                 }
-            }
-            Section {
-                NavigationLink("Register wired security key") { RegisterCardView(transport: .usb, model: model) }.disabled(model.busy)
-                NavigationLink("Register NFC security key") { RegisterCardView(transport: .nfc, model: model) }.disabled(model.busy)
+            } header: {
+                Text("Registered security keys")
             } footer: {
-                Text("One entry per security key. Wired and NFC connections share the same public information. Only the selected key provides card services.")
+                Text("One entry per security key. USB and NFC connections share the same public information. Only the selected key provides card services.")
             }
-        }.navigationTitle("Security Keys")
+        }
+        .navigationTitle("Security Keys")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button { registrationTransport = .usb } label: {
+                        Label("Register USB security key", systemImage: "cable.connector")
+                    }
+                    .accessibilityIdentifier("registerUSB")
+                    Button { registrationTransport = .nfc } label: {
+                        Label("Register NFC security key", systemImage: "wave.3.right")
+                    }
+                    .accessibilityIdentifier("registerNFC")
+                } label: {
+                    Label("Register security key", systemImage: "plus").labelStyle(.iconOnly)
+                }
+                .disabled(model.busy)
+                .accessibilityIdentifier("registerSecurityKey")
+            }
+        }
+        .navigationDestination(item: $registrationTransport) { transport in
+            RegisterCardView(transport: transport, model: model)
+        }
     }
 }
 
@@ -317,8 +383,8 @@ struct RegisterCardView: View {
         Form {
             Section {
                 TextField("Name", text: $name)
-                LabeledContent("Read using", value: transport == .usb ? String(localized: "Wired") : "NFC")
-                Toggle(transport == .usb ? "NFC support" : "Wired connection support", isOn: $otherSupported)
+                LabeledContent("Read using", value: transport == .usb ? String(localized: "USB") : "NFC")
+                Toggle(transport == .usb ? "NFC support" : "USB connection support", isOn: $otherSupported)
             } header: { Text("Security key") } footer: {
                 Text("Turn this off if your key does not support the other connection. Registration reads only the current connection; identity is checked again during use.")
             }
@@ -348,7 +414,7 @@ struct RegisteredCardView: View {
                     LabeledContent("Name", value: entry.name)
                     LabeledContent("Serial number") { Text(verbatim: serial).font(.caption.monospaced()).textSelection(.enabled) }
                     LabeledContent("Supported connections", value: entry.connections)
-                    LabeledContent("Registration read using", value: entry.card.transport == .usb ? String(localized: "Wired") : "NFC")
+                    LabeledContent("Registration read using", value: entry.card.transport == .usb ? String(localized: "USB") : "NFC")
                     if model.card?.serial == serial {
                         Label("Selected card", systemImage: "checkmark.circle.fill")
                     } else {
@@ -404,8 +470,7 @@ struct PinView: View {
     let prompt: PinPrompt
     @Bindable var model: AppModel
     @State private var pin = ""
-    @State private var repeated = ""
-    @State private var mismatch = false
+    @State private var submitting = false
     @FocusState private var focused: Bool
     private var cardRequest: Bool { switch prompt.kind { case .cardUsb, .cardNfc: true; default: false } }
     private var asksPin: Bool { if case .pin = prompt.kind { true } else { false } }
@@ -419,31 +484,49 @@ struct PinView: View {
                 }
                 Section {
                     if cardRequest {
-                        Text(prompt.kind == .cardUsb ? "Insert your security key, then continue." : "Use your security key for this operation? Enter the PIN next, then tap the key.")
+                        if prompt.kind == .cardUsb {
+                            Text("Insert your security key, then continue.")
+                        } else if model.selectedUSBSupported {
+                            Text(model.selectedUSBAvailable ? "USB connection detected. Continue to enter the PIN." : "Connect using USB, or enter the PIN and use NFC.")
+                        } else {
+                            Text("Use your security key for this operation? Enter the PIN next, then tap the key.")
+                        }
                         Text(verbatim: prompt.description).font(.caption.monospaced())
                     } else if !prompt.description.isEmpty { Text(verbatim: prompt.description) }
                     if !prompt.error.isEmpty { Text(verbatim: prompt.error).foregroundStyle(.red) }
                     if asksPin {
                         SecureField(prompt.label.isEmpty ? String(localized: "PIN or passphrase") : prompt.label, text: $pin).textContentType(nil).autocorrectionDisabled().textInputAutocapitalization(.never).focused($focused).accessibilityIdentifier("pinInput")
-                        if !prompt.repeat.isEmpty {
-                            SecureField(prompt.repeat, text: $repeated).textContentType(nil).autocorrectionDisabled().textInputAutocapitalization(.never)
-                            if mismatch { Text(verbatim: prompt.repeatError.isEmpty ? String(localized: "The entries do not match.") : prompt.repeatError).foregroundStyle(.red) }
-                        }
                     }
-                    Button(prompt.ok.isEmpty ? String(localized: "Continue") : prompt.ok) { submit() }.accessibilityIdentifier("submitPIN")
+                    Button(prompt.ok.isEmpty ? String(localized: "Continue") : prompt.ok) { submit() }
+                        .disabled(submitting)
+                        .accessibilityIdentifier("submitPIN")
                     if !prompt.notOk.isEmpty, !asksPin { Button(prompt.notOk) { model.answer(prompt, accepted: false) } }
                 }
             }
             .navigationTitle(prompt.title.isEmpty ? String(localized: "HIbiki request") : prompt.title)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button(prompt.cancel.isEmpty ? String(localized: "Cancel") : prompt.cancel) { pin = ""; repeated = ""; model.answer(prompt, accepted: false) } } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button { pin = ""; model.answer(prompt, accepted: false) } label: {
+                        Image(systemName: "xmark")
+                    }
+                    .accessibilityLabel(prompt.cancel.isEmpty ? String(localized: "Cancel") : prompt.cancel)
+                    .accessibilityIdentifier("cancelPIN")
+                }
+            }
             .onAppear { focused = asksPin }
-            .onDisappear { pin = ""; repeated = "" }
+            .onDisappear { pin = "" }
             .privacySensitive()
         }
     }
     private func submit() {
-        guard !asksPin || prompt.repeat.isEmpty || pin == repeated else { mismatch = true; return }
-        model.answer(prompt, text: pin, accepted: true)
-        pin = ""; repeated = ""
+        guard !submitting else { return }
+        submitting = true
+        let value = pin
+        pin = ""
+        Task {
+            if cardRequest || asksPin { await model.refreshUSBAvailability() }
+            model.answer(prompt, text: value, accepted: true)
+            submitting = false
+        }
     }
 }

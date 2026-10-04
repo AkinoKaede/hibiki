@@ -27,8 +27,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 NativeEvent::Cancelled { token } => json!({"kind":"cancelled","token":token}),
                 NativeEvent::CardOpen {
-                    token, connection, ..
-                } => json!({"kind":"open","token":token,"connection":connection}),
+                    token,
+                    connection,
+                    transport,
+                } => {
+                    json!({"kind":"open","token":token,"connection":connection,"transport":format!("{transport:?}")})
+                }
                 NativeEvent::CardTransmit { token, command, .. } => {
                     json!({"kind":"apdu","token":token,"command":hex::encode(command)})
                 }
@@ -118,6 +122,11 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
                 v["card"].as_bool().unwrap_or(false),
             );
             emit(json!({"kind":"services"}));
+        }
+        "usb_presence" => {
+            let present = v["present"].as_bool().unwrap_or(false);
+            client.usb_present(present);
+            emit(json!({"kind":"usb-presence","present":present}));
         }
         "stop" => {
             client.stop().await;

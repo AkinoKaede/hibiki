@@ -127,6 +127,8 @@ class Mobile:
         self.lock = threading.Lock()
         self.prompts = set()
         self.card_confirmations = 0
+        self.operation_events = []  # Event kind / transport only; never PINs or payloads.
+        self.before_pin_reply = None
         self.decline_card = False
         self.canceled = set()
         self.failure = None
@@ -146,16 +148,26 @@ class Mobile:
                 event = json.loads(line)
                 kind = event['kind']
                 if kind in ('open', 'apdu'):
+                    if kind == 'open':
+                        self.operation_events.append(('open', event['transport']))
                     response = self.card.apdu(bytes.fromhex(event['command'])) if kind == 'apdu' else b''
                     self.send(action='reply', token=event['token'], data=response.hex())
                 elif kind == 'prompt':
+                    self.operation_events.append(('prompt', event.get('prompt_kind')))
                     token = event['token']
                     if event.get('prompt_kind') in ('CardUsb', 'CardNfc'):
                         self.card_confirmations += 1
                         self.send(action='reply', token=token, data='', accepted=not self.decline_card)
                         continue
                     self.prompts.add(token)
-                    def reply(token=token):
+                    def reply(token=token, prompt_kind=event.get('prompt_kind')):
+                        if prompt_kind == 'Pin' and self.before_pin_reply:
+                            try:
+                                self.before_pin_reply()
+                            except Exception as error:
+                                self.failure = error
+                                self.send(action='reply', token=token, data='', accepted=False)
+                                return
                         self.prompts.discard(token)
                         self.send(action='reply', token=token, data=self.password.encode().hex(), accepted=not self.cancel)
                     threading.Timer(self.delay, reply).start()
@@ -255,7 +267,7 @@ def main():
                 assert result[-1].startswith(b'ERR 87'), result
             print('PASS: per-operation card consent, prohibited commands, incorrect PIN mapping without retry', flush=True)
 
-            # A connected USB card bypasses consent, but absent USB requires consent.
+            # Connected USB bypasses consent; a disconnected USB-only key asks for insertion.
             a.kill_agent()
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
@@ -264,6 +276,57 @@ def main():
             previous = mobile.card_confirmations
             a.gpg('--local-user', fpr, '--detach-sign', data=b'USB auto response')
             assert mobile.card_confirmations == previous
+
+            # A USB-registered dual-interface key uses NFC when USB is absent.
+            # Both signing and decryption must collect the PIN before opening NFC.
+            a.kill_agent()
+            mobile.send(action='stop'); mobile.wait('stopped')
+            mobile.send(action='start'); mobile.wait('started')
+            mobile.send(action='register', transport='usb', present=False, nfc_supported=True); mobile.wait('registered')
+            mobile.decline_card = False
+            for operation in ('sign', 'decrypt'):
+                a.kill_agent()
+                first_event = len(mobile.operation_events)
+                if operation == 'sign':
+                    fallback = a.gpg('--local-user', fpr, '--detach-sign', data=b'mobile signing').stdout
+                    signature.write_bytes(fallback)
+                    a.gpg('--verify', signature, message)
+                else:
+                    assert a.gpg('--decrypt', data=encrypted).stdout == b'mobile decryption'
+                events = mobile.operation_events[first_event:]
+                assert ('prompt', 'CardNfc') in events, events
+                assert ('prompt', 'CardUsb') not in events, events
+                assert ('open', 'Nfc') in events and ('open', 'Usb') not in events, events
+                assert events.index(('prompt', 'CardNfc')) < events.index(('prompt', 'Pin')) < events.index(('open', 'Nfc')), events
+            # Insert USB during the PIN prompt after starting with no USB connection.
+            # A dual-interface card must use the newly attached USB connection.
+            def insert_usb_before_pin_reply():
+                mobile.send(action='usb_presence', present=True)
+                assert mobile.wait('usb-presence')['present']
+            for operation in ('sign', 'decrypt'):
+                a.kill_agent()
+                mobile.send(action='usb_presence', present=False)
+                assert not mobile.wait('usb-presence')['present']
+                first_event = len(mobile.operation_events)
+                mobile.before_pin_reply = insert_usb_before_pin_reply
+                try:
+                    if operation == 'sign':
+                        attached = a.gpg('--local-user', fpr, '--detach-sign', data=b'mobile signing').stdout
+                        signature.write_bytes(attached)
+                        a.gpg('--verify', signature, message)
+                    else:
+                        assert a.gpg('--decrypt', data=encrypted).stdout == b'mobile decryption'
+                finally:
+                    mobile.before_pin_reply = None
+                events = mobile.operation_events[first_event:]
+                assert ('prompt', 'CardNfc') in events, events
+                assert ('open', 'Usb') in events and ('open', 'Nfc') not in events, events
+                assert events.index(('prompt', 'CardNfc')) < events.index(('prompt', 'Pin')) < events.index(('open', 'Usb')), events
+            print('PASS: USB inserted during PIN entry is used for dual-interface signing and decryption', flush=True)
+            previous = mobile.card_confirmations
+            mobile.decline_card = True
+            print('PASS: USB-registered dual-interface key falls back to NFC; PIN precedes NFC open for signing and decryption', flush=True)
+
             a.kill_agent()
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
@@ -279,7 +342,7 @@ def main():
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
             mobile.send(action='register'); mobile.wait('registered')
-            print('PASS: connected USB auto response; disconnected USB asks before PIN/APDU', flush=True)
+            print('PASS: connected USB auto response; disconnected USB-only key asks before PIN/APDU', flush=True)
 
             # A different card at the second tap is rejected before VERIFY or signing.
             mobile.card.info = dict(card, serial='D2760001240103040005000099990000')
