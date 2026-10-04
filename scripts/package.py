@@ -53,8 +53,8 @@ def main():
             shutil.copy2(ROOT / "examples" / config, stage / "examples" / config)
             if name == "hibiki" and "linux" in target:
                 shutil.copytree(ROOT / "packaging" / "systemd", stage / "systemd")
-            archive = output / f"{basename}.tar.gz"
-            with tarfile.open(archive, "w:gz") as bundle:
+            archive = output / f"{basename}.tar.xz"
+            with tarfile.open(archive, "w:xz") as bundle:
                 bundle.add(stage, arcname=basename)
         with archive.open("rb") as source:
             digest = hashlib.file_digest(source, "sha256").hexdigest()

@@ -38,3 +38,9 @@ rpassword = "7"
 url = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Integration tests exercise many signed membership and Noise messages per PIN
+# inquiry. Optimize dependencies so debug crypto does not consume operation
+# deadlines on slower CI CPUs; workspace code retains normal debug settings.
+[profile.dev.package."*"]
+opt-level = 2

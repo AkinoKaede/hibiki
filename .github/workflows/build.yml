@@ -1,7 +1,19 @@
 name: build
 on:
   push:
+    paths: &build-paths
+      - '**/*.rs'
+      - '**/Cargo.toml'
+      - Cargo.lock
+      - .cargo/**
+      - scripts/package.py
+      - packaging/**
+      - examples/**
+      - tests/server.py
+      - README.md
+      - .github/workflows/build.yml
   pull_request:
+    paths: *build-paths
   workflow_dispatch:
     inputs:
       tag:
@@ -17,7 +29,7 @@ permissions:
   contents: read
 concurrency:
   group: build-${{ inputs.tag || github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 jobs:
   validate:
     runs-on: ubuntu-24.04
@@ -87,8 +99,8 @@ jobs:
         shell: bash
         run: |
           mkdir unpacked
-          for archive in dist/*.tar.gz; do
-            tar -xzf "$archive" -C unpacked
+          for archive in dist/*.tar.xz; do
+            tar -xJf "$archive" -C unpacked
           done
           for binary in unpacked/*/bin/*; do
             "$binary" --version
@@ -141,4 +153,4 @@ jobs:
           if [[ "$PRERELEASED" == 'true' ]]; then
             options+=(--prerelease)
           fi
-          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS "${options[@]}"
+          gh release create "$RELEASE_TAG" dist/*.tar.xz dist/SHA256SUMS "${options[@]}"

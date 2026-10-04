@@ -40,8 +40,8 @@ export PATH="$PWD/target/release:$PATH"
 
 ## Packages and releases
 
-GitHub Actions builds separate `hibiki-VERSION-TARGET.tar.gz` and
-`hibiki-server-VERSION-TARGET.tar.gz` archives for Linux (x86_64/ARM64) and
+GitHub Actions builds separate `hibiki-VERSION-TARGET.tar.xz` and
+`hibiki-server-VERSION-TARGET.tar.xz` archives for Linux (x86_64/ARM64) and
 macOS (Intel/Apple Silicon). Linux offers both `*-unknown-linux-gnu` (glibc)
 and `*-unknown-linux-musl` (static) binaries for each architecture.
 The client archive includes all three desktop
@@ -82,7 +82,8 @@ There are three GitHub Actions workflows:
 - **test** runs Rust checks and GnuPG integration tests on both amd64 (x86_64)
   and arm64 (aarch64), on Linux and macOS, for pushes, pull requests and manual
   dispatches. iOS CI is currently disabled.
-- **build** builds all six binary targets on pushes and pull requests, and
+- **build** builds all six binary targets on relevant source/packaging pushes
+  and pull requests, and
   uploads the archives as Actions artifacts. To prepare a release, start it from
   Actions → build → Run workflow, select the source branch/tag, enter a `tag`
   matching `[workspace.package].version` (for example `v0.1.0`), and set the
