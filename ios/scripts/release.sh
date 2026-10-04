@@ -85,7 +85,7 @@ printf 'Building iOS %s (%s)\n' "$IOS_VERSION" "$IOS_BUILD_NUMBER"
 
 ./ios/scripts/build-rust.sh Release 2>&1 | release_log rust
 XCODE_ARGS=(
-    -project ios/HIbiki.xcodeproj -scheme HIbiki
+    -project ios/Hibiki.xcodeproj -scheme Hibiki
     -clonedSourcePackagesDirPath "$RUNNER_TEMP/hibiki-source-packages"
 )
 xcodebuild "${XCODE_ARGS[@]}" -resolvePackageDependencies -onlyUsePackageVersionsFromResolvedFile 2>&1 | release_log packages
@@ -93,13 +93,13 @@ xcodebuild "${XCODE_ARGS[@]}" archive \
     -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile \
     -configuration Release -destination 'generic/platform=iOS' \
     -derivedDataPath "$RUNNER_TEMP/hibiki-derived-data" \
-    -archivePath "$OUTPUT/HIbiki.xcarchive" \
+    -archivePath "$OUTPUT/Hibiki.xcarchive" \
     "MARKETING_VERSION=$IOS_VERSION" "CURRENT_PROJECT_VERSION=$IOS_BUILD_NUMBER" \
     "DEVELOPMENT_TEAM=$APPLE_TEAM_ID" HIBIKI_CODE_SIGN_STYLE=Manual \
     "HIBIKI_CODE_SIGN_IDENTITY=$SIGNING_CERTIFICATE" "HIBIKI_PROVISIONING_PROFILE_SPECIFIER=$PROFILE_UUID" \
     2>&1 | release_log archive
-(cd "$OUTPUT/HIbiki.xcarchive" && /usr/bin/zip -qr "$OUTPUT/HIbiki.dSYMs.zip" dSYMs)
-xcodebuild -exportArchive -archivePath "$OUTPUT/HIbiki.xcarchive" \
+(cd "$OUTPUT/Hibiki.xcarchive" && /usr/bin/zip -qr "$OUTPUT/Hibiki.dSYMs.zip" dSYMs)
+xcodebuild -exportArchive -archivePath "$OUTPUT/Hibiki.xcarchive" \
     -exportPath "$OUTPUT/export" -exportOptionsPlist "$PRIVATE_DIR/ExportOptions.plist" \
     2>&1 | release_log export
 shopt -s nullglob

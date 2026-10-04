@@ -1,7 +1,7 @@
 import XCTest
 
 @MainActor
-final class HIbikiUITests: XCTestCase {
+final class HibikiUITests: XCTestCase {
     func testUnreachableRelayStaysOnSetupAfterRestart() {
         let app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(en)"]

@@ -8,7 +8,7 @@ if [[ $# -gt 1 ]]; then
   exit 2
 fi
 
-catalog=${1:-"$script_dir/../HIbiki/Localizable.xcstrings"}
+catalog=${1:-"$script_dir/../Hibiki/Localizable.xcstrings"}
 
 if ! jq empty "$catalog"; then
   echo "Invalid string catalog: $catalog" >&2

@@ -1,5 +1,5 @@
 import XCTest
-@testable import HIbiki
+@testable import Hibiki
 
 final class CoreBridgeTests: XCTestCase {
     @MainActor

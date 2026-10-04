@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct HIbikiApp: App {
+struct HibikiApp: App {
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {

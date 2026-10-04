@@ -19,6 +19,6 @@ for RUST_TARGET in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
 done
 xcrun lipo -create "target/aarch64-apple-ios-sim/$PROFILE/libhibiki_mobile.a" "target/x86_64-apple-ios/$PROFILE/libhibiki_mobile.a" -output target/ios-simulator/libhibiki_mobile.a
 # Only generated build artifacts are replaced.
-rm -rf ios/Frameworks/HIbikiCore.xcframework
-xcodebuild -create-xcframework -library "$ROOT/target/aarch64-apple-ios/$PROFILE/libhibiki_mobile.a" -headers "$ROOT/target/ios-headers" -library "$ROOT/target/ios-simulator/libhibiki_mobile.a" -headers "$ROOT/target/ios-headers" -output "$ROOT/ios/Frameworks/HIbikiCore.xcframework"
+rm -rf ios/Frameworks/HibikiCore.xcframework
+xcodebuild -create-xcframework -library "$ROOT/target/aarch64-apple-ios/$PROFILE/libhibiki_mobile.a" -headers "$ROOT/target/ios-headers" -library "$ROOT/target/ios-simulator/libhibiki_mobile.a" -headers "$ROOT/target/ios-headers" -output "$ROOT/ios/Frameworks/HibikiCore.xcframework"
 printf '%s\n' "$CONFIG" > ios/Frameworks/configuration.txt

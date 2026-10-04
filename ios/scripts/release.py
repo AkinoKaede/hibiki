@@ -155,7 +155,7 @@ def signing_settings(profile, team, identities, now=None):
         raise ValueError("Provisioning profile entitlement has a different team")
     if profile.get("ProvisionedDevices") is not None or profile.get("ProvisionsAllDevices") or entitlements.get("get-task-allow"):
         raise ValueError("An App Store distribution provisioning profile is required")
-    with (ROOT / "ios/HIbiki/HIbiki.entitlements").open("rb") as source:
+    with (ROOT / "ios/Hibiki/Hibiki.entitlements").open("rb") as source:
         required = plistlib.load(source)
     for key, value in required.items():
         # The smart-card sandbox entitlement is supplied by the app; Apple's

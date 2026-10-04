@@ -208,7 +208,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/hibiki-source-packages
-          key: ios-spm-26.3-${{ hashFiles('ios/HIbiki.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          key: ios-spm-26.3-${{ hashFiles('ios/Hibiki.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
       - name: Install release dependencies and check release tooling
         run: |
           python3 -m pip install -r ios/scripts/release-requirements.txt

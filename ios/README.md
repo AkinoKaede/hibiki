@@ -1,4 +1,4 @@
-# HIbiki for iOS
+# Hibiki for iOS
 
 SwiftUI client for iOS 18 and later. Bundle identifier: `com.akinokaede.hibiki`.
 
@@ -14,10 +14,10 @@ Requires Xcode with the iOS SDK, Rust 1.96+, Python 3, and the three Apple targe
 ```sh
 rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios
 ./ios/scripts/build-rust.sh Debug
-open ios/HIbiki.xcodeproj
+open ios/Hibiki.xcodeproj
 ```
 
-Select the shared **HIbiki** scheme. The checked-in Xcode project requires no
+Select the shared **Hibiki** scheme. The checked-in Xcode project requires no
 third-party project generator. Xcode resolves DeviceKit through Swift Package Manager
 to supply the default device model name. After adding source files, regenerate it with:
 
@@ -25,7 +25,7 @@ to supply the default device model name. After adding source files, regenerate i
 python3 ios/scripts/generate-project.py
 ```
 
-`build-rust.sh` generates UniFFI Swift bindings and `HIbikiCore.xcframework`; these
+`build-rust.sh` generates UniFFI Swift bindings and `HibikiCore.xcframework`; these
 are build artifacts and are not committed. Re-run it after Rust changes. Use
 `./ios/scripts/build-rust.sh Release` before an Archive/Release build. Both Debug and Release accept `ws://` and `wss://` servers. TLS certificate
 validation is enabled by default.
@@ -41,9 +41,9 @@ NFC Tag Reading for the matching App ID and provisioning profile. The app declar
 Unsigned verification:
 
 ```sh
-xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
+xcodebuild -project ios/Hibiki.xcodeproj -scheme Hibiki \
   -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
-xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
+xcodebuild -project ios/Hibiki.xcodeproj -scheme Hibiki \
   -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
@@ -147,7 +147,7 @@ actionlint .github/workflows/build.yml
 
 1. Enter your server address in **Server URL**; the field starts empty. Without
    a scheme, the app probes `wss://` first and then `ws://` if WSS fails. Each
-   candidate must complete HIbiki protocol validation and device authentication.
+   candidate must complete Hibiki protocol validation and device authentication.
    An explicit `wss://` or `ws://` uses only that protocol. Ports, custom paths and
    queries are preserved; an omitted path (or `/`) becomes `/hibiki`.
    **Hostname** defaults to the model reported by DeviceKit (for example,
@@ -164,7 +164,7 @@ actionlint .github/workflows/build.yml
    on an existing member before approving. The words are public identity data,
    not a recovery phrase. Pending requests remain until approved or invalidated; they have no time limit.
 4. Enable Password Entry and/or OpenPGP Card. Both start disabled. On the
-   requesting computer, configure the HIbiki adapters as described in the root
+   requesting computer, configure the Hibiki adapters as described in the root
    README. The app can approve members, share invitations, rotate PSKs, revoke
    identities, and leave channels.
 
@@ -215,7 +215,7 @@ answer discovery while the card service is enabled. Every private operation asks
 whether you want to use the key; there is no persistent readiness switch. Canceling
 ends the current operation without requesting a PIN or opening a card connection.
 
-For signing or decryption, HIbiki requests the PIN first, then opens the NFC sheet
+For signing or decryption, Hibiki requests the PIN first, then opens the NFC sheet
 and asks you to tap the same key. Keep it near the phone until the operation ends.
 The serial number, keygrip and fingerprint must still match the registered record
 before the PIN is sent. A different key fails the operation. After changing keys
@@ -224,7 +224,7 @@ on a security key, register it again.
 NFC discovery describes the registered public snapshot, not proof that a physical
 key is currently in range. Live mutable fields such as retry counters are not
 invented from cached data. PIN failures report the card's actual returned status.
-HIbiki does not automatically retry PIN verification or replay private operations.
+Hibiki does not automatically retry PIN verification or replay private operations.
 A waiting request can reach the app when it returns online before the caller's
 original deadline. Card operations remain bound to the original device and card;
 unstarted commands may resume after selection and data preparation are restored.
@@ -236,7 +236,7 @@ Password input still follows the desktop agent: it may be supplied by the iPhone
 the requesting computer, or another enabled participant.
 The iPhone form collects the password once, with an X to cancel and an in-form
 Continue button to submit. Any confirmation required when setting a new passphrase
-remains the requesting agent's responsibility; HIbiki does not report `PIN_REPEATED`.
+remains the requesting agent's responsibility; Hibiki does not report `PIN_REPEATED`.
 
 ## Lifecycle and storage
 
@@ -275,7 +275,7 @@ cargo build --locked --workspace
 python3 tests/integration.py
 python3 tests/mobile.py
 python3 tests/mobile_tls.py
-xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
+xcodebuild -project ios/Hibiki.xcodeproj -scheme Hibiki \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
   CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= test
 ```
