@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub const VERSION: &str = "hibiki/2";
 pub const WS_PATH: &str = "/hibiki";
 pub const MAX_WIRE: usize = 4 * 1024 * 1024;
+/// An hour of caller time plus less than a second of wire timestamp rounding.
+pub const MAX_OPERATION_TTL: u64 = 3601;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WireError {

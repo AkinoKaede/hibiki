@@ -10,7 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -26,13 +26,17 @@ impl QueuedOperation {
         service: ServiceKind,
         targets: Vec<String>,
     ) -> Result<Self> {
+        let deadline = deadline_after(
+            SystemTime::now().duration_since(UNIX_EPOCH)?,
+            hub.app.config.operation_timeout_seconds,
+        );
         let op = Self {
             value: Operation {
                 id: random_id(),
                 channel: channel.into(),
                 initiator: hub.app.identity.device.id(),
                 service,
-                deadline: now() + hub.app.config.operation_timeout_seconds,
+                deadline,
                 state: OperationState::Pending,
                 targets: targets
                     .into_iter()
@@ -232,7 +236,9 @@ impl Drop for QueuedOperation {
 /// Write before executing. A crash between claim and completion is deliberately
 /// an unknown result, never permission to repeat a private operation.
 pub fn record_execution(app: &App, op: &Operation) -> Result<()> {
-    if !hibiki_lib::channel::valid_id(&op.id) || op.deadline <= now() || op.deadline > now() + 3600
+    if !hibiki_lib::channel::valid_id(&op.id)
+        || op.deadline <= now()
+        || op.deadline > now() + MAX_OPERATION_TTL
     {
         bail!("invalid execution identity or deadline");
     }
@@ -258,9 +264,30 @@ pub fn record_execution(app: &App, op: &Operation) -> Result<()> {
     atomic_write(&path, &encode(&op.deadline)?)
 }
 
+// Round the absolute wire timestamp up. Rounding down would cut up to a second
+// from a command's configured wait. The caller's monotonic timeout remains exact.
+fn deadline_after(timestamp: Duration, timeout_seconds: u64) -> u64 {
+    let end = timestamp + Duration::from_secs(timeout_seconds);
+    end.as_secs() + u64::from(end.subsec_nanos() != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fractional_wall_clock_does_not_shorten_operation_timeout() {
+        for fraction in [0, 1, 250, 750, 999] {
+            for timeout in [1, 120, 3600] {
+                let timestamp = Duration::from_secs(1000) + Duration::from_millis(fraction);
+                let remaining = Duration::from_secs(deadline_after(timestamp, timeout)) - timestamp;
+                assert!(remaining >= Duration::from_secs(timeout));
+                assert!(remaining < Duration::from_secs(timeout + 1));
+                assert!(
+                    deadline_after(timestamp, timeout) <= timestamp.as_secs() + MAX_OPERATION_TTL
+                );
+            }
+        }
+    }
     #[test]
     fn execution_record_survives_reopening_and_rejects_invalid_paths() {
         let dir = tempfile::tempdir().unwrap();

@@ -119,7 +119,21 @@ class Device:
         if card: text+='scdaemon-program %s\n' % (BIN/'hibiki-scdaemon')
         (self.native/'gpg-agent.conf').write_text(text)
         self.kill_agent()
-    def kill_agent(self): run([GPGCONF,'--homedir',self.native,'--kill','gpg-agent'],env=self.env)
+    def kill_agent(self):
+        probe = subprocess.run([str(Path(GPGCONF).with_name('gpg-connect-agent')),
+                                '--no-autostart', '--homedir', str(self.native), 'GETINFO pid', '/bye'],
+                               env=self.env, capture_output=True, timeout=10)
+        match = re.search(rb'^D (\d+)$', probe.stdout, re.M)
+        run([GPGCONF,'--homedir',self.native,'--kill','gpg-agent'],env=self.env)
+        if match:
+            pid = int(match[1])
+            # The kill reply acknowledges shutdown before the agent exits. A new
+            # GPG command can otherwise connect to the dying agent and get EOF.
+            def stopped():
+                state = subprocess.run(['ps', '-p', str(pid), '-o', 'stat='],
+                                       capture_output=True, text=True, timeout=5).stdout.strip()
+                return not state or state.startswith('Z')
+            wait_for(stopped)
     def start(self):
         self.log_path=self.root/'daemon.log';self.log=self.log_path.open('w')
         self.daemon=subprocess.Popen([str(CLIENT),'daemon'],env=self.env,stdout=self.log,stderr=self.log)

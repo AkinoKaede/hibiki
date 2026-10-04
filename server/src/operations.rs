@@ -34,7 +34,7 @@ impl Database {
         if !valid_id(&op.id)
             || op.initiator != caller
             || op.deadline <= now()
-            || op.deadline > now() + 3600
+            || op.deadline > now() + MAX_OPERATION_TTL
             || op.state != OperationState::Pending
             || op.targets.is_empty()
             || op.targets.len() > 128
