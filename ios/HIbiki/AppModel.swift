@@ -15,11 +15,11 @@ final class AppModel {
     var prompts: [PinPrompt] = []
     var usbPresent = false
     var foreground = true
-    var server = UserDefaults.standard.string(forKey: "server") ?? "wss://hibiki.akinokaede.com/hibiki"
-    var name = UserDefaults.standard.string(forKey: "deviceName") ?? Device.current.realDevice.description
-    var skipTLSCertificateValidation = UserDefaults.standard.bool(forKey: "skipTLSCertificateValidation")
-    var pinEnabled = UserDefaults.standard.bool(forKey: "pinEnabled")
-    var cardEnabled = UserDefaults.standard.bool(forKey: "cardEnabled")
+    var server: String
+    var name: String
+    var skipTLSCertificateValidation: Bool
+    var pinEnabled: Bool
+    var cardEnabled: Bool
     var initialized = false
     var pairing: JoinInfo?
     private let hardware = CardHardware()
@@ -27,6 +27,39 @@ final class AppModel {
     private var pollingTask: Task<Void, Never>?
     private var nativeTasks: [String: Task<Void, Never>] = [:]
     private var lifecycleTask: Task<Void, Never>?
+    private var disconnecting = false
+
+    private let defaults: UserDefaults
+    private let resetRelayStorage: () throws -> Void
+
+    init(defaults: UserDefaults = .standard, resetRelayStorage: @escaping () throws -> Void = SecureStorage.resetRelay) {
+        self.defaults = defaults
+        self.resetRelayStorage = resetRelayStorage
+        server = defaults.string(forKey: "server") ?? ""
+        name = defaults.string(forKey: "deviceName") ?? Device.current.realDevice.description
+        skipTLSCertificateValidation = defaults.bool(forKey: "skipTLSCertificateValidation")
+        pinEnabled = defaults.bool(forKey: "pinEnabled")
+        cardEnabled = defaults.bool(forKey: "cardEnabled")
+    }
+
+    nonisolated static func relayURL(from input: String) throws -> String {
+        let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let address = value.contains("://") ? value : "wss://" + value
+        guard !value.isEmpty, !value.contains(where: { $0.isWhitespace }),
+              var url = URLComponents(string: address),
+              let scheme = url.scheme?.lowercased(), ["ws", "wss"].contains(scheme),
+              let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil, url.fragment == nil,
+              url.port.map({ (1...65535).contains($0) }) ?? true else {
+            throw NSError(domain: "HIbiki.RelayAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address using wss:// or ws://.")])
+        }
+        url.scheme = scheme
+        if url.path.isEmpty || url.path == "/" { url.path = "/hibiki" }
+        guard let result = url.url?.absoluteString else {
+            throw NSError(domain: "HIbiki.RelayAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address using wss:// or ws://.")])
+        }
+        return result
+    }
 
     var currentPrompt: PinPrompt? { prompts.first }
     var selectedUSBSupported: Bool {
@@ -43,7 +76,11 @@ final class AppModel {
         }
     }
     func restore() async {
-        guard UserDefaults.standard.string(forKey: "server") != nil, !server.isEmpty else { return }
+        if defaults.bool(forKey: "relayResetPending") {
+            await disconnectRelay()
+            return
+        }
+        guard defaults.string(forKey: "server") != nil, !server.isEmpty else { return }
         do {
             if let identity = try SecureStorage.identity() {
                 try configure(identity: identity)
@@ -52,23 +89,71 @@ final class AppModel {
         } catch { show(error) }
     }
     func setup() async {
+        guard !busy else { return }
         await perform {
-            guard !self.server.isEmpty, !self.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            // A previous interrupted setup may already have saved an identity; never replace it.
-            var identity = try SecureStorage.identity()
-            if identity == nil {
-                let generated = try createIdentity(name: self.name)
-                // Validate the relay before committing the first identity.
-                _ = try MobileClient(directory: SecureStorage.directory().path, server: self.server, identity: generated, skipTlsCertificateValidation: self.skipTLSCertificateValidation)
-                try SecureStorage.saveIdentity(generated)
-                identity = generated
+            if self.defaults.bool(forKey: "relayResetPending") {
+                try self.resetRelayStorage()
+                self.defaults.removeObject(forKey: "relayResetPending")
             }
-            try self.configure(identity: identity!)
-            UserDefaults.standard.set(self.server, forKey: "server")
-            UserDefaults.standard.set(self.name, forKey: "deviceName")
-            UserDefaults.standard.set(self.skipTLSCertificateValidation, forKey: "skipTLSCertificateValidation")
+            guard !self.server.isEmpty, !self.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            let server = try Self.relayURL(from: self.server)
+            let name = self.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let skipTLS = self.skipTLSCertificateValidation
+            // A previous interrupted setup may already have saved an identity; never replace it.
+            let savedIdentity = try SecureStorage.identity()
+            let identity = try savedIdentity ?? createIdentity(name: name)
+            do {
+                try await checkRelay(server: server, identity: identity, skipTlsCertificateValidation: skipTLS)
+            } catch {
+                self.show(error)
+                self.error = String(localized: "Could not connect to the relay. Check the address and try again.") + "\n\n" + (self.error ?? "")
+                return
+            }
+            guard self.foreground, !Task.isCancelled else { return }
+            if savedIdentity == nil { try SecureStorage.saveIdentity(identity) }
+            self.server = server
+            self.name = name
+            try self.configure(identity: identity)
+            self.defaults.set(self.server, forKey: "server")
+            self.defaults.set(self.name, forKey: "deviceName")
+            self.defaults.set(self.skipTLSCertificateValidation, forKey: "skipTLSCertificateValidation")
             await self.activate()
         }
+    }
+    func disconnectRelay() async {
+        guard !busy else { return }
+        busy = true
+        disconnecting = true
+        defer { busy = false; disconnecting = false }
+        // Persist intent first so an interrupted reset cannot restore the old connection.
+        defaults.set(true, forKey: "relayResetPending")
+        for key in ["server", "skipTLSCertificateValidation", "pinEnabled", "cardEnabled"] {
+            defaults.removeObject(forKey: key)
+        }
+        let core = client
+        client = nil
+        core?.setServices(pinentry: false, card: false)
+        eventTask?.cancel(); eventTask = nil
+        await lifecycleTask?.value
+        await deactivate()
+        await core?.stop()
+        device = nil
+        channels = []
+        pairing = nil
+        card = nil
+        registeredCards = []
+        usbPresent = false
+        pinEnabled = false
+        cardEnabled = false
+        skipTLSCertificateValidation = false
+        connection = "offline"
+        server = ""
+        initialized = false
+        error = nil
+        do {
+            try self.resetRelayStorage()
+            defaults.removeObject(forKey: "relayResetPending")
+        } catch { show(error) }
     }
     private func configure(identity: Data) throws {
         let core = try MobileClient(directory: SecureStorage.directory().path, server: server, identity: identity, skipTlsCertificateValidation: skipTLSCertificateValidation)
@@ -82,6 +167,7 @@ final class AppModel {
         eventTask = Task { [weak self] in
             while !Task.isCancelled, let event = await core.nextEvent() {
                 guard let self else { return }
+                guard !Task.isCancelled, self.client === core else { return }
                 self.handle(event, core: core)
             }
         }
@@ -90,6 +176,7 @@ final class AppModel {
         // NFC and system sheets can make the scene inactive without backgrounding it.
         guard phase != .inactive else { return }
         foreground = phase == .active
+        guard !disconnecting else { return }
         let previous = lifecycleTask
         lifecycleTask = Task {
             await previous?.value
@@ -98,8 +185,9 @@ final class AppModel {
         }
     }
     func activate() async {
-        guard foreground, let client else { return }
+        guard foreground, !disconnecting, let client else { return }
         do { try await client.start() } catch { show(error) }
+        guard foreground, !disconnecting, self.client === client else { return }
         pollingTask?.cancel()
         pollingTask = Task {
             while !Task.isCancelled {
@@ -110,8 +198,11 @@ final class AppModel {
         }
     }
     func refreshUSBAvailability() async {
-        usbPresent = await hardware.usbAvailable()
-        client?.usbPresent(present: usbPresent)
+        guard let client else { return }
+        let present = await hardware.usbAvailable()
+        guard self.client === client, !Task.isCancelled else { return }
+        usbPresent = present
+        client.usbPresent(present: present)
     }
     func deactivate() async {
         pollingTask?.cancel(); pollingTask = nil
@@ -126,14 +217,17 @@ final class AppModel {
         card = client.selectedCard()
         registeredCards = client.registeredCards()
         do {
-            channels = try await client.channels()
+            let channels = try await client.channels()
+            guard self.client === client, !Task.isCancelled else { return }
+            self.channels = channels
             if let pairing, channels.contains(where: { $0.id == pairing.channel && $0.active }) { self.pairing = nil }
         } catch { /* The connection state communicates transient relay failures. */ }
     }
     func updateServices() {
+        guard !disconnecting else { return }
         client?.setServices(pinentry: pinEnabled, card: cardEnabled)
-        UserDefaults.standard.set(pinEnabled, forKey: "pinEnabled")
-        UserDefaults.standard.set(cardEnabled, forKey: "cardEnabled")
+        defaults.set(pinEnabled, forKey: "pinEnabled")
+        defaults.set(cardEnabled, forKey: "cardEnabled")
     }
     func register(_ transport: CardTransport, name: String, usbSupported: Bool, nfcSupported: Bool) async -> Bool {
         busy = true

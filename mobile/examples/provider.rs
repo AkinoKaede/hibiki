@@ -1,6 +1,6 @@
 //! TEST ONLY: a line-oriented bridge for the isolated APDU emulator in tests/mobile.py.
 //! Never connect this diagnostic harness to real cards or production channels.
-use hibiki_mobile::{CardTransport, MobileClient, NativeEvent, create_identity};
+use hibiki_mobile::{CardTransport, MobileClient, NativeEvent, check_relay, create_identity};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -10,6 +10,17 @@ fn emit(value: Value) {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.iter().any(|arg| arg == "--check-relay") {
+        check_relay(
+            args[2].clone(),
+            create_identity("mobile-fixture".into())?,
+            args.iter()
+                .any(|arg| arg == "--skip-tls-certificate-validation"),
+        )
+        .await?;
+        emit(json!({"kind":"checked"}));
+        return Ok(());
+    }
     let client = MobileClient::new(
         args[1].clone(),
         args[2].clone(),

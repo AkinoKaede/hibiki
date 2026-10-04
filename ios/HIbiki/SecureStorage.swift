@@ -21,6 +21,23 @@ struct SecureStorage {
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else { throw keychainError(status) }
     }
+    static func resetRelay() throws {
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: "device"]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw keychainError(status) }
+        try removeRelayFiles(in: directory())
+    }
+    static func removeRelayFiles(in directory: URL) throws {
+        // Card registrations contain local public data and are independent of the relay.
+        // Trust histories and replay records must be reset together with the identity.
+        for path in ["config", "state", "cache", "runtime", "data/channels", "data/operations"] {
+            let url = directory.appendingPathComponent(path)
+            if FileManager.default.fileExists(atPath: url.path) {
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+    }
     private static func keychainError(_ status: OSStatus) -> Error {
         NSError(domain: NSOSStatusErrorDomain, code: Int(status), userInfo: [NSLocalizedDescriptionKey: SecCopyErrorMessageString(status, nil) as String? ?? "Keychain unavailable"])
     }

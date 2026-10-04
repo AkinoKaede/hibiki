@@ -41,6 +41,35 @@ uniffi::setup_scaffolding!();
 pub fn create_identity(name: String) -> MobileResult<Vec<u8>> {
     (|| Ok(encode(&Identity::generate(name)?)?))().map_err(|e: anyhow::Error| e.into())
 }
+
+/// Check the relay protocol and authentication before committing onboarding state.
+#[uniffi::export(async_runtime = "tokio")]
+pub async fn check_relay(
+    server: String,
+    identity: Vec<u8>,
+    skip_tls_certificate_validation: bool,
+) -> MobileResult<()> {
+    let result: Result<()> = async {
+        let identity = Zeroizing::new(identity);
+        let identity: Identity = decode(&identity)?;
+        identity.validate()?;
+        let (connection, _) = tokio::time::timeout(
+            Duration::from_secs(15),
+            Connection::open_with_tls_options(
+                &server,
+                true,
+                skip_tls_certificate_validation,
+                &identity,
+            ),
+        )
+        .await
+        .context("relay connection timed out")??;
+        connection.close();
+        Ok(())
+    }
+    .await;
+    result.map_err(Into::into)
+}
 fn device_info(device: &hibiki_lib::identity::Device, online: bool) -> Result<DeviceInfo> {
     Ok(DeviceInfo {
         id: device.id(),
@@ -146,11 +175,13 @@ impl MobileClient {
                             }
                         }
                     }
-                    jobs.abort_all();
+                    // Finish cancellation before stop() permits local trust data to be reset.
+                    jobs.shutdown().await;
                 }
                 connection.close();
                 self.hub.lock().unwrap().take();
                 self.broker.cancel_all();
+                hub.shutdown().await;
             }
             let _ = self.broker.emit(NativeEvent::Connection {
                 state: "offline".into(),

@@ -49,7 +49,7 @@ struct SetupView: View {
                 Text("Enter passwords and use your security key for GPG operations on your trusted computers.").foregroundStyle(.secondary)
             }
             Section("Connect to your relay") {
-                TextField("wss://hibiki.akinokaede.com/hibiki", text: $model.server).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("relayURL")
+                TextField("wss://hibiki.example.com", text: $model.server).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("relayURL")
                 TextField("Device name", text: $model.name).accessibilityIdentifier("deviceName")
             }
             Section {
@@ -60,9 +60,9 @@ struct SetupView: View {
             Section {
                 Button { Task { await model.setup() } } label: {
                     HStack { Text("Get started"); Spacer(); if model.busy { ProgressView() } else { Image(systemName: "arrow.right") } }
-                }.disabled(model.busy || model.server.isEmpty || model.name.isEmpty).accessibilityIdentifier("getStarted")
+                }.disabled(model.busy || model.server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityIdentifier("getStarted")
             } footer: { Text("HIbiki connects while the app is open. Services are off until you enable them.") }
-        }.navigationTitle("HIbiki")
+        }.navigationTitle("HIbiki").disabled(model.busy)
     }
 }
 
@@ -447,6 +447,7 @@ struct RegisteredCardView: View {
 
 struct SettingsView: View {
     @Bindable var model: AppModel
+    @State private var confirmDisconnect = false
     var body: some View {
         List {
             Section("This device") {
@@ -460,9 +461,17 @@ struct SettingsView: View {
                 Text(verbatim: model.server)
                 LabeledContent("Availability", value: String(localized: "While app is open"))
                 LabeledContent("Protocol", value: "hibiki/2")
+                Button("Disconnect from relay", role: .destructive) { confirmDisconnect = true }
+                    .disabled(model.busy).accessibilityIdentifier("disconnectRelay")
             }
             Section("About") { Text("HIbiki"); Text("PINs are not saved. Private keys stay on the card or the requesting computer.").foregroundStyle(.secondary) }
         }.navigationTitle("Settings")
+        .confirmationDialog("Disconnect from this relay?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
+            Button("Disconnect", role: .destructive) { Task { await model.disconnectRelay() } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This stops current requests and removes this device’s local pairing. You can then connect to another relay. Security key registrations are kept. You will need to pair again, even with this relay. Other members can remove the old device from their channels.")
+        }
     }
 }
 

@@ -38,6 +38,7 @@ pub struct Hub {
     card_slot: Arc<tokio::sync::Semaphore>,
     provider: Arc<dyn Provider>,
     sessions: Mutex<HashMap<String, Entry>>,
+    sessions_changed: tokio::sync::Notify,
 }
 pub struct PeerSession {
     hub: Arc<Hub>,
@@ -51,6 +52,7 @@ pub struct PeerSession {
 impl Drop for PeerSession {
     fn drop(&mut self) {
         self.hub.sessions.lock().unwrap().remove(&self.id);
+        self.hub.sessions_changed.notify_waiters();
     }
 }
 impl PeerSession {
@@ -129,6 +131,7 @@ impl Hub {
             provider,
             card_slot,
             sessions: Mutex::new(HashMap::new()),
+            sessions_changed: tokio::sync::Notify::new(),
         })
     }
 
@@ -205,6 +208,19 @@ impl Hub {
     pub fn stop_all(&self) {
         for entry in self.sessions.lock().unwrap().values() {
             entry.stop.cancel();
+        }
+    }
+    /// Call after the caller has stopped routing new sessions to this hub.
+    /// Draining sessions prevents their trust/replay writes from racing a local reset.
+    pub async fn shutdown(&self) {
+        self.connection().close();
+        self.stop_all();
+        loop {
+            let changed = self.sessions_changed.notified();
+            if self.sessions.lock().unwrap().is_empty() {
+                return;
+            }
+            changed.await;
         }
     }
     pub fn stop_session(&self, id: &str, peer: &str) {

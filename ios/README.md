@@ -46,13 +46,19 @@ xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
 
 ## Pairing
 
-1. The default relay is `wss://hibiki.akinokaede.com/hibiki`. The device name
+1. Enter your relay address; the field starts empty and the placeholder is only
+   an example. A bare domain uses `wss://`, and an omitted path (or `/`) becomes
+   `/hibiki`: `hibiki.example.com` connects to `wss://hibiki.example.com/hibiki`.
+   Explicit `ws://`, ports, and custom paths are preserved. The device name
    defaults to the model reported by DeviceKit (for example, `iPhone 16 Pro`).
    You can edit it; saved names are preserved. Use the same relay as your computers. Plaintext `ws://` is accepted without
    a switch. Under the collapsed **Advanced** section, **Skip TLS Certificate
    Validation** disables certificate trust, hostname and validity checks for TLS
    when explicitly enabled. It is off by default and does not affect plaintext
    connections. The previous Debug plaintext preference does not enable it.
+   **Get started** checks the relay connection, TLS policy, protocol, and device
+   authentication before saving setup. An unreachable or incompatible server
+   leaves you on setup with an error; the check times out after 15 seconds.
 2. Create a channel, or paste a `hibiki-v1:` / `hibiki-init-v1:` invitation and
    enter the separately shared PSK.
 3. For member invitations, compare **all 24 public-key words and the request ID**
@@ -62,6 +68,15 @@ xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
    requesting computer, configure the HIbiki adapters as described in the root
    README. The app can approve members, share invitations, rotate PSKs, revoke
    identities, and leave channels.
+
+To switch servers, open **Settings → Connection → Disconnect from relay** and
+confirm. This works offline, stops current requests, clears local pairing and the
+device identity, and returns to setup with an empty address field. Security key registrations and the device
+name are kept; password/card services and the TLS bypass are reset to off. Connect
+to the new relay and pair again. Returning to the old relay also requires pairing
+with a new device identity. This local disconnect does not delete server-side
+channels or revoke the old membership; remaining members can remove the old device.
+An interrupted reset is completed before setup or restore can reuse any state.
 
 ## Security Keys
 

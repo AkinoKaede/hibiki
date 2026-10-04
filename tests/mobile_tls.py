@@ -45,6 +45,9 @@ async def run():
                 async def probe(name, url, skip, expected):
                     args = [str(BIN/'examples/provider'), str(root/name), url]
                     if skip: args.append('--skip-tls-certificate-validation')
+                    check = await asyncio.create_subprocess_exec(*args, '--check-relay', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    stdout, _ = await asyncio.wait_for(check.communicate(), 20)
+                    assert (check.returncode == 0) == expected, (name, 'onboarding', stdout)
                     client = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                     online = False
                     try:
@@ -62,7 +65,26 @@ async def run():
                 await probe('tls-skipped', f'wss://127.0.0.1:{tls_port}/hibiki', True, True)
                 await probe('plaintext', f'ws://127.0.0.1:{port}/hibiki', False, True)
                 await probe('tls-default-again', f'wss://127.0.0.1:{tls_port}/hibiki', False, False)
-                print('PASS: self-signed/wrong-host TLS rejected by default, explicit bypass connects; ws needs no bypass; default remains verified')
+                # A WebSocket-shaped URL alone must not complete onboarding.
+                async def reject(reader, writer):
+                    writer.write(b'HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n')
+                    await writer.drain()
+                    writer.close()
+                invalid = await asyncio.start_server(reject, '127.0.0.1', 0)
+                invalid_port = invalid.sockets[0].getsockname()[1]
+                async with invalid:
+                    await probe('not-a-relay', f'ws://127.0.0.1:{invalid_port}/hibiki', False, False)
+                await probe('unreachable', f'ws://127.0.0.1:{invalid_port}/hibiki', False, False)
+                async def stall(reader, writer):
+                    try:
+                        await reader.read()
+                    finally:
+                        writer.close()
+                stalled = await asyncio.start_server(stall, '127.0.0.1', 0)
+                async with stalled:
+                    stalled_port = stalled.sockets[0].getsockname()[1]
+                    await probe('stalled-handshake', f'ws://127.0.0.1:{stalled_port}/hibiki', False, False)
+                print('PASS: onboarding verifies authentication/TLS and rejects unreachable or invalid relays; background connections retain TLS policy')
         finally:
             server.terminate()
             await server.wait()
