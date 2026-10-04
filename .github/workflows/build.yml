@@ -52,6 +52,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: macos-15
@@ -69,7 +73,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: '. -> target/packages'
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build release archives
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
         run: python3 scripts/package.py --target "${{ matrix.target }}"
       - name: Smoke test packaged binaries
         shell: bash
@@ -82,6 +94,17 @@ jobs:
             "$binary" --version
           done
           python3 tests/server.py --server unpacked/hibiki-server-*/bin/hibiki-server
+      - name: Verify musl binaries are static
+        if: contains(matrix.target, 'musl')
+        shell: bash
+        run: |
+          for binary in unpacked/*/bin/*; do
+            headers="$(readelf -l "$binary")"
+            if [[ "$headers" == *INTERP* ]]; then
+              echo "Unexpected dynamic interpreter: $binary" >&2
+              exit 1
+            fi
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: packages-${{ matrix.target }}

@@ -42,10 +42,13 @@ export PATH="$PWD/target/release:$PATH"
 
 GitHub Actions builds separate `hibiki-VERSION-TARGET.tar.gz` and
 `hibiki-server-VERSION-TARGET.tar.gz` archives for Linux (x86_64/ARM64) and
-macOS (Intel/Apple Silicon). The client archive includes all three desktop
+macOS (Intel/Apple Silicon). Linux offers both `*-unknown-linux-gnu` (glibc)
+and `*-unknown-linux-musl` (static) binaries for each architecture.
+The client archive includes all three desktop
 binaries and, on Linux, a user systemd unit. Both archives contain the relevant
-example configuration and this guide. Linux binaries are built on Ubuntu 24.04
-and require glibc 2.39 or later; macOS binaries are built on macOS 15.
+example configuration and this guide. GNU Linux binaries are built on Ubuntu
+24.04 and require glibc 2.39 or later; musl binaries have no dynamic libc
+requirement. macOS binaries are built on macOS 15.
 GnuPG and native Pinentry/scdaemon remain host dependencies for clients.
 
 Download archives from GitHub Releases, verify them with
@@ -70,15 +73,16 @@ python3 scripts/package.py
 ```
 
 Cross-compilation requires installing the Rust target and its linker/toolchain;
-CI uses native runners for each platform. Archives and individual SHA-256 files
-are written to `dist/`.
+CI uses native runners for each architecture. For a musl build on Linux, install
+`musl-tools` and the matching Rust musl target, and set its linker to `musl-gcc`
+(as in `build.yml`). Archives and individual SHA-256 files are written to `dist/`.
 
 There are three GitHub Actions workflows:
 
 - **test** runs Rust checks and GnuPG integration tests on both amd64 (x86_64)
   and arm64 (aarch64), on Linux and macOS, for pushes, pull requests and manual
   dispatches. iOS CI is currently disabled.
-- **build** builds all four binary targets on pushes and pull requests, and
+- **build** builds all six binary targets on pushes and pull requests, and
   uploads the archives as Actions artifacts. To prepare a release, start it from
   Actions → build → Run workflow, select the source branch/tag, enter a `tag`
   matching `[workspace.package].version` (for example `v0.1.0`), and set the
