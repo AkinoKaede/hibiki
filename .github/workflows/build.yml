@@ -1,0 +1,121 @@
+name: build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag matching the workspace version (e.g. v0.1.0)'
+        required: true
+        type: string
+      prereleased:
+        description: 'Mark the draft as a prerelease'
+        required: true
+        default: true
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate version and existing tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 - <<'PYCODE'
+          import os, subprocess, tomllib
+          with open('Cargo.toml', 'rb') as source:
+              version = tomllib.load(source)['workspace']['package']['version']
+          tag = os.environ['RELEASE_TAG']
+          if tag != f'v{version}':
+              raise SystemExit('Tag must match the workspace version')
+          existing = subprocess.run(['git', 'rev-parse', '--verify', f'refs/tags/{tag}^{{commit}}'], capture_output=True, text=True)
+          head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+          if existing.returncode == 0 and existing.stdout.strip() != head:
+              raise SystemExit('Existing tag points to a different commit; select that tag in Run workflow')
+          PYCODE
+  package:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target/packages'
+      - name: Build release archives
+        run: python3 scripts/package.py --target "${{ matrix.target }}"
+      - name: Smoke test packaged binaries
+        shell: bash
+        run: |
+          mkdir unpacked
+          for archive in dist/*.tar.gz; do
+            tar -xzf "$archive" -C unpacked
+          done
+          for binary in unpacked/*/bin/*; do
+            "$binary" --version
+          done
+          python3 tests/server.py --server unpacked/hibiki-server-*/bin/hibiki-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft:
+    if: github.event_name == 'workflow_dispatch'
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          merge-multiple: true
+          path: dist
+      - name: Verify archives and combine checksums
+        working-directory: dist
+        run: |
+          sha256sum --check ./*.sha256
+          cat ./*.sha256 > SHA256SUMS
+      - name: Create draft release for review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.tag }}
+          PRERELEASED: ${{ inputs.prereleased }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        shell: bash
+        run: |
+          options=(--draft --generate-notes --target "$RELEASE_COMMIT")
+          if [[ "$PRERELEASED" == 'true' ]]; then
+            options+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS "${options[@]}"

@@ -73,17 +73,27 @@ Cross-compilation requires installing the Rust target and its linker/toolchain;
 CI uses native runners for each platform. Archives and individual SHA-256 files
 are written to `dist/`.
 
-Create a GitHub Release whose tag matches `[workspace.package].version`, such as
-`v0.1.0`. The `released` and `prereleased` events trigger the full pipeline.
-After the Rust/integration tests, iOS checks, archive builds and Docker smoke test
-pass, CI uploads the archives and `SHA256SUMS` to that Release and publishes a
-multi-platform `linux/amd64,linux/arm64` image to
-`ghcr.io/OWNER/REPOSITORY/hibiki-server` (owner/repository are lowercase).
-Every image receives a version tag. A `released` event also updates both `latest` and `prereleased`;
-a `prereleased` event updates only `prereleased`, leaving `latest` unchanged.
-Re-running a release job replaces assets of the same name.
-Branch, tag-push, pull-request and manual builds upload workflow artifacts without
-publishing release assets or images. The repository must permit the workflow's
+There are three GitHub Actions workflows:
+
+- **test** runs Rust checks and GnuPG integration tests on Linux and macOS on
+  pushes, pull requests and manual dispatches. iOS CI is currently disabled.
+- **build** builds all four binary targets on pushes and pull requests, and
+  uploads the archives as Actions artifacts. To prepare a release, start it from
+  Actions → build → Run workflow, select the source branch/tag, enter a `tag`
+  matching `[workspace.package].version` (for example `v0.1.0`), and set the
+  `prereleased` checkbox. Manual runs also create a **draft** GitHub Release with
+  the archives and `SHA256SUMS`. An existing tag must point to the selected
+  commit; no existing release or tag is overwritten. Use a new version/tag for
+  a new draft. No Docker image is built at this stage.
+- **docker** runs only after you publish the draft Release (or promote a
+  prerelease to a full release). It smoke-tests the container and publishes a
+  multi-platform `linux/amd64,linux/arm64` image to
+  `ghcr.io/OWNER/REPOSITORY/hibiki-server` (owner/repository are lowercase).
+  Every image receives a version tag. Full releases update both `latest` and
+  `prereleased`; prereleases update only `prereleased`.
+
+Check the independent test workflow, draft files and prerelease setting, then click
+Publish release when ready. The repository must permit the workflows'
 `GITHUB_TOKEN` to write releases and GHCR packages. GHCR package visibility is
 managed separately from repository visibility.
 

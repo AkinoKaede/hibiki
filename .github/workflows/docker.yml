@@ -1,0 +1,92 @@
+name: docker
+on:
+  release:
+    # Draft prereleases emit published; released also covers promotion to stable.
+    types: [published, released]
+permissions:
+  contents: read
+concurrency:
+  group: docker-release
+  cancel-in-progress: false
+jobs:
+  smoke:
+    # A new stable release emits both events; build it only once.
+    if: github.event.action == 'released' || github.event.release.prerelease
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          load: true
+          tags: hibiki-server:test
+          cache-from: type=gha,scope=server-amd64
+          cache-to: type=gha,mode=max,scope=server-amd64
+      - name: Test container health and persistent database
+        shell: bash
+        run: |
+          docker volume create hibiki-test
+          trap 'docker rm -f hibiki-test || true; docker volume rm hibiki-test || true' EXIT
+          docker run -d --name hibiki-test -v hibiki-test:/var/lib/hibiki hibiki-server:test
+          for _ in {1..30}; do
+            if docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz
+          docker exec hibiki-test test -s /var/lib/hibiki/hibiki.sqlite3
+          docker stop --time 15 hibiki-test
+          test "$(docker inspect --format '{{.State.ExitCode}}' hibiki-test)" = 0
+          docker start hibiki-test
+          for _ in {1..30}; do
+            if docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz
+
+  publish:
+    needs: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Image name
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPOSITORY,,}/hibiki-server" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: metadata
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ !github.event.release.prerelease }}
+            type=raw,value=prereleased
+      - name: Publish multi-platform server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=server-amd64
