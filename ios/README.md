@@ -30,10 +30,13 @@ are build artifacts and are not committed. Re-run it after Rust changes. Use
 `./ios/scripts/build-rust.sh Release` before an Archive/Release build. Both Debug and Release accept `ws://` and `wss://` servers. TLS certificate
 validation is enabled by default.
 
-Choose your own development team in Xcode to run on a physical device. Enable
+Choose your own development team in Xcode to run on a physical device, or create
+the git-ignored `ios/Local.xcconfig` with `DEVELOPMENT_TEAM = YOUR_TEAM_ID`.
+The project includes this optional file for both Debug and Release, including test
+targets, and preserves it when regenerating the project. Enable
 NFC Tag Reading for the matching App ID and provisioning profile. The app declares
 `com.apple.security.smartcard`, NFC `TAG` access, and OpenPGP application ID
-`D27600012401`. No signing team or credentials are stored in this repository.
+`D27600012401`. No signing team or credentials are committed to this repository.
 
 Unsigned verification:
 

@@ -1,0 +1,2 @@
+// Optional machine-local signing settings, shared by the app and test targets.
+#include? "Local.xcconfig"
