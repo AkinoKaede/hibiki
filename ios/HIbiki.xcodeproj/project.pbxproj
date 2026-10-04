@@ -208,7 +208,7 @@
 				"CLANG_ENABLE_MODULES" = "YES";
 				"ENABLE_USER_SCRIPT_SANDBOXING" = "NO";
 				"TARGETED_DEVICE_FAMILY" = "1,2";
-				"CODE_SIGN_STYLE" = "Automatic";
+				"CODE_SIGN_STYLE" = "$(HIBIKI_CODE_SIGN_STYLE)";
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
 				"SWIFT_STRICT_CONCURRENCY" = "complete";
 				"ENABLE_APP_SANDBOX" = "YES";
@@ -226,6 +226,10 @@
 				"OTHER_SWIFT_FLAGS" = ("$(inherited)", "-Xcc", "-fmodule-map-file=$(SRCROOT)/Generated/hibiki_mobileFFI.modulemap");
 				"OTHER_LDFLAGS" = ("$(inherited)", "-liconv", "-framework", "Security", "-framework", "SystemConfiguration");
 				"INFOPLIST_KEY_UILaunchScreen_Generation" = "YES";
+				"HIBIKI_CODE_SIGN_STYLE" = "Automatic";
+				"HIBIKI_CODE_SIGN_IDENTITY" = "Apple Development";
+				"CODE_SIGN_IDENTITY[sdk=iphoneos*]" = "$(HIBIKI_CODE_SIGN_IDENTITY)";
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = "$(HIBIKI_PROVISIONING_PROFILE_SPECIFIER)";
 				"SWIFT_OPTIMIZATION_LEVEL" = "-O";
 				"DEBUG_INFORMATION_FORMAT" = "dwarf-with-dsym";
 			};

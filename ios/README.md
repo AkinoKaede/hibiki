@@ -108,8 +108,10 @@ its required signing metadata.
    serialized across branches; avoid concurrent uploads from other tools.
 
 The job uses macOS 15 with Xcode 26.3, builds the Release Rust XCFramework, resolves
-locked Swift packages, and overrides version/signing settings on the Xcode
-command line. The selected app, profile, signing identity, expiry, team, and
+locked Swift packages, and applies the workflow version through Xcode build
+settings. Release signing uses app-specific `HIBIKI_*` overrides so Swift package
+resource bundles do not receive the app's provisioning profile.
+The selected app, profile, signing identity, expiry, team, and
 entitlements are checked before compilation.
 
 The job saves the IPA, dSYM archive, and available logs as an

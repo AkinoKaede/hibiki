@@ -95,8 +95,8 @@ xcodebuild "${XCODE_ARGS[@]}" archive \
     -derivedDataPath "$RUNNER_TEMP/hibiki-derived-data" \
     -archivePath "$OUTPUT/HIbiki.xcarchive" \
     "MARKETING_VERSION=$IOS_VERSION" "CURRENT_PROJECT_VERSION=$IOS_BUILD_NUMBER" \
-    "DEVELOPMENT_TEAM=$APPLE_TEAM_ID" CODE_SIGN_STYLE=Manual \
-    "CODE_SIGN_IDENTITY=$SIGNING_CERTIFICATE" "PROVISIONING_PROFILE_SPECIFIER=$PROFILE_UUID" \
+    "DEVELOPMENT_TEAM=$APPLE_TEAM_ID" HIBIKI_CODE_SIGN_STYLE=Manual \
+    "HIBIKI_CODE_SIGN_IDENTITY=$SIGNING_CERTIFICATE" "HIBIKI_PROVISIONING_PROFILE_SPECIFIER=$PROFILE_UUID" \
     2>&1 | release_log archive
 (cd "$OUTPUT/HIbiki.xcarchive" && /usr/bin/zip -qr "$OUTPUT/HIbiki.dSYMs.zip" dSYMs)
 xcodebuild -exportArchive -archivePath "$OUTPUT/HIbiki.xcarchive" \

@@ -32,6 +32,16 @@ def configs(name,extra):
     entries=[]
     for mode in ['Debug','Release']:
         values={**settings,**extra}
+        if name=='HIbiki' and mode=='Release':
+            # CI overrides app-only settings through custom variables. Standard
+            # command-line signing overrides also affect Swift package targets.
+            values.update({
+                'HIBIKI_CODE_SIGN_STYLE':'Automatic',
+                'HIBIKI_CODE_SIGN_IDENTITY':'Apple Development',
+                'CODE_SIGN_STYLE':'$(HIBIKI_CODE_SIGN_STYLE)',
+                'CODE_SIGN_IDENTITY[sdk=iphoneos*]':'$(HIBIKI_CODE_SIGN_IDENTITY)',
+                'PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]':'$(HIBIKI_PROVISIONING_PROFILE_SPECIFIER)',
+            })
         values.update({'SWIFT_OPTIMIZATION_LEVEL':'-Onone' if mode=='Debug' else '-O','DEBUG_INFORMATION_FORMAT':'dwarf' if mode=='Debug' else 'dwarf-with-dsym'})
         if mode=='Debug':values['SWIFT_ACTIVE_COMPILATION_CONDITIONS']='$(inherited) DEBUG'
         config_fields={'baseConfigurationReference':signing} if name=='project' else {}
