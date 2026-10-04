@@ -23,7 +23,7 @@ struct RootView: View {
             if !model.foreground {
                 ZStack {
                     Color(uiColor: .systemBackground).ignoresSafeArea()
-                    Label("HIbiki", systemImage: "lock.shield").font(.title)
+                    Label("Hibiki", systemImage: "lock.shield").font(.title)
                 }.accessibilityHidden(true)
             }
         }
@@ -46,7 +46,7 @@ struct SetupView: View {
             Section {
                 Image(systemName: "waveform.circle.fill").font(.system(size: 64)).foregroundStyle(.indigo).frame(maxWidth: .infinity).padding()
                 Text("Your keys stay with you.").font(.title2.bold())
-                Text("Enter passwords and use your security key for GPG operations on your trusted computers.").foregroundStyle(.secondary)
+                Text("Use your security key and enter passphrases for GPG operations on your computers.").foregroundStyle(.secondary)
             }
             Section("Connect to your server") {
                 TextField("Server URL", text: $model.server).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("serverURL")
@@ -60,9 +60,11 @@ struct SetupView: View {
             Section {
                 Button { Task { await model.setup() } } label: {
                     HStack { Text("Get started"); Spacer(); if model.busy { ProgressView() } else { Image(systemName: "arrow.right") } }
-                }.disabled(model.busy || model.server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityIdentifier("getStarted")
-            } footer: { Text("HIbiki connects while the app is open. Services are off until you enable them.") }
-        }.navigationTitle("HIbiki").disabled(model.busy)
+                }
+                .disabled(model.busy || model.server.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .accessibilityIdentifier("getStarted")
+            } footer: { Text("Hibiki connects while the app is open. Services remain off until enabled.") }
+        }.navigationTitle("Hibiki").disabled(model.busy)
     }
 }
 
@@ -73,13 +75,13 @@ struct StatusView: View {
             Section {
                 HStack(spacing: 16) {
                     Image(systemName: model.connection == "online" ? "checkmark.shield.fill" : "network.slash").font(.largeTitle).foregroundStyle(model.connection == "online" ? .green : .secondary)
-                    VStack(alignment: .leading, spacing: 5) { Text(model.statusText).font(.title2.bold()); Text(verbatim: model.device?.name ?? "HIbiki").foregroundStyle(.secondary) }
+                    VStack(alignment: .leading, spacing: 5) { Text(model.statusText).font(.title2.bold()); Text(verbatim: model.device?.name ?? "Hibiki").foregroundStyle(.secondary) }
                 }.padding(.vertical, 12)
                 LabeledContent("Server") { Text(verbatim: model.server).font(.caption).lineLimit(2) }
             }
             if !model.channels.contains(where: { $0.active }), model.pairing == nil {
                 Section("Finish setup") {
-                    Text("Join a channel in the Channels tab, then enable the services you want this device to provide.")
+                    Text("Join a channel in the Channels tab, then enable services for this device.")
                 }
             }
             Section("Provide services") {
@@ -87,23 +89,33 @@ struct StatusView: View {
                 Toggle("OpenPGP card", isOn: $model.cardEnabled).onChange(of: model.cardEnabled) { _, _ in model.updateServices() }
                 if model.cardEnabled, model.card == nil { Text("Register your security key in the Security Keys tab.").foregroundStyle(.secondary) }
                 if let card = model.card, model.cardEnabled {
-                    Label(model.selectedUSBAvailable ? "USB connection detected" : (card.transport == .nfc ? (model.selectedUSBSupported ? "Connect using USB, or enter the PIN and use NFC." : "Enter the PIN, then tap your security key using NFC.") : "Confirmation required for each operation"), systemImage: model.selectedUSBAvailable || card.transport == .usb ? "cable.connector" : "wave.3.right")
+                    let text = model.selectedUSBAvailable
+                        ? "USB connection detected"
+                        : (card.transport == .nfc
+                            ? (model.selectedUSBSupported
+                                ? "Connect via USB, or enter the PIN and tap with NFC."
+                                : "Enter your PIN, then tap your security key with NFC.")
+                            : "Confirmation required for each operation")
+                    Label(
+                        text,
+                        systemImage: model.selectedUSBAvailable || card.transport == .usb ? "cable.connector" : "wave.3.right"
+                    )
                 }
             }
             if let pairing = model.pairing {
                 Section("Waiting for approval") {
-                    Text("Compare these words on an existing member device before approving.")
+                    Text("Compare these verification words on a member device before approving.")
                     Text(verbatim: model.device?.words ?? "").font(.system(.body, design: .monospaced)).textSelection(.enabled)
                     LabeledContent("Request") { Text(verbatim: pairing.request).font(.caption).textSelection(.enabled) }
-                    Text("This request stays pending until approved, rejected, withdrawn, or invalidated.")
+                    Text("This request stays pending until approved, rejected, or withdrawn.")
                     WithdrawRequestButton(model: model)
                 }
             }
             Section {
                 Label("Private keys remain on your security key.", systemImage: "lock.shield")
-                Text("Keep HIbiki open to receive requests. Returning reconnects and accepts requests still waiting for this device.").foregroundStyle(.secondary)
+                Text("Keep Hibiki open to receive requests. Returning to the app reconnects automatically.").foregroundStyle(.secondary)
             }
-        }.navigationTitle("HIbiki").refreshable { await model.refresh() }
+        }.navigationTitle("Hibiki").refreshable { await model.refresh() }
     }
 }
 
@@ -127,9 +139,9 @@ struct ChannelsView: View {
                 if model.allowChannelCreation == true {
                     NavigationLink("Create a channel") { CreateChannelView(model: model) }
                 } else if model.allowChannelCreation == false {
-                    Text("Channel creation is managed by the server administrator. Ask for an initialization invitation.").foregroundStyle(.secondary)
+                    Text("Channel creation requires an invitation from the server administrator.").foregroundStyle(.secondary)
                 } else {
-                    Text("Connect to the server to check channel creation policy.").foregroundStyle(.secondary)
+                    Text("Connect to the server to check channel creation permissions.").foregroundStyle(.secondary)
                 }
             }
         }.navigationTitle("Channels").refreshable { await model.refresh() }
@@ -152,12 +164,12 @@ struct JoinView: View {
                         await model.refresh()
                     } }
                 }.disabled(invite.isEmpty || psk.isEmpty || model.busy || model.connection != "online" || model.pairing != nil)
-            } footer: { Text("Obtain the invitation and PSK separately from a trusted member. The invitation must use your configured server.") }
+            } footer: { Text("Get the invitation and PSK separately from a trusted member. The invitation server must match yours.") }
             if let pairing = model.pairing {
                 Section("Waiting for approval") {
                     Text(verbatim: model.device?.words ?? "").font(.system(.body, design: .monospaced)).textSelection(.enabled)
                     Text(verbatim: pairing.request).font(.caption).textSelection(.enabled)
-                    Text("Compare all 24 words and the request ID on the approving device.")
+                    Text("Compare the 24 verification words and request ID on the approving device.")
                     WithdrawRequestButton(model: model)
                 }
             }
@@ -218,7 +230,7 @@ struct InvitationSections: View {
             Section {
                 Text(verbatim: psk).font(.system(.body, design: .monospaced)).textSelection(.enabled).privacySensitive()
                 Button("Copy PSK") { UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: psk]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(120)]) }
-            } header: { Text("Save your PSK") } footer: { Text("Store this PSK safely. Share it separately from the invitation; HIbiki does not save it.") }
+            } header: { Text("Save your PSK") } footer: { Text("Store this PSK safely and share it separately from the invitation. Hibiki does not save it.") }
         }
     }
 }
@@ -299,7 +311,7 @@ struct ChannelView: View {
         .task { await load() }.refreshable { await load() }
         .confirmationDialog("Revoke this device?", isPresented: Binding(get: { revoke != nil }, set: { if !$0 { revoke = nil } }), titleVisibility: .visible) {
             if let device = revoke { Button("Revoke", role: .destructive) { Task { await model.perform { try await model.client?.revoke(channel: channelID, device: device.id); await load() } } } }
-        } message: { Text("This identity will no longer be able to rejoin this channel.") }
+        } message: { Text("This device will not be able to rejoin this channel.") }
         .confirmationDialog("Leave this channel?", isPresented: $leaving, titleVisibility: .visible) {
             Button("Leave channel", role: .destructive) { Task { await model.perform { try await model.client?.leave(channel: channelID); await load() } } }
         }
@@ -327,14 +339,14 @@ struct ApprovalView: View {
             Section("Public-key verification words") { Text(verbatim: request.device.words).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
             Section("Request ID") { Text(verbatim: request.id).font(.caption.monospaced()).textSelection(.enabled) }
             Section {
-                Toggle("I compared all 24 words and the request ID", isOn: $verified)
+                Toggle("I verified the 24 words and request ID", isOn: $verified)
                 Button(approved ? "Approved" : "Approve device") { Task { await model.perform {
                     try await model.client?.approve(channel: request.channel, requestId: request.id)
                     approved = true; await model.refresh()
                 } } }.disabled(!verified || approved || rejected || model.busy || model.connection != "online")
                 Button(rejected ? "Rejected" : "Reject request", role: .destructive) { rejecting = true }
                     .disabled(approved || rejected || model.busy || model.connection != "online")
-            } footer: { Text("These words identify a public device key. They are not a recovery phrase.") }
+            } footer: { Text("These words verify this device’s public key. They are not a recovery phrase.") }
         }.navigationTitle("Approve device")
         .confirmationDialog("Reject this join request?", isPresented: $rejecting, titleVisibility: .visible) {
             Button("Reject request", role: .destructive) { Task { await model.perform {
@@ -342,7 +354,7 @@ struct ApprovalView: View {
                 rejected = true
                 await model.refresh()
             } } }
-        } message: { Text("This removes only this request. The device may request to join again.") }
+        } message: { Text("Removes this request. The device can request to join again later.") }
     }
 }
 
@@ -357,12 +369,16 @@ struct CardView: View {
     var body: some View {
         List {
             Section {
-                Label(model.usbPresent ? "USB reader reports a card" : "No USB card", systemImage: "cable.connector")
+                Label(model.usbPresent ? "USB security key detected" : "No USB security key", systemImage: "cable.connector")
                 Text("USB and Lightning connectors are supported.").font(.caption).foregroundStyle(.secondary)
             }
             Section {
                 if model.registeredCards.isEmpty {
-                    ContentUnavailableView("No security keys registered", systemImage: "key.horizontal", description: Text("Register once to save public information. Private keys stay on your security key."))
+                    ContentUnavailableView(
+                        "No security keys registered",
+                        systemImage: "key.horizontal",
+                        description: Text("Register once to save public information. Private keys always stay on your security key.")
+                    )
                 }
                 ForEach(model.registeredCards) { entry in
                     NavigationLink { RegisteredCardView(serial: entry.id, model: model) } label: {
@@ -381,7 +397,7 @@ struct CardView: View {
             } header: {
                 Text("Registered security keys")
             } footer: {
-                Text("One entry per security key. USB and NFC connections share the same public information. Only the selected key provides card services.")
+                Text("USB and NFC share the same key record. Only the selected security key provides card services.")
             }
         }
         .navigationTitle("Security Keys")
@@ -422,7 +438,7 @@ struct RegisterCardView: View {
                 LabeledContent("Read using", value: transport == .usb ? String(localized: "USB") : "NFC")
                 Toggle(transport == .usb ? "NFC support" : "USB connection support", isOn: $otherSupported)
             } header: { Text("Security key") } footer: {
-                Text("Turn this off if your key does not support the other connection. Registration reads only the current connection; identity is checked again during use.")
+                Text("Turn this off if your key does not support both USB and NFC. Key identity is verified again during use.")
             }
             Section {
                 Button {
@@ -431,7 +447,7 @@ struct RegisterCardView: View {
                     HStack { Text("Read and register"); Spacer(); if model.busy { ProgressView() } }
                 }.disabled(model.busy || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (transport == .usb && !model.usbPresent))
             } footer: {
-                Text(transport == .usb ? "Insert the security key to read its public information. No PIN is required." : "Tap your security key to read its public information. No PIN is required.")
+                Text(transport == .usb ? "Insert your security key to read public information. No PIN needed." : "Tap your security key to read public information. No PIN needed.")
             }
         }.navigationTitle("Register security key")
     }
@@ -452,13 +468,13 @@ struct RegisteredCardView: View {
                     LabeledContent("Supported connections", value: entry.connections)
                     LabeledContent("Registration read using", value: entry.card.transport == .usb ? String(localized: "USB") : "NFC")
                     if model.card?.serial == serial {
-                        Label("Selected card", systemImage: "checkmark.circle.fill")
+                        Label("Selected security key", systemImage: "checkmark.circle.fill")
                     } else {
                         Button("Use this security key") { Task { await model.selectCard(serial) } }.disabled(model.busy)
                     }
                 }
                 Section("OpenPGP keys") {
-                    if entry.card.keys.isEmpty { Text("No keys on this card").foregroundStyle(.secondary) }
+                    if entry.card.keys.isEmpty { Text("No OpenPGP keys found on this key").foregroundStyle(.secondary) }
                     ForEach(entry.card.keys) { key in
                         VStack(alignment: .leading, spacing: 6) {
                             Text(key.slot == 1 ? "Signing" : (key.slot == 2 ? "Decryption" : "Authentication")).font(.headline)
@@ -469,7 +485,7 @@ struct RegisteredCardView: View {
                 }
                 Section {
                     Button("Remove registration", role: .destructive) { confirmRemoval = true }.disabled(model.busy)
-                } footer: { Text("Only removes this app’s public record. It does not erase keys from the security key.") }
+                } footer: { Text("Only removes this app’s saved record. It does not erase keys from your security key.") }
             }
         }
         .navigationTitle(entry?.name ?? String(localized: "Security Key"))
@@ -492,7 +508,7 @@ struct SettingsView: View {
             }
             Section {
                 Text(verbatim: model.device?.words ?? "").font(.system(.body, design: .monospaced)).textSelection(.enabled)
-            } header: { Text("Public-key verification words") } footer: { Text("These words identify a public device key. They are not a recovery phrase.") }
+            } header: { Text("Public-key verification words") } footer: { Text("These words verify this device’s public key. They are not a recovery phrase.") }
             Section("Connection") {
                 Text(verbatim: model.server)
                 LabeledContent("Availability", value: String(localized: "While app is open"))
@@ -500,13 +516,13 @@ struct SettingsView: View {
                 Button("Disconnect from server", role: .destructive) { confirmDisconnect = true }
                     .disabled(model.busy).accessibilityIdentifier("disconnectServer")
             }
-            Section("About") { Text("HIbiki"); Text("PINs are not saved. Private keys stay on the card or the requesting computer.").foregroundStyle(.secondary) }
+            Section("About") { Text("Hibiki"); Text("PINs are never saved. Private keys stay on your security key or computer.").foregroundStyle(.secondary) }
         }.navigationTitle("Settings")
         .confirmationDialog("Disconnect from this server?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) { Task { await model.disconnectRelay() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This stops current requests and removes this device’s local pairing. You can then connect to another server. Security key registrations are kept. You will need to pair again, even with this server. Other members can remove the old device from their channels.")
+            Text("This disconnects from the server and resets local pairing. Registered security keys are kept, but you will need to pair again to reconnect.")
         }
     }
 }
@@ -532,15 +548,20 @@ struct PinView: View {
                         if prompt.kind == .cardUsb {
                             Text("Insert your security key, then continue.")
                         } else if model.selectedUSBSupported {
-                            Text(model.selectedUSBAvailable ? "USB connection detected. Continue to enter the PIN." : "Connect using USB, or enter the PIN and use NFC.")
+                            Text(model.selectedUSBAvailable ? "USB connection detected. Continue to enter the PIN." : "Connect via USB, or enter the PIN and tap with NFC.")
                         } else {
-                            Text("Use your security key for this operation? Enter the PIN next, then tap the key.")
+                            Text("Use your security key for this operation? Enter your PIN, then tap the key.")
                         }
                         Text(verbatim: prompt.description).font(.caption.monospaced())
                     } else if !prompt.description.isEmpty { Text(verbatim: prompt.description) }
                     if !prompt.error.isEmpty { Text(verbatim: prompt.error).foregroundStyle(.red) }
                     if asksPin {
-                        SecureField(prompt.label.isEmpty ? String(localized: "PIN or passphrase") : prompt.label, text: $pin).textContentType(nil).autocorrectionDisabled().textInputAutocapitalization(.never).focused($focused).accessibilityIdentifier("pinInput")
+                        SecureField(prompt.label.isEmpty ? String(localized: "PIN or passphrase") : prompt.label, text: $pin)
+                            .textContentType(nil)
+                            .autocorrectionDisabled()
+                            .textInputAutocapitalization(.never)
+                            .focused($focused)
+                            .accessibilityIdentifier("pinInput")
                     }
                     Button(prompt.ok.isEmpty ? String(localized: "Continue") : prompt.ok) { submit() }
                         .disabled(submitting)
@@ -548,7 +569,7 @@ struct PinView: View {
                     if !prompt.notOk.isEmpty, !asksPin { Button(prompt.notOk) { model.answer(prompt, accepted: false) } }
                 }
             }
-            .navigationTitle(prompt.title.isEmpty ? String(localized: "HIbiki request") : prompt.title)
+            .navigationTitle(prompt.title.isEmpty ? String(localized: "Hibiki request") : prompt.title)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button { pin = ""; model.answer(prompt, accepted: false) } label: {

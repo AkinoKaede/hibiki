@@ -6,10 +6,11 @@ enum HardwareError: LocalizedError {
     case unavailable, disconnected, multipleCards, invalidResponse
     var errorDescription: String? {
         switch self {
-        case .unavailable: return String(localized: "Card reader unavailable. Use a physical device and check permissions.")
-        case .disconnected: return String(localized: "Card disconnected or request canceled.")
+        case .unavailable:
+            return String(localized: "Security key reader is unavailable. Check permissions and try again.")
+        case .disconnected: return String(localized: "Security key disconnected or operation canceled.")
         case .multipleCards: return String(localized: "Connect only the security key you want to use.")
-        case .invalidResponse: return String(localized: "Invalid card response.")
+        case .invalidResponse: return String(localized: "Invalid security key response.")
         }
     }
 }
@@ -121,7 +122,7 @@ final class NFCReader: NSObject, NFCTagReaderSessionDelegate, @unchecked Sendabl
     }
     func tagReaderSession(_ session: NFCTagReaderSession, didDetect tags: [NFCTag]) {
         guard tags.count == 1, case .iso7816(let card) = tags[0] else {
-            session.alertMessage = String(localized: "Present one OpenPGP security key.")
+            session.alertMessage = String(localized: "Hold only one OpenPGP security key near your iPhone.")
             session.restartPolling()
             return
         }

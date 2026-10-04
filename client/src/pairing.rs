@@ -21,13 +21,10 @@ fn write_device(output: &mut impl Write, device: &Device) -> Result<()> {
     // Debug formatting escapes terminal control sequences in untrusted display names.
     writeln!(output, "{HEADING}Device name:{HEADING:#} {:?}", device.name)?;
     writeln!(output, "{HEADING}Device ID:{HEADING:#} {}", device.id())?;
+    writeln!(output, "{HEADING}Verification words: {words}{HEADING:#}")?;
     writeln!(
         output,
-        "{HEADING}Ed25519 public-key words: {words}{HEADING:#}"
-    )?;
-    writeln!(
-        output,
-        "These 24 words encode a public identity key, not a recovery phrase or an OpenPGP key."
+        "These 24 words verify this device’s public key. They are not a recovery phrase."
     )?;
     output.flush()?;
     Ok(())
@@ -109,7 +106,7 @@ pub fn choose_approval(
     write_device(output, &request.body.device)?;
     writeln!(
         output,
-        "{WARNING}Compare all 24 words and the request ID with the joining device using a trusted channel.{WARNING:#}"
+        "{WARNING}Compare the 24 verification words and request ID with the joining device using a trusted channel.{WARNING:#}"
     )?;
     if answer(input, output, "Approve this device? [y/N]: ")?.eq_ignore_ascii_case("y") {
         return Ok(Some(request));

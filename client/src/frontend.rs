@@ -39,12 +39,12 @@ pub async fn run(service: ServiceKind) -> Result<()> {
             }
             "--display" => display = Some(args.next().context("missing display")?),
             "--version" => {
-                println!("HIbiki {}", env!("CARGO_PKG_VERSION"));
+                println!("Hibiki {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             }
             "--help" => {
                 println!(
-                    "HIbiki Assuan stdio adapter. Configure HIBIKI_CONFIG and run hibiki daemon."
+                    "Hibiki Assuan stdio adapter. Configure HIBIKI_CONFIG and run hibiki daemon."
                 );
                 return Ok(());
             }

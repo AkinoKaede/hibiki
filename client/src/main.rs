@@ -15,7 +15,7 @@ use hibiki_lib::{
 use std::{io::Write, path::PathBuf, time::Duration};
 
 #[derive(Parser)]
-#[command(version, about = "Manage HIbiki devices and Assuan services")]
+#[command(version, about = "Manage Hibiki devices and Assuan services")]
 struct Args {
     #[arg(long, global = true, env = "HIBIKI_CONFIG")]
     config: Option<PathBuf>,
@@ -334,7 +334,7 @@ async fn run() -> Result<()> {
             println!("{HEADING}request{HEADING:#} {request_id}");
             std::io::stdout().flush()?;
             eprintln!(
-                "Ask a trusted member to run hibiki channel approve {:?} and compare all 24 public-key words and request ID {request_id} before answering y.",
+                "Ask a trusted member to run hibiki channel approve {:?} and verify the 24 words and request ID {request_id} before answering y.",
                 state.name
             );
             eprintln!(
@@ -478,7 +478,7 @@ async fn run() -> Result<()> {
             println!("{SUCCESS}left{SUCCESS:#} {name} {id}");
             if app.proof(&id)?.verify()?.members().is_empty() {
                 eprintln!(
-                    "{WARNING}No members remain;{WARNING:#} the server administrator must delete and recreate the channel to use it again."
+                    "{WARNING}No members remain;{WARNING:#} ask the server administrator to recreate the channel if needed."
                 );
             }
         }

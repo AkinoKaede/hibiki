@@ -266,7 +266,7 @@ final class AppModel {
                     case .member: rememberPairing(nil)
                     case .absent:
                         rememberPairing(nil)
-                        error = String(localized: "The join request was rejected, withdrawn, or invalidated. Obtain a current invitation to try again.")
+                        error = String(localized: "This join request was rejected or has expired. Get a new invitation to try again.")
                     case .pending: break
                     }
                 }
