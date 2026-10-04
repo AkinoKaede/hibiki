@@ -1386,7 +1386,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "请输入有效的服务器地址，可省略 wss:// 或 ws://。"
+            "value": "请输入有效的服务器地址，可省略wss://或ws://。"
           }
         }
       }

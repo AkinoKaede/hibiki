@@ -9,6 +9,12 @@ concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  localization:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./ios/scripts/check-zh-localization.sh
   test:
     strategy:
       fail-fast: false

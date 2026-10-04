@@ -157,6 +157,17 @@ the app clears its UI state promptly and does not claim complete Swift heap eras
 
 ## Tests
 
+Check Chinese localization spacing (requires `jq`):
+
+```sh
+./ios/scripts/check-zh-localization.sh
+```
+
+The check follows Termind's Chinese spacing rules for existing `zh-Hans` and
+`zh-Hant` translations, including plural variations: no spaces between Chinese
+and English, digits, or format placeholders; no spaces around punctuation; and
+Chinese text uses Chinese punctuation. It also runs in CI.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
