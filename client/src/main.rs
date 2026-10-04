@@ -275,7 +275,6 @@ async fn main() -> Result<()> {
             let (secret, _) = psk(psk_file, false)?;
             let request = JoinRequest::create(&app.identity, &state)?;
             let request_id = request.id()?;
-            let expires = request.body.expires_at;
             conn.request(Control::Join {
                 request,
                 psk: secret,
@@ -289,16 +288,13 @@ async fn main() -> Result<()> {
             );
             if !no_wait {
                 loop {
-                    if hibiki_lib::now() >= expires {
-                        bail!("admission request expired");
-                    }
                     let proof = refresh(&app, &conn, &id).await?;
                     if proof.verify()?.member(&app.identity.device.id()).is_ok() {
                         println!("joined {} {}", state.name, id);
                         break;
                     }
                     tokio::select! {
-                        _ = tokio::signal::ctrl_c() => bail!("stopped waiting; pending request will expire"),
+                        _ = tokio::signal::ctrl_c() => bail!("stopped waiting; request remains pending"),
                         _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                     }
                 }

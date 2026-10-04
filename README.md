@@ -235,7 +235,7 @@ hibiki channel join 'hibiki-v1:...'
 hibiki channel approve personal
 ```
 
-Compare the joining device's 24 public-key verification words before answering `y`. Approval defaults to No, and pending requests expire after 10 minutes. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
+Compare the joining device's 24 public-key verification words before answering `y`. Approval defaults to No. Pending requests remain until approved, invalidated by PSK rotation, or removed with the channel. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
 
 ### 3. Enable the services each device will provide
 
@@ -334,7 +334,7 @@ git commit -S -m 'Signed with HIbiki'
 
 Each device grants one exclusive scdaemon session at a time; busy devices reject additional sessions. HIbiki starts its own native scdaemon with `--server` in `$XDG_DATA_HOME/hibiki/scdaemon`. Reader settings can go in that directory's `scdaemon.conf`. It does not connect to existing agent/scdaemon sockets or terminate other services holding a reader.
 
-**Password entry.** Each `GETPIN`, `CONFIRM`, or `MESSAGE` request starts a fresh race among enabled local and remote providers. The first complete successful response wins. A canceled or failed window only eliminates that candidate; remaining candidates can still succeed. Losing processes are closed, and their partial input is discarded.
+**Password entry.** Each `GETPIN`, `CONFIRM`, or `MESSAGE` request starts a fresh race among enabled local and remote providers, including devices that return online before the command deadline. The first complete successful response wins. A canceled or failed window only eliminates that candidate; remaining candidates can still succeed. Losing processes are closed, and their partial input is discarded.
 
 The native agent or card validates the password. A retry starts a new race; HIbiki never tries the losing candidates' passwords. Answers go only to the requester. Multiple Pinentry inquiries are serialized upstream, with each answer routed back to its original candidate.
 
@@ -343,7 +343,9 @@ The native agent or card validates the password. A retry starts a new race; HIbi
 - No extra scdaemon socket is exposed. `GETINFO socket_name` returns no data, and additional concurrent card connections from the same agent are unsupported.
 - Card discovery, public-key reading, signing, and decryption are supported. PIN changes, key writing, key generation, and raw APDU commands are rejected on both ends.
 - Each active command has a 120-second default timeout, configurable from 1 to 3600 seconds. Idle time does not consume the next command's deadline.
-- Caller exit, timeout, disconnect, revocation, or channel deletion closes affected sessions and owned backends. Reconnection enables new requests without replaying unfinished operations.
+- Caller exit, timeout, revocation, or channel deletion cancels pending work and closes affected backends. Offline members can join a waiting operation before its original deadline; the first success cancels every other queued copy. Relay reconnection preserves live callers and uses new encrypted sessions.
+- A selected card stays bound to its original device and serial. Reconnection restores confirmed selection and SETDATA preparation for commands not yet executed. An execution claim is durable: if execution started and its result was lost, HIbiki reports an unknown result and never automatically repeats the private command.
+- The relay persists operation IDs, deadlines, targets, and execution states, not PINs, plaintext command data, or results. Queue limits are 128 operations per caller or target and 4096 in total. Pending work survives a relay restart only when the live caller resumes it; restarting the caller daemon does not restore vanished calls.
 - The daemon currently needs a relay connection even when only local providers are used.
 
 ## Channel administration
@@ -373,7 +375,7 @@ Server-side creation prints a single-use `hibiki-init-v1:...` invitation and a P
 
 Devices authenticate with Ed25519 identities and establish `Noise_XX_25519_ChaChaPoly_BLAKE2s` sessions bound to the protocol, channel, device identities, and session ID. Signed membership histories and saved checkpoints detect rollback, identity substitution, and conflicting histories. Service discovery is encrypted too.
 
-The relay can see membership, routing, timing, and ciphertext sizes, but cannot read Assuan traffic. It does not queue operations for offline devices. Approved channel members can use enabled services and approve additional members.
+The relay can see membership, routing, timing, and ciphertext sizes, but cannot read Assuan traffic. It queues operation metadata for offline devices while the original caller is still waiting. Approved channel members can use enabled services and approve additional members.
 
 Card private keys stay on the card; software private keys stay on the requesting device. PINs and passphrases pass through the input device and requester, and card PINs also reach the selected card provider. HIbiki clears secret buffers after use, does not cache passwords or enable Pinentry's external password cache, and keeps protocol bodies and secrets out of logs. Native agent caching still applies.
 
@@ -385,7 +387,7 @@ Card private keys stay on the card; software private keys stay on the requesting
 
 Private files use mode `0600` and directories use `0700`. Back up identity and trust records together.
 
-The protocol identifier remains **`hibiki/1`** and the WebSocket path is **`/hibiki`**. This stdio implementation is incompatible with the previous agent proxy despite retaining that identifier. Update every device and initialize fresh identities and pairing. Old configuration and invitations are not loaded or migrated; historical files outside the workspace are left untouched.
+The protocol identifier is **`hibiki/2`** and the WebSocket path is **`/hibiki`**. Upgrade the relay and every device together; version 1 clients receive a protocol mismatch. Existing identities, signed membership proofs, and stored pending approvals are retained. Database migration adds an operation metadata table without rewriting signed records. Previously deleted expired approvals cannot be recovered; submit a new request.
 
 ## Development and testing
 

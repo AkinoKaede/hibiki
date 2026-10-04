@@ -99,21 +99,29 @@ async fn admission_requires_psk_pending_and_one_authorized_signature() {
     );
 }
 #[tokio::test]
-async fn expiry_and_concurrent_approval_are_atomic() {
+async fn legacy_expired_requests_remain_approvable_and_approval_is_atomic() {
     let f = Fixture::new().await;
     let mut expired = f.request();
     expired.body.created_at = now() - 601;
     expired.body.expires_at = now() - 1;
     expired.signature = f.b.sign("join/v1", &expired.body).unwrap();
     assert!(
-        f.db.join(&f.b.device.id(), expired, "test-secret".into())
+        f.db.join(&f.b.device.id(), expired.clone(), "test-secret".into())
             .await
-            .is_err()
+            .is_ok()
     );
-    let request = f.request();
+    let request = expired;
     f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
         .await
         .unwrap();
+    let reopened = Database::open(&f._dir.path().join("db")).await.unwrap();
+    assert_eq!(
+        reopened
+            .pending(&f.a.device.id(), &f.proof.genesis.body.id)
+            .await
+            .unwrap(),
+        vec![request.clone()]
+    );
     let event = MembershipEvent::create(
         &f.a,
         &f.proof.verify().unwrap(),

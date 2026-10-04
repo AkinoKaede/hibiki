@@ -2,7 +2,7 @@ use crate::{assuan::Line, channel::*, identity::Device};
 use serde::{Deserialize, Serialize};
 
 /// Hibiki wire protocol identifier, authenticated by the device and bound into Noise.
-pub const VERSION: &str = "hibiki/1";
+pub const VERSION: &str = "hibiki/2";
 pub const WS_PATH: &str = "/hibiki";
 pub const MAX_WIRE: usize = 4 * 1024 * 1024;
 
@@ -28,6 +28,33 @@ impl std::error::Error for WireError {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Control {
+    Queue {
+        operation: Operation,
+    },
+    ResumeOperation {
+        id: String,
+    },
+    OperationStatus {
+        id: String,
+    },
+    ClaimOperation {
+        id: String,
+        initiator: String,
+        channel: String,
+        service: ServiceKind,
+    },
+    TargetDone {
+        id: String,
+        success: bool,
+    },
+    AbandonTarget {
+        id: String,
+        peer: String,
+    },
+    EndOperation {
+        id: String,
+        completed: bool,
+    },
     Create {
         genesis: ChannelGenesis,
         verifier: String,
@@ -61,6 +88,7 @@ pub enum Control {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)] // Bounded, serialized wire value.
 pub enum Reply {
+    Operation(Operation),
     Ok,
     Proof(MembershipProof),
     Proofs(Vec<MembershipProof>),
@@ -70,6 +98,13 @@ pub enum Reply {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Envelope {
+    OperationReady {
+        id: String,
+        peer: String,
+    },
+    OperationChanged {
+        id: String,
+    },
     Hello {
         version: String,
         nonce: String,
@@ -125,6 +160,8 @@ pub enum SessionOutput {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)] // The trust proof is bounded and exchanged only at setup.
 pub enum PrivateMessage {
+    BeginOperation { id: String },
+    OperationBegun,
     Trust(MembershipProof),
     Discover,
     Capabilities { scdaemon: bool, pinentry: bool },
@@ -135,4 +172,34 @@ pub enum PrivateMessage {
     Close,
     Closed,
     Failure,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum OperationState {
+    Pending,
+    Completed,
+    Canceled,
+    Expired,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TargetState {
+    Pending,
+    Executing,
+    Succeeded,
+    Failed,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperationTarget {
+    pub device: String,
+    pub state: TargetState,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Operation {
+    pub id: String,
+    pub channel: String,
+    pub initiator: String,
+    pub service: ServiceKind,
+    pub deadline: u64,
+    pub state: OperationState,
+    pub targets: Vec<OperationTarget>,
 }

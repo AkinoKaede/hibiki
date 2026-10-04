@@ -1,5 +1,6 @@
 mod db;
 mod entities;
+mod operations;
 mod service;
 use anyhow::{Context, Result, bail};
 use axum::serve::ListenerExt;

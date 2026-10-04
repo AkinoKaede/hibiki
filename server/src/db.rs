@@ -10,7 +10,7 @@ use std::{collections::HashSet, path::Path, time::Duration};
 
 #[derive(Clone)]
 pub struct Database {
-    connection: DatabaseConnection,
+    pub(crate) connection: DatabaseConnection,
 }
 impl Database {
     pub async fn open(path: &Path) -> Result<Self> {
@@ -42,6 +42,7 @@ impl Database {
             schema.create_table_from_entity(registry::Entity),
             schema.create_table_from_entity(empty::Entity),
             schema.create_table_from_entity(deleted::Entity),
+            schema.create_table_from_entity(crate::entities::operation::Entity),
         ] {
             tx.execute(statement.if_not_exists()).await?;
         }
@@ -286,7 +287,6 @@ impl Database {
         if body.device.id() != caller
             || body.genesis_hash != state.genesis_hash
             || body.psk_epoch != state.psk_epoch
-            || body.expires_at <= now()
             || body.created_at > now() + 30
             || state.member(caller).is_ok()
         {
@@ -312,10 +312,6 @@ impl Database {
         if unchanged.rows_affected != 1 {
             bail!("CONFLICT: channel changed; retry admission");
         }
-        pending::Entity::delete_many()
-            .filter(pending::Column::Expires.lte(now() as i64))
-            .exec(&tx)
-            .await?;
         pending::Entity::insert(pending::ActiveModel {
             id: Set(request.id()?),
             channel: Set(state.id),
@@ -339,7 +335,6 @@ impl Database {
         state.member(caller)?;
         let rows = pending::Entity::find()
             .filter(pending::Column::Channel.eq(id))
-            .filter(pending::Column::Expires.gt(now() as i64))
             .filter(pending::Column::Epoch.eq(state.psk_epoch as i64))
             .order_by_asc(pending::Column::Id)
             .all(&self.connection)
@@ -389,11 +384,8 @@ impl Database {
                     .one(&tx)
                     .await?
                     .context("admission not pending")?;
-                if row.request != encode(request)?
-                    || row.expires <= now() as i64
-                    || row.epoch != old.psk_epoch as i64
-                {
-                    bail!("admission expired or altered");
+                if row.request != encode(request)? || row.epoch != old.psk_epoch as i64 {
+                    bail!("admission altered");
                 }
                 if new_verifier.is_some() {
                     bail!("unexpected PSK verifier");

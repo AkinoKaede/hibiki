@@ -224,7 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn incompatible_hibiki_versions_are_rejected_before_authentication() {
-        for version in ["hibiki/2", "Hibiki/1", "1"] {
+        for version in ["hibiki/1", "Hibiki/2", "1"] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("ws://{}{WS_PATH}", listener.local_addr().unwrap());
             let peer = tokio::spawn(async move {
@@ -248,7 +248,7 @@ mod tests {
             });
             let identity = Identity::generate("test".into()).unwrap();
             match Connection::open(&url, true, &identity).await {
-                Err(error) => assert!(error.to_string().contains("expected hibiki/1")),
+                Err(error) => assert!(error.to_string().contains("expected hibiki/2")),
                 Ok(_) => panic!("accepted incompatible protocol"),
             }
             peer.await.unwrap();

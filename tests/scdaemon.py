@@ -133,6 +133,7 @@ try:
             else:
                 data = bytes.fromhex(args)
         elif command in ('PKSIGN', 'PKDECRYPT'):
+            time.sleep(card.get('private_delay', 0))
             key = selected_key(args)
             if key is None:
                 emit(b'ERR 17 No key')

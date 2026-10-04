@@ -6,12 +6,13 @@ use crate::{
     provider::LocalContext,
 };
 use anyhow::{Context, Result, bail};
+use hibiki_core::operation::QueuedOperation;
 use hibiki_lib::{
     assuan::{self, AssuanResult, Line, Response},
     decode,
-    protocol::ServiceKind,
+    protocol::{ServiceKind, TargetState},
 };
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::{
     io::AsyncReadExt,
     net::{UnixStream, unix::OwnedWriteHalf},
@@ -126,14 +127,14 @@ async fn interactive(
     }
 }
 
-async fn discover(
+async fn discover_round(
     hub: Arc<Hub>,
     open: &LocalOpen,
     line: Line,
     stop: &CancellationToken,
+    peers: Vec<String>,
 ) -> Result<(Endpoint, AssuanResult)> {
     let mut tasks = JoinSet::new();
-    let peers = hub.candidates(&open.channel, ServiceKind::Scdaemon).await;
     for peer in peers {
         let hub = hub.clone();
         let channel = open.channel.clone();
@@ -166,6 +167,14 @@ async fn discover(
                 ep.close().await;
                 bail!("no matching OpenPGP card");
             }
+            ep.card_serial = result.lines.iter().find_map(|line| {
+                line.strip_prefix(b"S SERIALNO ")
+                    .and_then(|v| std::str::from_utf8(v).ok())
+                    .map(str::to_owned)
+            });
+            if ep.card_serial.is_none() {
+                bail!("card did not return its serial number");
+            }
             let result = if cmd == "SERIALNO" {
                 result
             } else {
@@ -186,6 +195,49 @@ async fn discover(
     bail!("no matching OpenPGP card available")
 }
 
+async fn discover(
+    hub: Arc<Hub>,
+    open: &LocalOpen,
+    line: Line,
+    stop: &CancellationToken,
+) -> Result<(Endpoint, AssuanResult)> {
+    let targets = hub.eligible(&open.channel, ServiceKind::Scdaemon)?;
+    if targets.is_empty() {
+        bail!("no card providers");
+    }
+    let operation =
+        QueuedOperation::new(hub.clone(), &open.channel, ServiceKind::Scdaemon, targets).await?;
+    loop {
+        let peers = operation.ready().await?;
+        if !peers.is_empty() {
+            if let Ok(result) =
+                discover_round(hub.clone(), open, line.clone(), stop, peers.clone()).await
+            {
+                operation.finish(true).await?;
+                return Ok(result);
+            }
+            if !hub.connection().closed.is_cancelled() {
+                let online = hub.peers(&open.channel).await.unwrap_or_default();
+                for peer in peers {
+                    if online.contains(&peer) || peer == hub.app.identity.device.id() {
+                        operation.abandon(&peer).await?;
+                    }
+                }
+            }
+        }
+        if operation
+            .status()
+            .await?
+            .targets
+            .iter()
+            .all(|t| t.state != TargetState::Pending)
+        {
+            bail!("no matching OpenPGP card available");
+        }
+        operation.pause().await;
+    }
+}
+
 async fn password_race(
     hub: Arc<Hub>,
     open: &LocalOpen,
@@ -195,60 +247,75 @@ async fn password_race(
     writer: &mut OwnedWriteHalf,
     inputs: &mut mpsc::Receiver<Line>,
 ) -> Result<AssuanResult> {
+    let targets = hub.eligible(&open.channel, ServiceKind::Pinentry)?;
+    if targets.is_empty() {
+        bail!("no pinentry providers");
+    }
+    let operation = Arc::new(
+        QueuedOperation::new(hub.clone(), &open.channel, ServiceKind::Pinentry, targets).await?,
+    );
     let mut tasks = JoinSet::new();
     let (tx, mut inquiries) = mpsc::channel(32);
+    let mut running = HashSet::new();
     let mut failures = 0;
     let mut canceled = None;
     let mut failed = None;
-    for peer in hub.candidates(&open.channel, ServiceKind::Pinentry).await {
-        let hub = hub.clone();
-        let channel = open.channel.clone();
-        let stop = stop.child_token();
-        let settings = settings.clone();
-        let line = line.clone();
-        let tx = tx.clone();
-        let local = peer == hub.app.identity.device.id();
-        let context = LocalContext {
-            display: open.display.clone(),
-        };
-        tasks.spawn(async move {
-            let Some(mut ep) = hub
-                .open(&channel, &peer, ServiceKind::Pinentry, stop, context)
-                .await?
-            else {
-                return Ok(None);
-            };
-            for setting in settings.values() {
-                let (cmd, args) = assuan::command(setting)?;
-                if !local && cmd == "OPTION" && assuan::local_option(args) {
-                    continue;
-                }
-                let result = transaction(&mut ep, setting.clone(), None).await?;
-                if !result.success() {
-                    ep.close().await;
-                    return Ok(Some(result));
-                }
-            }
-            let result = transaction(&mut ep, line, Some(&tx)).await;
-            drop(ep);
-            result.map(Some)
-        });
-    }
-    drop(tx);
+    let mut tick = tokio::time::interval(Duration::from_millis(250));
     loop {
         tokio::select! {
             Some(inquiry)=inquiries.recv()=>upstream_inquiry(inquiry,writer,inputs).await?,
-            result=tasks.join_next()=>match result {
-                Some(Ok(Ok(Some(result)))) if result.success()=>return Ok(result),
-                Some(Ok(Ok(Some(mut result)))) if result.canceled()=>canceled=result.lines.pop(),
-                Some(Ok(Ok(Some(mut result))))=>{failures+=1;failed=result.lines.pop();},
-                // Disabled peers are not participants, including when every enabled window cancels.
-                Some(Ok(Ok(None)))=>{},
-                Some(_)=>failures+=1,
-                None=>return Ok(AssuanResult { lines: vec![
-                    (if failures == 0 { canceled } else { failed })
-                        .unwrap_or_else(||assuan::error(assuan::GENERAL,"no pinentry candidate completed"))
-                ] }),
+            _=tick.tick()=>{
+                let status=operation.status().await?;
+                for peer in operation.ready().await? {
+                    if !running.insert(peer.clone()) { continue; }
+                    let hub=hub.clone(); let channel=open.channel.clone(); let stop=stop.child_token();
+                    let settings=settings.clone(); let line=line.clone(); let tx=tx.clone();
+                    let context=LocalContext { display: open.display.clone() };
+                    let operation=operation.clone();
+                    tasks.spawn(async move {
+                        let result=async {
+                            let local=peer == hub.app.identity.device.id();
+                            let Some(mut ep)=hub.open(&channel, &peer, ServiceKind::Pinentry, stop, context).await? else { return Ok(None); };
+                            for setting in settings.values() {
+                                let (cmd,args)=assuan::command(setting)?;
+                                if !local && cmd == "OPTION" && assuan::local_option(args) { continue; }
+                                let result=transaction(&mut ep,setting.clone(),None).await?;
+                                if !result.success() { return Ok(Some(result)); }
+                            }
+                            if local { operation.claim_local().await?; }
+                            else { ep.bind_operation(Some(operation.value.id.clone())); }
+                            let watching=operation.watch(ep.stop.clone());
+                            let result=transaction(&mut ep,line,Some(&tx)).await;
+                            watching.abort();
+                            if local && let Ok(result)=&result {
+                                operation.local_done(result.success()).await?;
+                            }
+                            drop(ep);
+                            result.map(Some)
+                        }.await;
+                        (peer,result)
+                    });
+                }
+                if tasks.is_empty() && status.targets.iter().all(|t| t.state != TargetState::Pending) {
+                    operation.finish(false).await?;
+                    return Ok(AssuanResult { lines: vec![(if failures == 0 { canceled } else { failed }).unwrap_or_else(||assuan::error(assuan::GENERAL,"no pinentry candidate completed; execution result may be unknown"))] });
+                }
+            },
+            result=tasks.join_next(), if !tasks.is_empty()=>{
+                if let Some(Ok((peer,result)))=result {
+                    running.remove(&peer);
+                    match result {
+                        Ok(Some(result)) if result.success()=>{ operation.finish(true).await?; return Ok(result); },
+                        Ok(Some(mut result)) if result.canceled()=>canceled=result.lines.pop(),
+                        Ok(Some(mut result))=>{failures+=1;failed=result.lines.pop();},
+                        Ok(None)=>{},
+                        Err(_)=>failures+=1,
+                    }
+                    if !hub.connection().closed.is_cancelled() {
+                        let online=hub.peers(&open.channel).await.unwrap_or_default();
+                        if online.contains(&peer) || peer == hub.app.identity.device.id() { operation.abandon(&peer).await?; }
+                    }
+                }
             }
         }
     }
@@ -272,6 +339,188 @@ fn local_info(service: ServiceKind, args: &str, pid: u32) -> AssuanResult {
     let mut lines = assuan::data_lines(value.as_bytes());
     lines.push("OK".into());
     AssuanResult { lines }
+}
+
+#[derive(Default)]
+struct CardState {
+    peer: String,
+    serial: String,
+    preparation: Vec<Line>,
+}
+impl CardState {
+    fn selected(&mut self, ep: &Endpoint) -> Result<()> {
+        self.peer = ep.peer.clone();
+        self.serial = ep
+            .card_serial
+            .clone()
+            .context("card identity unavailable")?;
+        self.preparation.clear();
+        Ok(())
+    }
+    fn remember(&mut self, line: &Line) -> Result<()> {
+        let (cmd, args) = assuan::command(line)?;
+        if cmd == "SETDATA" {
+            if !args.starts_with("--append ") {
+                self.preparation.retain(|l| !l.starts_with(b"SETDATA "));
+            }
+            self.preparation.push(line.clone());
+        } else if cmd == "SWITCHAPP" {
+            self.preparation.retain(|l| !l.starts_with(b"SWITCHAPP "));
+            self.preparation.insert(0, line.clone());
+        }
+        if self.preparation.len() > assuan::MAX_LINES
+            || self.preparation.iter().map(|l| l.len()).sum::<usize>() > assuan::MAX_DATA
+        {
+            bail!("card preparation limit");
+        }
+        Ok(())
+    }
+}
+
+async fn restore_card(
+    hub: Arc<Hub>,
+    open: &LocalOpen,
+    state: &CardState,
+    stop: &CancellationToken,
+    operation: &QueuedOperation,
+) -> Result<Endpoint> {
+    loop {
+        let status = operation.status().await?;
+        let target = status
+            .targets
+            .iter()
+            .find(|t| t.device == state.peer)
+            .context("card target missing")?;
+        if target.state != TargetState::Pending {
+            bail!("execution result unknown; private operation will not be repeated");
+        }
+        if operation.ready().await?.contains(&state.peer) {
+            match hub
+                .open(
+                    &open.channel,
+                    &state.peer,
+                    ServiceKind::Scdaemon,
+                    stop.child_token(),
+                    LocalContext::default(),
+                )
+                .await
+            {
+                Ok(Some(mut ep)) => {
+                    let preparation = async {
+                        let result = transaction(
+                            &mut ep,
+                            format!("SERIALNO --demand={} openpgp", state.serial)
+                                .as_str()
+                                .into(),
+                            None,
+                        )
+                        .await?;
+                        if !result.success()
+                            || !result
+                                .lines
+                                .iter()
+                                .any(|l| &**l == format!("S SERIALNO {}", state.serial).as_bytes())
+                        {
+                            bail!("original card unavailable");
+                        }
+                        for line in &state.preparation {
+                            if !transaction(&mut ep, line.clone(), None).await?.success() {
+                                bail!("card preparation failed");
+                            }
+                        }
+                        Ok::<_, anyhow::Error>(())
+                    }
+                    .await;
+                    if preparation.is_ok() {
+                        ep.card_serial = Some(state.serial.clone());
+                        return Ok(ep);
+                    }
+                    if !hub.connection().closed.is_cancelled()
+                        && hub
+                            .peers(&open.channel)
+                            .await
+                            .unwrap_or_default()
+                            .contains(&state.peer)
+                    {
+                        preparation?;
+                    }
+                }
+                Ok(None) => bail!("card service disabled"),
+                Err(_) => {}
+            }
+        }
+        operation.pause().await;
+    }
+}
+
+async fn card_transaction(
+    hub: Arc<Hub>,
+    open: &LocalOpen,
+    selected: &mut Option<Endpoint>,
+    state: &CardState,
+    line: Line,
+    stop: &CancellationToken,
+    io: (&mut OwnedWriteHalf, &mut mpsc::Receiver<Line>),
+) -> Result<AssuanResult> {
+    let (cmd, _) = assuan::command(&line)?;
+    let private = matches!(cmd, "PKSIGN" | "PKDECRYPT");
+    let operation = QueuedOperation::new(
+        hub.clone(),
+        &open.channel,
+        ServiceKind::Scdaemon,
+        vec![state.peer.clone()],
+    )
+    .await?;
+    loop {
+        if selected
+            .as_ref()
+            .is_none_or(|ep| ep.done.is_cancelled() || ep.stop.is_cancelled())
+        {
+            if let Some(ep) = selected.take() {
+                ep.close().await;
+            }
+            *selected = Some(restore_card(hub.clone(), open, state, stop, &operation).await?);
+        }
+        let ep = selected.as_mut().unwrap();
+        let local = state.peer == hub.app.identity.device.id();
+        if private {
+            if local {
+                operation.claim_local().await?;
+            } else {
+                ep.bind_operation(Some(operation.value.id.clone()));
+            }
+        }
+        let watching = operation.watch(ep.stop.clone());
+        let result = interactive(ep, line.clone(), io.0, io.1).await;
+        watching.abort();
+        ep.bind_operation(None);
+        match result {
+            Ok(result) => {
+                if private && local {
+                    operation.local_done(result.success()).await?;
+                }
+                operation.finish(result.success()).await?;
+                return Ok(result);
+            }
+            Err(error) => {
+                if let Some(ep) = selected.take() {
+                    ep.close().await;
+                }
+                let status = operation.status().await?;
+                if private
+                    && status
+                        .targets
+                        .iter()
+                        .any(|t| t.state != TargetState::Pending)
+                {
+                    bail!(
+                        "execution result unknown; private operation will not be repeated: {error}"
+                    );
+                }
+                *selected = Some(restore_card(hub.clone(), open, state, stop, &operation).await?);
+            }
+        }
+    }
 }
 
 pub async fn serve(hub: Arc<Hub>, mut stream: UnixStream) -> Result<()> {
@@ -305,6 +554,7 @@ pub async fn serve(hub: Arc<Hub>, mut stream: UnixStream) -> Result<()> {
     let result = async {
         write_line(&mut writer, b"OK HIbiki Assuan stdio service").await?;
         let mut selected: Option<Endpoint> = None;
+        let mut card_state = CardState::default();
         let mut settings = Settings::default();
         let mut broken = false;
         while let Some(line) = inputs.recv().await {
@@ -409,6 +659,7 @@ pub async fn serve(hub: Arc<Hub>, mut stream: UnixStream) -> Result<()> {
                         AssuanResult::ok()
                     };
                     broken = false;
+                    card_state = CardState::default();
                     return Ok(result);
                 }
                 if matches!(cmd, "SERIALNO" | "SWITCHCARD")
@@ -418,12 +669,26 @@ pub async fn serve(hub: Arc<Hub>, mut stream: UnixStream) -> Result<()> {
                         ep.close().await;
                     }
                     broken = false;
+                    card_state = CardState::default();
                 }
                 if broken {
                     bail!("card session failed; reset or select a card again");
                 }
-                if let Some(ep) = selected.as_mut() {
-                    return interactive(ep, line.clone(), &mut writer, &mut inputs).await;
+                if selected.is_some() {
+                    let result = card_transaction(
+                        hub.clone(),
+                        &open,
+                        &mut selected,
+                        &card_state,
+                        line.clone(),
+                        &stop,
+                        (&mut writer, &mut inputs),
+                    )
+                    .await?;
+                    if result.success() {
+                        card_state.remember(&line)?;
+                    }
+                    return Ok(result);
                 }
                 if matches!(cmd, "PKSIGN" | "PKDECRYPT") {
                     bail!("select a card and set data first");
@@ -436,6 +701,10 @@ pub async fn serve(hub: Arc<Hub>, mut stream: UnixStream) -> Result<()> {
                 } else {
                     discover(hub.clone(), &open, line.clone(), &stop).await?
                 };
+                card_state.selected(&ep)?;
+                if result.success() {
+                    card_state.remember(&line)?;
+                }
                 selected = Some(ep);
                 Ok(result)
             };
@@ -444,14 +713,25 @@ pub async fn serve(hub: Arc<Hub>, mut stream: UnixStream) -> Result<()> {
                 operation,
             )
             .await;
+            let unknown = matches!(&outcome, Ok(Err(error)) if error.to_string().contains("execution result unknown"));
             let result = match outcome {
                 Ok(Ok(result)) => result,
                 _ => {
+                    if open.service == ServiceKind::Scdaemon && !card_state.peer.is_empty() {
+                        broken = true;
+                    }
                     if let Some(ep) = selected.take() {
                         ep.close().await;
                         broken = true;
                     }
-                    AssuanResult::error(assuan::GENERAL, "service unavailable, failed or timed out")
+                    AssuanResult::error(
+                        assuan::GENERAL,
+                        if unknown {
+                            "execution result unknown; do not retry automatically"
+                        } else {
+                            "service unavailable, failed or timed out"
+                        },
+                    )
                 }
             };
             tracing::debug!(service=?open.service,command=cmd,success=result.success(),"Assuan result");

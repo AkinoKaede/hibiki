@@ -59,10 +59,9 @@ pub fn validate_pending(request: &JoinRequest, state: &VerifiedChannelState) -> 
     if b.channel_id != state.id
         || b.genesis_hash != state.genesis_hash
         || b.psk_epoch != state.psk_epoch
-        || b.expires_at <= hibiki_lib::now()
         || b.created_at > hibiki_lib::now() + 30
     {
-        bail!("pending request has expired or does not match channel");
+        bail!("pending request does not match channel");
     }
     Ok(())
 }

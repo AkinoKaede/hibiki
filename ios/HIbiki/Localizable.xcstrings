@@ -401,12 +401,12 @@
         }
       }
     },
-    "Keep HIbiki open to receive requests. Returning to the app reconnects without replaying interrupted operations.": {
+    "Keep HIbiki open to receive requests. Returning reconnects and accepts requests still waiting for this device.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "保持HIbiki打开以接收请求。返回应用后会重新连接，已中断的操作不会自动重试。"
+            "value": "保持HIbiki打开以接收请求。返回应用后会重新连接，并接收仍在等待这台设备的请求。"
           }
         }
       }
@@ -621,7 +621,7 @@
         }
       }
     },
-    "Pending requests will expire. Approved members retain access.": {
+    "Pending requests will be invalidated. Approved members retain access.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1327,6 +1327,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "已检测到USB连接，继续输入PIN。"
+          }
+        }
+      }
+    },
+    "This request stays pending until approved or invalidated.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此请求会保留，直到获得批准或失效。"
           }
         }
       }

@@ -57,7 +57,7 @@ xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
    enter the separately shared PSK.
 3. For member invitations, compare **all 24 public-key words and the request ID**
    on an existing member before approving. The words are public identity data,
-   not a recovery phrase. Pending requests expire after ten minutes.
+   not a recovery phrase. Pending requests remain until approved or invalidated; they have no time limit.
 4. Enable Password Entry and/or OpenPGP Card. Both start disabled. On the
    requesting computer, configure the HIbiki adapters as described in the root
    README. The app can approve members, share invitations, rotate PSKs, revoke
@@ -111,8 +111,10 @@ NFC discovery describes the registered public snapshot, not proof that a physica
 key is currently in range. Live mutable fields such as retry counters are not
 invented from cached data. PIN failures report the card's actual returned status.
 HIbiki does not automatically retry PIN verification or replay private operations.
-The existing requester-side session binding means a failed selected provider ends
-that operation; a new operation can discover other available providers.
+A waiting request can reach the app when it returns online before the caller's
+original deadline. Card operations remain bound to the original device and card;
+unstarted commands may resume after selection and data preparation are restored.
+A command with an unknown execution result is never automatically repeated.
 
 Supported key families: RSA 2048/3072/4096, Ed25519, X25519, NIST P-256/P-384/P-521.
 The key's firmware and configured OpenPGP algorithms determine what it can use.
@@ -127,7 +129,8 @@ remains the requesting agent's responsibility; HIbiki does not report `PIN_REPEA
 Only the foreground app receives requests. Backgrounding disconnects the relay,
 cancels prompts and native requests, and releases card connections. The temporary
 inactive state caused by the NFC sheet does not disconnect. Returning reconnects
-without replaying work. There is no APNs integration or claimed background service.
+and accepts still-pending requests. Completed, canceled, expired, and previously
+executed requests are not replayed. There is no APNs integration or claimed background service.
 
 The independently generated identity is stored in a non-synchronizing Keychain
 item accessible only while the device is unlocked, on this device only. Public

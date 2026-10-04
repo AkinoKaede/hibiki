@@ -6,6 +6,7 @@ Uses temporary generated RSA keys only. Never opens a real card or user's keyrin
 import json
 import queue
 import re
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -245,6 +246,16 @@ def main():
             encrypted = a.gpg('--trust-model', 'always', '--recipient', fpr, '--encrypt', data=b'mobile decryption').stdout
             assert a.gpg('--decrypt', data=encrypted).stdout == b'mobile decryption'
             print('PASS: mobile OpenPGP backend via real relay/GnuPG, RSA signature and decryption, split APDU responses', flush=True)
+
+            mobile.send(action='stop');mobile.wait('stopped')
+            def pending_mobile_operation():
+                with sqlite3.connect(root/'relay.sqlite3') as db:
+                    return db.execute('SELECT count(*) FROM operations WHERE active=1 AND deadline>?', (int(time.time()),)).fetchone()[0]
+            with Assuan(a, 'pinentry') as pe:
+                pe.send(b'GETPIN');wait_for(pending_mobile_operation)
+                mobile.send(action='start');mobile.wait('started')
+                assert pe.result()[-1]==b'OK'
+            print('PASS: returning mobile app receives a still-pending offline PIN request', flush=True)
 
             # Discovery uses public data; each private operation requires fresh consent.
             assert mobile.card_confirmations == 2

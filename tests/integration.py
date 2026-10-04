@@ -9,6 +9,7 @@ import selectors
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -210,6 +211,55 @@ def test_all():
             for d in devices: d.start()
             print('PASS: fresh HIbiki pairing, server-only creation and independent services',flush=True)
 
+            # Queue metadata survives a relay restart; only a live caller resumes it.
+            a.services(timeout=20);a.restart();b.stop();c.stop()
+            def queued():
+                with sqlite3.connect(server_data/'hibiki.sqlite3') as db:
+                    return db.execute('SELECT count(*) FROM operations WHERE active=1 AND deadline>?', (int(time.time()),)).fetchone()[0]
+            pe=Assuan(a,'pinentry');pe.send(b'GETPIN');wait_for(queued)
+            server.terminate();server.wait(timeout=10)
+            config.write_text(config.read_text().replace('127.0.0.1:0','127.0.0.1:'+port))
+            server=subprocess.Popen([str(SERVER),'--config',str(config)],stdout=log,stderr=log)
+            wait_for(lambda:a.log_path.read_text().count('HIbiki daemon connected')>=2,timeout=15)
+            b.start();assert pe.result()[-1]==b'OK';pe.close()
+            count=len(list(c.root.glob('pinentry-[0-9]*')))
+            c.start();time.sleep(.5)
+            assert count==len(list(c.root.glob('pinentry-[0-9]*'))), 'completed operation replayed on late peer'
+            print('PASS: offline PIN queue survives relay restart; completed operation never reaches late peer',flush=True)
+
+            b.stop();c.stop()
+            counts=[len(list(d.root.glob('pinentry-[0-9]*'))) for d in (b,c)]
+            pe=Assuan(a,'pinentry');pe.send(b'GETPIN');wait_for(queued);pe.close();wait_for(lambda:not queued())
+            b.start();c.start();time.sleep(.5)
+            assert counts==[len(list(d.root.glob('pinentry-[0-9]*'))) for d in (b,c)], 'abandoned queued request replayed'
+            print('PASS: caller exit cancels queued requests before devices return',flush=True)
+
+            b.stop()
+            with Assuan(a,'scdaemon') as sc:
+                sc.send(('SERIALNO --demand='+card['serial']).encode());wait_for(queued);b.start()
+                assert sc.result()[-1]==b'OK'
+                assert sc.command(b'SETDATA '+b'00'*32)[-1]==b'OK'
+                count=b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN')
+                b.stop();sc.send(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode());wait_for(queued);b.start()
+                assert sc.result(lambda _: [b'D 123456',b'END'])[-1]==b'OK'
+                assert b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN')==count+1
+            print('PASS: offline card discovery and pinned card preparation restore; signature executes once',flush=True)
+
+            # Once execution has been claimed, a lost response must never repeat it.
+            delayed=dict(card,private_delay=4);(b.root/'card.json').write_text(json.dumps(delayed))
+            with Assuan(a,'scdaemon') as sc:
+                assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1]==b'OK'
+                assert sc.command(b'SETDATA '+b'00'*32)[-1]==b'OK'
+                count=b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN')
+                sc.send(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode())
+                wait_for(lambda:b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN')==count+1)
+                b.stop();result=sc.result()
+                assert result[-1].startswith(b'ERR') and b'execution result unknown' in result[-1], result
+                (b.root/'card.json').write_text(json.dumps(card));b.start();time.sleep(.5)
+                assert b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN')==count+1, 'unknown signature replayed'
+            print('PASS: lost private-operation result reports unknown and never repeats execution',flush=True)
+            a.services();a.restart()
+
             b.mode(delay=.05,cancel=True);c.mode(delay=.2,password='remote answer')
             with Assuan(a,'pinentry') as pe:
                 assert pe.command(b'SETDESC Test remote input')[-1]==b'OK'
@@ -334,7 +384,7 @@ def test_all():
             # Relay loss ends the active operation; reconnect cannot replay it.
             pe=Assuan(a,'pinentry');pe.send(b'GETPIN');wait_for(c.waiting)
             server.terminate();server.wait(timeout=10)
-            pe.p.wait(timeout=10);pe.close();wait_for(c.idle)
+            assert pe.result()[-1].startswith(b'ERR');pe.close();wait_for(c.idle)
             counts=[len(list(d.root.glob('pinentry-[0-9]*'))) for d in devices]
             config.write_text(config.read_text().replace('127.0.0.1:0','127.0.0.1:'+port))
             server=subprocess.Popen([str(SERVER),'--config',str(config)],stdout=log,stderr=log)

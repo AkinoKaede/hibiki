@@ -90,12 +90,12 @@ struct StatusView: View {
                     Text("Compare these words on an existing member device before approving.")
                     Text(verbatim: model.device?.words ?? "").font(.system(.body, design: .monospaced)).textSelection(.enabled)
                     LabeledContent("Request") { Text(verbatim: pairing.request).font(.caption).textSelection(.enabled) }
-                    Text(Date(timeIntervalSince1970: TimeInterval(pairing.expiresAt)), style: .relative)
+                    Text("This request stays pending until approved or invalidated.")
                 }
             }
             Section {
                 Label("Private keys remain on your security key.", systemImage: "lock.shield")
-                Text("Keep HIbiki open to receive requests. Returning to the app reconnects without replaying interrupted operations.").foregroundStyle(.secondary)
+                Text("Keep HIbiki open to receive requests. Returning reconnects and accepts requests still waiting for this device.").foregroundStyle(.secondary)
             }
         }.navigationTitle("HIbiki").refreshable { await model.refresh() }
     }
@@ -280,7 +280,7 @@ struct ChannelView: View {
         }
         .confirmationDialog("Rotate channel PSK?", isPresented: $rotating, titleVisibility: .visible) {
             Button("Rotate PSK") { Task { await model.perform { psk = try await model.client?.rotatePsk(channel: channelID) ?? ""; await load() } } }
-        } message: { Text("Pending requests will expire. Approved members retain access.") }
+        } message: { Text("Pending requests will be invalidated. Approved members retain access.") }
         .onDisappear { psk = "" }
     }
     private func load() async {
@@ -304,7 +304,7 @@ struct ApprovalView: View {
                 Button(approved ? "Approved" : "Approve device") { Task { await model.perform {
                     try await model.client?.approve(channel: request.channel, requestId: request.id)
                     approved = true; await model.refresh()
-                } } }.disabled(!verified || approved || model.busy || Date().timeIntervalSince1970 >= Double(request.expiresAt))
+                } } }.disabled(!verified || approved || model.busy)
             } footer: { Text("These words identify a public device key. They are not a recovery phrase.") }
         }.navigationTitle("Approve device")
     }
@@ -459,7 +459,7 @@ struct SettingsView: View {
             Section("Connection") {
                 Text(verbatim: model.server)
                 LabeledContent("Availability", value: String(localized: "While app is open"))
-                LabeledContent("Protocol", value: "hibiki/1")
+                LabeledContent("Protocol", value: "hibiki/2")
             }
             Section("About") { Text("HIbiki"); Text("PINs are not saved. Private keys stay on the card or the requesting computer.").foregroundStyle(.secondary) }
         }.navigationTitle("Settings")

@@ -15,7 +15,7 @@ use hibiki_lib::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 use tokio::sync::mpsc;
@@ -25,6 +25,7 @@ enum Packet {
     Data(Vec<u8>),
 }
 struct Entry {
+    operation: Option<String>,
     channel: String,
     peer: String,
     tx: mpsc::Sender<Packet>,
@@ -32,13 +33,15 @@ struct Entry {
 }
 pub struct Hub {
     pub app: Arc<App>,
-    pub connection: Arc<Connection>,
+    connection: RwLock<Arc<Connection>>,
+    pub changed: tokio::sync::Notify,
     card_slot: Arc<tokio::sync::Semaphore>,
     provider: Arc<dyn Provider>,
     sessions: Mutex<HashMap<String, Entry>>,
 }
 pub struct PeerSession {
     hub: Arc<Hub>,
+    connection: Arc<Connection>,
     channel: String,
     peer: String,
     id: String,
@@ -52,8 +55,7 @@ impl Drop for PeerSession {
 }
 impl PeerSession {
     async fn send(&self, data: Vec<u8>) -> Result<()> {
-        self.hub
-            .connection
+        self.connection
             .send(Envelope::Relay {
                 channel: self.channel.clone(),
                 peer: self.peer.clone(),
@@ -65,7 +67,7 @@ impl PeerSession {
     async fn packet(&mut self) -> Result<Vec<u8>> {
         tokio::select! {
             _ = self.stop.cancelled() => bail!("session canceled"),
-            _ = self.hub.connection.closed.cancelled() => bail!("server disconnected"),
+            _ = self.connection.closed.cancelled() => bail!("server disconnected"),
             packet = self.rx.recv() => match packet {
                 Some(Packet::Data(b)) => Ok(b),
                 None => bail!("session disconnected"),
@@ -106,6 +108,14 @@ impl PeerSession {
 }
 
 impl Hub {
+    pub fn connection(&self) -> Arc<Connection> {
+        self.connection.read().unwrap().clone()
+    }
+    pub fn reconnect(&self, connection: Arc<Connection>) {
+        *self.connection.write().unwrap() = connection;
+        self.changed.notify_waiters();
+    }
+
     pub fn new(
         app: Arc<App>,
         connection: Arc<Connection>,
@@ -114,7 +124,8 @@ impl Hub {
     ) -> Arc<Self> {
         Arc::new(Self {
             app,
-            connection,
+            connection: RwLock::new(connection),
+            changed: tokio::sync::Notify::new(),
             provider,
             card_slot,
             sessions: Mutex::new(HashMap::new()),
@@ -132,10 +143,16 @@ impl Hub {
             bail!("session capacity or duplicate ID");
         }
         let (tx, rx) = mpsc::channel(64);
-        let stop = self.connection.closed.child_token();
+        let connection = self.connection();
+        let stop = if peer == self.app.identity.device.id() {
+            CancellationToken::new()
+        } else {
+            connection.closed.child_token()
+        };
         sessions.insert(
             id.clone(),
             Entry {
+                operation: None,
                 channel: channel.clone(),
                 peer: peer.clone(),
                 tx,
@@ -144,6 +161,7 @@ impl Hub {
         );
         Ok(PeerSession {
             hub: self.clone(),
+            connection,
             channel,
             peer,
             id,
@@ -153,7 +171,7 @@ impl Hub {
     }
     pub async fn refresh(&self, channel: &str) -> Result<MembershipProof> {
         let Reply::Proof(proof) = self
-            .connection
+            .connection()
             .request(Control::GetChannel {
                 channel: channel.into(),
             })
@@ -203,11 +221,79 @@ impl Hub {
             }
         }
     }
+    pub fn stop_operation(&self, id: &str) {
+        for entry in self.sessions.lock().unwrap().values() {
+            if entry.operation.as_deref() == Some(id) {
+                entry.stop.cancel();
+            }
+        }
+        self.changed.notify_waiters();
+    }
+    fn bind_session(&self, session: &str, id: Option<String>) {
+        if let Some(entry) = self.sessions.lock().unwrap().get_mut(session) {
+            entry.operation = id;
+        }
+    }
+    async fn claim(&self, session: &PeerSession, id: &str, service: ServiceKind) -> Result<()> {
+        let Reply::Operation(op) = session
+            .connection
+            .request(Control::ClaimOperation {
+                id: id.into(),
+                initiator: session.peer.clone(),
+                channel: session.channel.clone(),
+                service,
+            })
+            .await?
+        else {
+            bail!("invalid operation claim");
+        };
+        if op.id != id
+            || op.initiator != session.peer
+            || op.channel != session.channel
+            || op.service != service
+            || op.state != OperationState::Pending
+            || !op.targets.iter().any(|t| {
+                t.device == self.app.identity.device.id() && t.state == TargetState::Executing
+            })
+        {
+            bail!("operation claim identity mismatch");
+        }
+        crate::operation::record_execution(&self.app, &op)?;
+        self.bind_session(&session.id, Some(id.into()));
+        Ok(())
+    }
+    async fn check_command(
+        &self,
+        session: &PeerSession,
+        input: &SessionInput,
+        operation: Option<&str>,
+        service: ServiceKind,
+    ) -> Result<()> {
+        require_operation(input, operation)?;
+        if !self.provider.enabled(service) {
+            bail!("service disabled");
+        }
+        if matches!(input, SessionInput::Command { .. })
+            && let Some(id) = operation
+        {
+            let Reply::Operation(op) = session
+                .connection
+                .request(Control::OperationStatus { id: id.into() })
+                .await?
+            else {
+                bail!("invalid operation status");
+            };
+            if op.state != OperationState::Pending {
+                bail!("operation ended before execution");
+            }
+        }
+        Ok(())
+    }
     pub async fn peers(&self, channel: &str) -> Result<Vec<String>> {
         let state = self.refresh(channel).await?.verify()?;
         state.member(&self.app.identity.device.id())?;
         let Reply::Peers(mut peers) = self
-            .connection
+            .connection()
             .request(Control::Peers {
                 channel: channel.into(),
             })
@@ -239,6 +325,18 @@ impl Hub {
         }
         peers
     }
+    pub fn eligible(&self, channel: &str, service: ServiceKind) -> Result<Vec<String>> {
+        let state = self.app.proof(channel)?.verify()?;
+        state.member(&self.app.identity.device.id())?;
+        let mut peers: Vec<_> = state
+            .members()
+            .keys()
+            .filter(|p| **p != self.app.identity.device.id() || self.provider.enabled(service))
+            .cloned()
+            .collect();
+        peers.sort();
+        Ok(peers)
+    }
     pub async fn open(
         self: &Arc<Self>,
         channel: &str,
@@ -249,7 +347,7 @@ impl Hub {
     ) -> Result<Option<Endpoint>> {
         self.authorized(channel, peer)?;
         if peer == self.app.identity.device.id() {
-            return self
+            let mut endpoint = self
                 .provider
                 .open(
                     self.app.clone(),
@@ -263,8 +361,9 @@ impl Hub {
                         session: random_id(),
                     },
                 )
-                .await
-                .map(Some);
+                .await?;
+            endpoint.peer = peer.into();
+            return Ok(Some(endpoint));
         }
         let mut session = self.register(channel.into(), peer.into(), random_id())?;
         let setup = async {
@@ -338,17 +437,34 @@ impl Hub {
         let finished = done.clone();
         let stop = cancel.clone();
         let hub = self.clone();
+        let mut endpoint = Endpoint::new(tx, rx, cancel, done);
+        endpoint.peer = peer.into();
+        let binding = endpoint.operation.clone();
         tokio::spawn(async move {
             let run = async {
                 loop {
                     tokio::select! {
                         input=inputs.recv()=>match input {
-                            Some(input)=>session.send_private(&mut transport,&PrivateMessage::Input(input)).await?,
+                            Some(input)=>{
+                                if matches!(input, SessionInput::Command { .. }) {
+                                    let operation = binding.lock().unwrap().clone();
+                                    if let Some(id) = operation {
+                                        hub.bind_session(&session.id, Some(id.clone()));
+                                        session.send_private(&mut transport, &PrivateMessage::BeginOperation { id }).await?;
+                                        if !matches!(session.receive_private(&mut transport).await?, PrivateMessage::OperationBegun) { bail!("operation claim rejected"); }
+                                    }
+                                }
+                                session.send_private(&mut transport,&PrivateMessage::Input(input)).await?;
+                            },
                             None=>break,
                         },
                         output=session.receive_private(&mut transport)=>match output? {
                             PrivateMessage::Output(output)=>{
                                 hub.authorized(&session.channel,&session.peer)?;
+                                if let SessionOutput::Line { line, .. } = &output
+                                    && matches!(hibiki_lib::assuan::parse_response(line)?, hibiki_lib::assuan::Response::Ok | hibiki_lib::assuan::Response::Err(_)) {
+                                    hub.bind_session(&session.id, None);
+                                }
                                 outputs.send(output).await?;
                             },
                             _=>bail!("unexpected service frame"),
@@ -375,7 +491,7 @@ impl Hub {
             .await;
             finished.cancel();
         });
-        Ok(Some(Endpoint::new(tx, rx, cancel, done)))
+        Ok(Some(endpoint))
     }
     async fn incoming(self: Arc<Self>, mut session: PeerSession) -> Result<()> {
         let setup = async {
@@ -449,11 +565,20 @@ impl Hub {
             .send_private(&mut transport, &PrivateMessage::Opened)
             .await?;
         // Do not acquire a card or launch a UI for abandoned Open handshakes.
-        let first = tokio::time::timeout(
+        let mut first = tokio::time::timeout(
             Duration::from_secs(20),
             session.receive_private(&mut transport),
         )
         .await??;
+        let mut operation = None;
+        if let PrivateMessage::BeginOperation { id } = first {
+            self.claim(&session, &id, service).await?;
+            operation = Some(id);
+            session
+                .send_private(&mut transport, &PrivateMessage::OperationBegun)
+                .await?;
+            first = session.receive_private(&mut transport).await?;
+        }
         let PrivateMessage::Input(first @ SessionInput::Command { request: 1, .. }) = first else {
             session
                 .send_private(&mut transport, &PrivateMessage::Closed)
@@ -486,16 +611,42 @@ impl Hub {
             }
         };
         let result=async {
+            self.check_command(&session, &first, operation.as_deref(), service).await?;
             endpoint.tx.send(first).await?;
+            let session_stop=session.stop.clone();
+            let mut tick = tokio::time::interval(Duration::from_millis(500));
             loop {
                 tokio::select! {
+                    _=session_stop.cancelled()=>bail!("operation canceled"),
+                    _=tick.tick(), if operation.is_some()=>{
+                        if !self.provider.enabled(service) { bail!("service disabled"); }
+                        let Reply::Operation(op)=session.connection.request(Control::OperationStatus { id: operation.clone().unwrap() }).await? else { bail!("invalid operation status"); };
+                        if op.state != OperationState::Pending { bail!("operation ended"); }
+                    },
                     message=session.receive_private(&mut transport)=>match message? {
-                        PrivateMessage::Input(input)=>{self.authorized(&session.channel,&session.peer)?; endpoint.tx.send(input).await?;},
+                        PrivateMessage::BeginOperation { id }=>{
+                            if operation.is_some() { bail!("operation already active"); }
+                            self.claim(&session, &id, service).await?;
+                            operation=Some(id);
+                            session.send_private(&mut transport, &PrivateMessage::OperationBegun).await?;
+                        },
+                        PrivateMessage::Input(input)=>{self.authorized(&session.channel,&session.peer)?; self.check_command(&session,&input,operation.as_deref(),service).await?; endpoint.tx.send(input).await?;},
                         PrivateMessage::Close=>return Ok::<_,anyhow::Error>(()),
                         _=>bail!("unexpected service input"),
                     },
                     output=endpoint.rx.recv()=>match output {
-                        Some(output)=>{self.authorized(&session.channel,&session.peer)?;session.send_private(&mut transport,&PrivateMessage::Output(output)).await?;},
+                        Some(output)=>{
+                            self.authorized(&session.channel,&session.peer)?;
+                            if let SessionOutput::Line { line, .. } = &output {
+                                let response=hibiki_lib::assuan::parse_response(line)?;
+                                if matches!(response, hibiki_lib::assuan::Response::Ok | hibiki_lib::assuan::Response::Err(_))
+                                    && let Some(id)=operation.take() {
+                                    session.connection.request(Control::TargetDone { id, success: matches!(response, hibiki_lib::assuan::Response::Ok) }).await?;
+                                    self.bind_session(&session.id, None);
+                                }
+                            }
+                            session.send_private(&mut transport,&PrivateMessage::Output(output)).await?;
+                        },
                         None=>bail!("native service ended"),
                     }
                 }
@@ -546,6 +697,20 @@ impl Hub {
     }
 }
 
+fn require_operation(input: &SessionInput, operation: Option<&str>) -> Result<()> {
+    if let SessionInput::Command { line, .. } = input {
+        let (cmd, _) = hibiki_lib::assuan::command(line)?;
+        if matches!(
+            cmd,
+            "GETPIN" | "CONFIRM" | "MESSAGE" | "PKSIGN" | "PKDECRYPT"
+        ) && operation.is_none()
+        {
+            bail!("private operation requires a queue claim");
+        }
+    }
+    Ok(())
+}
+
 pub async fn announce(hub: &Arc<Hub>) -> Result<()> {
     let mut channels = Vec::new();
     for proof in hub.app.proofs()? {
@@ -562,7 +727,7 @@ pub async fn announce(hub: &Arc<Hub>) -> Result<()> {
             _ => hub.stop_channel(&id),
         }
     }
-    hub.connection
+    hub.connection()
         .request(Control::Announce { channels })
         .await?;
     Ok(())

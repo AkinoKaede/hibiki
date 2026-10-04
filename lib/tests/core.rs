@@ -282,14 +282,14 @@ fn hibiki_version_is_bound_to_authentication_and_noise() {
         verify(
             &a.device.signing_key,
             "server-auth/v1",
-            &("hibiki/2", "nonce", a.device.id()),
+            &("hibiki/1", "nonce", a.device.id()),
             &signature
         )
         .is_err()
     );
     let mut initiator =
         Handshake::new(&a, "channel", "a", "b", "session", b.device.noise_key, true).unwrap();
-    let wrong_prologue = encode(&("hibiki/2", "e2ee", "channel", "a", "b", "session")).unwrap();
+    let wrong_prologue = encode(&("hibiki/1", "e2ee", "channel", "a", "b", "session")).unwrap();
     let mut responder = snow::Builder::new(hibiki_lib::e2ee::PARAMS.parse().unwrap())
         .local_private_key(b.noise_secret())
         .unwrap()

@@ -68,7 +68,7 @@ impl MobileClient {
             .lock()
             .unwrap()
             .clone()
-            .filter(|h| !h.connection.closed.is_cancelled())
+            .filter(|h| !h.connection().closed.is_cancelled())
             .context("relay is offline")
     }
     fn selected_path(&self) -> PathBuf {
@@ -135,8 +135,10 @@ impl MobileClient {
                             _=refresh.tick()=>{let h=hub.clone();jobs.spawn(async move{let _=announce(&h).await;});},
                             Some(_)=jobs.join_next(),if !jobs.is_empty()=>{},
                             event=events.recv()=>match event {
+                                Some(Event::Message(Envelope::OperationReady {..}))=>hub.changed.notify_waiters(),
                                 Some(Event::Message(Envelope::Relay{channel,peer,session,data}))=>{let _=hub.route(channel,peer,session,data).await;},
                                 Some(Event::Message(Envelope::RelayFailure{session,peer,..}))=>hub.stop_session(&session,&peer),
+                                Some(Event::Message(Envelope::OperationChanged{id}))=>hub.stop_operation(&id),
                                 Some(Event::Message(Envelope::PeerOffline{peer}))=>hub.stop_peer(&peer),
                                 Some(Event::Message(Envelope::ChannelChanged{channel}))=>{let h=hub.clone();jobs.spawn(async move{if h.refresh(&channel).await.is_err(){h.stop_channel(&channel);}});},
                                 Some(Event::Disconnected)|None=>break,
@@ -267,7 +269,7 @@ impl MobileClient {
         let _lock = self.lifecycle.lock().await;
         self.stop.lock().unwrap().cancel();
         if let Some(hub) = self.hub.lock().unwrap().take() {
-            hub.connection.close();
+            hub.connection().close();
         }
         self.broker.cancel_all();
         let job = self.job.lock().unwrap().take();
@@ -411,7 +413,7 @@ impl MobileClient {
             let genesis = ChannelGenesis::create(&self.app.identity, name, &verifier)?;
             let expected = genesis.clone();
             let Reply::Proof(proof) = hub
-                .connection
+                .connection()
                 .request(Control::Create { genesis, verifier })
                 .await?
             else {
@@ -467,7 +469,7 @@ impl MobileClient {
                 }
                 let genesis = invite.founder_genesis(&self.app.identity)?;
                 let existing = hub
-                    .connection
+                    .connection()
                     .request(Control::GetChannel {
                         channel: invite.id.clone(),
                     })
@@ -476,7 +478,7 @@ impl MobileClient {
                     proof
                 } else {
                     let Reply::Proof(proof) = hub
-                        .connection
+                        .connection()
                         .request(Control::Claim {
                             genesis: genesis.clone(),
                             psk: psk.to_string(),
@@ -505,7 +507,7 @@ impl MobileClient {
             }
             let id = invite.genesis.body.id.clone();
             let Reply::Proof(proof) = hub
-                .connection
+                .connection()
                 .request(Control::GetChannel {
                     channel: id.clone(),
                 })
@@ -518,9 +520,9 @@ impl MobileClient {
             let result = JoinInfo {
                 channel: id,
                 request: request.id()?,
-                expires_at: request.body.expires_at,
+                expires_at: 0,
             };
-            hub.connection
+            hub.connection()
                 .request(Control::Join {
                     request,
                     psk: psk.to_string(),
@@ -537,7 +539,7 @@ impl MobileClient {
             let state = hub.refresh(&channel).await?.verify()?;
             state.member(&self.app.identity.device.id())?;
             let Reply::Requests(requests) = hub
-                .connection
+                .connection()
                 .request(Control::Pending {
                     channel: channel.clone(),
                 })
@@ -553,7 +555,7 @@ impl MobileClient {
                         id: r.id()?,
                         channel: channel.clone(),
                         device: device_info(&r.body.device, false)?,
-                        expires_at: r.body.expires_at,
+                        expires_at: 0,
                     })
                 })
                 .collect::<Result<Vec<_>>>()
@@ -567,7 +569,7 @@ impl MobileClient {
             let state = hub.refresh(&channel).await?.verify()?;
             state.member(&self.app.identity.device.id())?;
             let Reply::Requests(requests) = hub
-                .connection
+                .connection()
                 .request(Control::Pending {
                     channel: channel.clone(),
                 })
@@ -578,11 +580,11 @@ impl MobileClient {
             let request = requests
                 .into_iter()
                 .find(|r| r.id().ok().as_ref() == Some(&request_id))
-                .context("request expired")?;
+                .context("request not pending")?;
             management::validate_pending(&request, &state)?;
             management::append(
                 &self.app,
-                &hub.connection,
+                &hub.connection(),
                 &channel,
                 MembershipAction::Admit(request),
                 None,
@@ -597,7 +599,7 @@ impl MobileClient {
             let hub = self.connected()?;
             management::append(
                 &self.app,
-                &hub.connection,
+                &hub.connection(),
                 &channel,
                 MembershipAction::Revoke { device_id: device },
                 None,
@@ -614,7 +616,7 @@ impl MobileClient {
             let hub = self.connected()?;
             management::append(
                 &self.app,
-                &hub.connection,
+                &hub.connection(),
                 &channel,
                 MembershipAction::Leave,
                 None,
@@ -633,7 +635,7 @@ impl MobileClient {
             let verifier = hash_psk(&psk)?;
             management::append(
                 &self.app,
-                &hub.connection,
+                &hub.connection(),
                 &channel,
                 MembershipAction::ChangePsk {
                     verifier_commitment: hibiki_lib::digest(verifier.as_bytes()),

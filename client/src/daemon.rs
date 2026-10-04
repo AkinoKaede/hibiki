@@ -46,6 +46,30 @@ pub async fn run(app: App) -> Result<()> {
     let card_slot = Arc::new(tokio::sync::Semaphore::new(1));
     let local_slots = Arc::new(tokio::sync::Semaphore::new(128));
     let mut delay = 1;
+    let mut stable_hub: Option<Arc<Hub>> = None;
+    let (available, mut available_rx) = tokio::sync::watch::channel::<Option<Arc<Hub>>>(None);
+    let listener_stop = tokio_util::sync::CancellationToken::new();
+    let accept_stop = listener_stop.clone();
+    let listener_job = tokio::spawn(async move {
+        let mut local_jobs = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                _=accept_stop.cancelled()=>break,
+                Some(_)=local_jobs.join_next(), if !local_jobs.is_empty()=>{},
+                accepted=listener.accept()=>{
+                    let Ok((stream,_))=accepted else { break; };
+                    if let Ok(permit)=local_slots.clone().try_acquire_owned() {
+                        while available_rx.borrow().is_none() {
+                            tokio::select! { _=accept_stop.cancelled()=>return, _=available_rx.changed()=>{} }
+                        }
+                        let hub=available_rx.borrow().as_ref().unwrap().clone();
+                        local_jobs.spawn(async move { let _permit=permit; let _=crate::proxy::serve(hub,stream).await; });
+                    }
+                }
+            }
+        }
+        local_jobs.abort_all();
+    });
     loop {
         let opened = tokio::select! {
             _=tokio::signal::ctrl_c()=>break,
@@ -60,13 +84,28 @@ pub async fn run(app: App) -> Result<()> {
                 continue;
             }
         };
-        let hub = Hub::new(
-            app.clone(),
-            connection.clone(),
-            Arc::new(crate::provider::NativeProvider(app.config.clone())),
-            card_slot.clone(),
-        );
-        announce(&hub).await?;
+        let hub = match &stable_hub {
+            Some(hub) => {
+                hub.reconnect(connection.clone());
+                hub.clone()
+            }
+            None => {
+                let hub = Hub::new(
+                    app.clone(),
+                    connection.clone(),
+                    Arc::new(crate::provider::NativeProvider(app.config.clone())),
+                    card_slot.clone(),
+                );
+                stable_hub = Some(hub.clone());
+                hub
+            }
+        };
+        if announce(&hub).await.is_err() {
+            connection.close();
+            continue;
+        }
+        available.send_replace(Some(hub.clone()));
+        hub.changed.notify_waiters();
         eprintln!("HIbiki daemon connected");
         delay = 1;
         let mut refresh = tokio::time::interval(Duration::from_secs(10));
@@ -77,17 +116,13 @@ pub async fn run(app: App) -> Result<()> {
                 _=connection.closed.cancelled()=>break false,
                 _=refresh.tick()=>{let h=hub.clone();jobs.spawn(async move {let _=announce(&h).await;});},
                 Some(_)=jobs.join_next(),if !jobs.is_empty()=>{},
-                accepted=listener.accept()=>{
-                    let (stream,_)=accepted?;
-                    if let Ok(permit)=local_slots.clone().try_acquire_owned() {
-                        let h=hub.clone();jobs.spawn(async move {let _permit=permit;let _=crate::proxy::serve(h,stream).await;});
-                    }
-                },
                 event=events.recv()=>match event {
+                    Some(Event::Message(Envelope::OperationReady {..}))=>hub.changed.notify_waiters(),
                     Some(Event::Message(Envelope::Relay {channel,peer,session,data}))=>{let _=hub.route(channel,peer,session,data).await;},
                     Some(Event::Message(Envelope::RelayFailure {session,peer,..}))=>{
                         hub.stop_session(&session, &peer);
                     },
+                    Some(Event::Message(Envelope::OperationChanged {id}))=>hub.stop_operation(&id),
                     Some(Event::Message(Envelope::PeerOffline {peer}))=>hub.stop_peer(&peer),
                     Some(Event::Message(Envelope::ChannelChanged {channel}))=>{
                         let h=hub.clone();jobs.spawn(async move {if h.refresh(&channel).await.is_err(){h.stop_channel(&channel);}});
@@ -107,5 +142,10 @@ pub async fn run(app: App) -> Result<()> {
             break;
         }
     }
+    if let Some(hub) = stable_hub {
+        hub.stop_all();
+    }
+    listener_stop.cancel();
+    let _ = listener_job.await;
     Ok(())
 }

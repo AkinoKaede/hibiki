@@ -4,11 +4,15 @@ use hibiki_lib::{
     assuan::{self, Line, Response},
     protocol::{SessionInput, SessionOutput},
 };
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub struct Endpoint {
+    pub peer: String,
+    pub card_serial: Option<String>,
+    pub operation: Arc<Mutex<Option<String>>>,
     pub tx: mpsc::Sender<SessionInput>,
     pub rx: mpsc::Receiver<SessionOutput>,
     pub stop: CancellationToken,
@@ -32,6 +36,9 @@ impl Endpoint {
         done: CancellationToken,
     ) -> Self {
         Self {
+            peer: String::new(),
+            card_serial: None,
+            operation: Arc::new(Mutex::new(None)),
             tx,
             rx,
             stop,
@@ -42,6 +49,9 @@ impl Endpoint {
             bytes: 0,
             lines: 0,
         }
+    }
+    pub fn bind_operation(&self, id: Option<String>) {
+        *self.operation.lock().unwrap() = id;
     }
     pub async fn command(&mut self, line: Line) -> Result<()> {
         if self.active {

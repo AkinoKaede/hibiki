@@ -45,10 +45,9 @@ pub fn choose_approval(
         if body.channel_id != state.id
             || body.genesis_hash != state.genesis_hash
             || body.psk_epoch != state.psk_epoch
-            || body.expires_at <= now()
             || body.created_at > now() + 30
         {
-            bail!("pending request does not match the current channel or has expired");
+            bail!("pending request does not match the current channel");
         }
         let id = request.id()?;
         if request_id.is_none_or(|wanted| wanted == id) {
@@ -58,7 +57,7 @@ pub fn choose_approval(
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
     if candidates.is_empty() {
         if request_id.is_some() {
-            bail!("request ID not found; it may have expired or been approved");
+            bail!("request ID not found; it may have been approved or invalidated");
         }
         writeln!(output, "No pending requests.")?;
         return Ok(None);
