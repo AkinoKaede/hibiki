@@ -129,14 +129,8 @@ private key. For HTTP 401/403 or upload authentication errors, verify that the
 Issuer ID matches the team key (or is unset for a personal key), and that the
 key can access and upload to this app.
 
-The app leaves the export-compliance declaration unset. After uploading, complete
-the encryption questionnaire for the build in ASC before distributing it. Apple
-may display **Missing Compliance** until this step is complete. See Apple's
-[export-compliance declaration guidance](https://developer.apple.com/documentation/bundleresources/information-property-list/itsappusesnonexemptencryption).
-If Apple approves documentation and provides a code, set
-`ITSAppUsesNonExemptEncryption = true` together with the matching
-`ITSEncryptionExportComplianceCode` in `Hibiki/Info.plist`. Set the declaration to
-`false` only after determining that the app qualifies for an exemption.
+The app declares `ITSAppUsesNonExemptEncryption = true`; supply any required
+export-compliance documentation in ASC. The workflow preserves this declaration.
 Use the hardware release checklist below before distributing a build.
 
 Release tooling checks (Python 3.11+):
