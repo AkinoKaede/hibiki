@@ -164,8 +164,9 @@ actionlint .github/workflows/build.yml
    on an existing member before approving. The words are public identity data,
    not a recovery phrase. Pending requests remain until approved or invalidated; they have no time limit.
 4. Enable Password Entry and/or OpenPGP Card. Both start disabled. On the
-   requesting computer, configure the Hibiki adapters as described in the root
-   README. The app can approve members, share invitations, rotate PSKs, revoke
+   requesting computer, configure the Hibiki adapters as described in the
+   [desktop usage guide](../USAGE.md#4-connect-the-requesting-devices-agent).
+   The app can approve members, share invitations, rotate PSKs, revoke
    identities, and leave channels.
 
 To switch servers, open **Settings → Connection → Disconnect from server** and

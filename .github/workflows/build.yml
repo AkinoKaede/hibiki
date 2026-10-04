@@ -12,6 +12,8 @@ on:
       - examples/**
       - tests/server.py
       - README.md
+      - ARCHITECTURE.md
+      - USAGE.md
       - .github/workflows/build.yml
   pull_request:
     paths: *build-paths

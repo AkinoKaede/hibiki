@@ -49,7 +49,8 @@ def main():
             (stage / "examples").mkdir()
             for program in programs:
                 shutil.copy2(binaries / program, stage / "bin" / program)
-            shutil.copy2(ROOT / "README.md", stage / "README.md")
+            for document in ["README.md", "ARCHITECTURE.md", "USAGE.md"]:
+                shutil.copy2(ROOT / document, stage / document)
             shutil.copy2(ROOT / "examples" / config, stage / "examples" / config)
             if name == "hibiki" and "linux" in target:
                 shutil.copytree(ROOT / "packaging" / "systemd", stage / "systemd")
