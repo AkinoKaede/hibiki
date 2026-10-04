@@ -1,5 +1,10 @@
-name: Rust and isolated GnuPG
-on: [push, pull_request]
+name: CI and release
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [released, prereleased]
 permissions:
   contents: read
 jobs:
@@ -27,6 +32,7 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace
       - run: cargo build --locked --workspace
+      - run: python3 tests/server.py
       - run: python3 tests/integration.py
       - run: python3 tests/mobile.py
       - run: python3 tests/mobile_tls.py
@@ -52,3 +58,158 @@ jobs:
         run: |
           SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for key,vs in d["devices"].items() if "iOS" in key for v in vs if v["name"].startswith("iPhone")))')
           xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki -destination "platform=iOS Simulator,id=$SIMULATOR_ID" -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES test
+
+  package:
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: '. -> target/packages'
+      - name: Build release archives
+        run: python3 scripts/package.py --target "${{ matrix.target }}"
+      - name: Smoke test packaged binaries
+        shell: bash
+        run: |
+          mkdir unpacked
+          for archive in dist/*.tar.gz; do
+            tar -xzf "$archive" -C unpacked
+          done
+          for binary in unpacked/*/bin/*; do
+            "$binary" --version
+          done
+          python3 tests/server.py --server unpacked/hibiki-server-*/bin/hibiki-server
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  docker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          load: true
+          tags: hibiki-server:test
+          cache-from: type=gha,scope=server-amd64
+          cache-to: type=gha,mode=max,scope=server-amd64
+      - name: Test container health and persistent database
+        shell: bash
+        run: |
+          docker volume create hibiki-test
+          trap 'docker rm -f hibiki-test || true; docker volume rm hibiki-test || true' EXIT
+          docker run -d --name hibiki-test -v hibiki-test:/var/lib/hibiki hibiki-server:test
+          for _ in {1..30}; do
+            if docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz
+          docker exec hibiki-test test -s /var/lib/hibiki/hibiki.sqlite3
+          docker stop --time 15 hibiki-test
+          test "$(docker inspect --format '{{.State.ExitCode}}' hibiki-test)" = 0
+          docker start hibiki-test
+          for _ in {1..30}; do
+            if docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz
+
+  release:
+    if: github.event_name == 'release'
+    needs: [test, ios, package, docker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PYCODE'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as source:
+              version = tomllib.load(source)['workspace']['package']['version']
+          if os.environ['RELEASE_TAG'] != f'v{version}':
+              raise SystemExit('Release tag must match the workspace version')
+          PYCODE
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          merge-multiple: true
+          path: dist
+      - name: Verify archives and combine checksums
+        working-directory: dist
+        run: |
+          sha256sum --check ./*.sha256
+          cat ./*.sha256 > SHA256SUMS
+      - name: Image name
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: echo "name=ghcr.io/${REPOSITORY,,}/hibiki-server" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: metadata
+        with:
+          images: ${{ steps.image.outputs.name }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.event.action == 'released' }}
+            type=raw,value=prereleased
+      - name: Publish multi-platform server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: server/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=server-amd64
+      - name: Upload GitHub Release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS --clobber

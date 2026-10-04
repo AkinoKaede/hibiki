@@ -1,0 +1,15 @@
+[Unit]
+Description=HIbiki remote OpenPGP card and Pinentry daemon
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hibiki daemon
+Restart=on-failure
+RestartSec=5s
+# The daemon handles Ctrl-C and cleans up its sessions and native providers.
+KillSignal=SIGINT
+TimeoutStopSec=30s
+UMask=0077
+
+[Install]
+WantedBy=default.target

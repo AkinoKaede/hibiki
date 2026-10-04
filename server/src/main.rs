@@ -20,8 +20,21 @@ use std::{
     about = "Hibiki relay for end-to-end encrypted GPG operations"
 )]
 struct Args {
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "HIBIKI_SERVER_CONFIG")]
     config: Option<PathBuf>,
+    /// Override the listen address from the configuration file.
+    #[arg(long, global = true, env = "HIBIKI_SERVER_LISTEN")]
+    listen: Option<String>,
+    /// Override the database path (relative paths use the configuration directory).
+    #[arg(long, global = true, env = "HIBIKI_SERVER_DATABASE")]
+    database: Option<PathBuf>,
+    /// Override whether authenticated clients may create channels.
+    #[arg(
+        long,
+        global = true,
+        env = "HIBIKI_SERVER_ALLOW_CLIENT_CHANNEL_CREATION"
+    )]
+    allow_client_channel_creation: Option<bool>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -98,11 +111,20 @@ async fn main() -> Result<()> {
     if args.config.is_some() && candidate.is_none() {
         bail!("configuration file not found");
     }
-    let config: Config = if let Some(path) = &candidate {
+    let mut config: Config = if let Some(path) = &candidate {
         toml::from_str(&fs::read_to_string(path)?)?
     } else {
         Config::default()
     };
+    if let Some(listen) = args.listen {
+        config.listen = listen;
+    }
+    if let Some(database) = args.database {
+        config.database = Some(database);
+    }
+    if let Some(allowed) = args.allow_client_channel_creation {
+        config.allow_client_channel_creation = allowed;
+    }
     let database = match config.database {
         Some(p) if p.is_absolute() => p,
         Some(p) => candidate
@@ -178,9 +200,14 @@ async fn main() -> Result<()> {
     tokio::spawn(service.clone().watch_deleted(stop));
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     eprintln!("hibiki-server listening on {}", listener.local_addr()?);
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     axum::serve(listener, service.router())
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = terminate.recv() => {},
+            }
+            tracing::info!("relay shutting down");
         })
         .await?;
     Ok(())

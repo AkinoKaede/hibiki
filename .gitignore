@@ -33,3 +33,6 @@ identity.bin
 *.p8
 *.mobileprovision
 *.provisionprofile
+
+# Release archives
+/dist/

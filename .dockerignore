@@ -1,0 +1,15 @@
+**
+!Cargo.toml
+!Cargo.lock
+!lib/
+!lib/**
+!core/
+!core/**
+!client/
+!client/**
+!mobile/
+!mobile/Cargo.toml
+!mobile/src/
+!mobile/src/**
+!server/
+!server/**

@@ -38,6 +38,144 @@ export PATH="$PWD/target/release:$PATH"
 | `hibiki-scdaemon` | Stdio adapter used by the requesting device's agent |
 | `hibiki-pinentry` | Stdio adapter used by the requesting device's agent |
 
+## Packages and releases
+
+GitHub Actions builds separate `hibiki-VERSION-TARGET.tar.gz` and
+`hibiki-server-VERSION-TARGET.tar.gz` archives for Linux (x86_64/ARM64) and
+macOS (Intel/Apple Silicon). The client archive includes all three desktop
+binaries and, on Linux, a user systemd unit. Both archives contain the relevant
+example configuration and this guide. Linux binaries are built on Ubuntu 24.04
+and require glibc 2.39 or later; macOS binaries are built on macOS 15.
+GnuPG and native Pinentry/scdaemon remain host dependencies for clients.
+
+Download archives from GitHub Releases, verify them with
+`sha256sum --check --ignore-missing SHA256SUMS` on Linux (or
+`shasum -a 256 --check --ignore-missing SHA256SUMS` on macOS), then extract the
+archive for your platform. From the extracted client directory:
+
+```sh
+install -d "$HOME/.local/bin"
+install -m 755 bin/hibiki bin/hibiki-scdaemon bin/hibiki-pinentry "$HOME/.local/bin/"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+For a standalone relay, install `bin/hibiki-server` from the server archive to
+your preferred executable directory and follow the relay setup below.
+
+To build the same archives locally (Python 3.11+ and Rust required):
+
+```sh
+python3 scripts/package.py
+# Optional: --target x86_64-unknown-linux-gnu --output dist
+```
+
+Cross-compilation requires installing the Rust target and its linker/toolchain;
+CI uses native runners for each platform. Archives and individual SHA-256 files
+are written to `dist/`.
+
+Create a GitHub Release whose tag matches `[workspace.package].version`, such as
+`v0.1.0`. The `released` and `prereleased` events trigger the full pipeline.
+After the Rust/integration tests, iOS checks, archive builds and Docker smoke test
+pass, CI uploads the archives and `SHA256SUMS` to that Release and publishes a
+multi-platform `linux/amd64,linux/arm64` image to
+`ghcr.io/OWNER/REPOSITORY/hibiki-server` (owner/repository are lowercase).
+Every image receives a version tag. A `released` event also updates both `latest` and `prereleased`;
+a `prereleased` event updates only `prereleased`, leaving `latest` unchanged.
+Re-running a release job replaces assets of the same name.
+Branch, tag-push, pull-request and manual builds upload workflow artifacts without
+publishing release assets or images. The repository must permit the workflow's
+`GITHUB_TOKEN` to write releases and GHCR packages. GHCR package visibility is
+managed separately from repository visibility.
+
+### Docker relay
+
+Build and start a relay from the repository root:
+
+```sh
+docker compose -f server/compose.yml up -d --build
+curl --fail http://127.0.0.1:7749/healthz
+```
+
+The Compose service binds only the host loopback address. Put a TLS reverse
+proxy in front of it for remote access, forwarding `/hibiki` WebSocket upgrades.
+The image listens on `0.0.0.0:7749` internally, runs as UID/GID `10001`, and stores
+SQLite in a named volume at `/var/lib/hibiki`. A bind-mounted data directory must
+instead be owned by `10001:10001` with mode `0700` (database files use `0600`).
+Do not remove the data volume when upgrading.
+
+To run a published image:
+
+```sh
+docker run -d --name hibiki-server --restart unless-stopped \
+  -p 127.0.0.1:7749:7749 \
+  -v hibiki-server-data:/var/lib/hibiki \
+  ghcr.io/OWNER/REPOSITORY/hibiki-server:0.1.0
+```
+
+Mount a customized copy of `server/container.toml` read-only at
+`/etc/hibiki/server.toml` to change relay policy. Preserve the container listen
+address and persistent database path unless intentionally changing the deployment.
+CLI flags override environment variables, which override the TOML configuration:
+
+| Environment variable | CLI flag | Purpose |
+| --- | --- | --- |
+| `HIBIKI_SERVER_CONFIG` | `--config` | Configuration file path |
+| `HIBIKI_SERVER_LISTEN` | `--listen` | Listen address, e.g. `0.0.0.0:7749` |
+| `HIBIKI_SERVER_DATABASE` | `--database` | SQLite path |
+| `HIBIKI_SERVER_ALLOW_CLIENT_CHANNEL_CREATION` | `--allow-client-channel-creation` | `true` or `false` |
+
+For example, add `-e HIBIKI_SERVER_ALLOW_CLIENT_CHANNEL_CREATION=false` to
+`docker run` to reserve channel creation for the administrator. The image sets
+`HIBIKI_SERVER_CONFIG=/etc/hibiki/server.toml` and `RUST_LOG=info` by default.
+If changing the listen port, also change the published port and set the image's
+`HIBIKI_SERVER_HEALTHCHECK_URL` to the corresponding local `/healthz` URL.
+The relay handles SIGTERM and SIGINT for graceful shutdown.
+
+Administrator commands can run against the same database:
+
+```sh
+docker exec -it hibiki-server hibiki-server --config /etc/hibiki/server.toml channel list
+# For Compose:
+docker compose -f server/compose.yml exec server \
+  hibiki-server --config /etc/hibiki/server.toml channel list
+```
+
+### Linux user service
+
+Initialize and pair your device using the setup below before starting the service.
+After installing the client binaries into `~/.local/bin`, run these commands from
+the extracted Linux client archive:
+
+```sh
+install -d "$HOME/.config/systemd/user"
+install -m 644 systemd/hibiki.service "$HOME/.config/systemd/user/hibiki.service"
+systemctl --user daemon-reload
+systemctl --user enable --now hibiki.service
+journalctl --user -u hibiki.service -f
+```
+
+When installing from source, use `packaging/systemd/hibiki.service` instead.
+The unit runs `~/.local/bin/hibiki daemon` under your own user account with the
+usual XDG configuration and identity. Use `systemctl --user edit hibiki.service`
+to override `ExecStart` (clear it first with an empty `ExecStart=`) or set
+`Environment=XDG_CONFIG_HOME=...` / `Environment=XDG_DATA_HOME=...` if needed.
+Management commands and GPG adapters must use the same paths.
+Restart with `systemctl --user restart hibiki.service` after configuration changes.
+
+For GUI Pinentry, import the active desktop session's environment before starting
+or restarting the service:
+
+```sh
+systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS
+systemctl --user restart hibiki.service
+```
+
+Use a native GUI Pinentry for a background service. Terminal Pinentry requires a
+valid local `GPG_TTY` and `TERM` in the service environment. To keep a headless
+client running after logout, an administrator can enable lingering with
+`sudo loginctl enable-linger "$USER"`; GUI input still requires a desktop session.
+Do not also run `hibiki daemon` manually while the service is active.
+
 ## Setup
 
 ### 1. Run a relay
@@ -242,6 +380,7 @@ cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo build --locked --workspace
+python3 tests/server.py
 python3 tests/integration.py
 python3 tests/mobile.py
 ```

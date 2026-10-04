@@ -1,0 +1,17 @@
+services:
+  server:
+    image: hibiki-server:local
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7749:7749"
+    volumes:
+      - server-data:/var/lib/hibiki
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+volumes:
+  server-data:
