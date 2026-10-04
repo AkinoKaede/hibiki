@@ -53,6 +53,36 @@ pub async fn append(
     bail!("channel changed concurrently; retry the command")
 }
 
+/// Cancel pending admissions, then sign a departure if already admitted.
+pub async fn leave(app: &App, conn: &Connection, id: &str) -> Result<()> {
+    for _ in 0..3 {
+        match conn
+            .request(Control::WithdrawPending { channel: id.into() })
+            .await
+        {
+            Ok(Reply::Proof(proof)) => {
+                if proof.genesis.body.id != id {
+                    bail!("channel response identity mismatch");
+                }
+                let state = app.merge(proof)?.verify()?;
+                if state.member(&app.identity.device.id()).is_ok() {
+                    append(app, conn, id, MembershipAction::Leave, None).await?;
+                }
+                return Ok(());
+            }
+            Err(e)
+                if e.downcast_ref::<WireError>()
+                    .is_some_and(|e| e.code == "conflict") =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+            _ => bail!("invalid withdrawal response"),
+        }
+    }
+    bail!("channel changed concurrently; retry the command")
+}
+
 pub fn validate_pending(request: &JoinRequest, state: &VerifiedChannelState) -> Result<()> {
     request.verify()?;
     let b = &request.body;

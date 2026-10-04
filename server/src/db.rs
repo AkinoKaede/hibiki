@@ -365,6 +365,35 @@ impl Database {
         Ok(())
     }
 
+    /// Cancel all of this device's requests atomically with approval. Return the
+    /// locked membership snapshot so a caller admitted first can sign its leave.
+    pub async fn withdraw_pending(&self, caller: &str, id: &str) -> Result<MembershipProof> {
+        let proof = self.get(id).await?;
+        let state = proof.verify()?;
+        let tx = self.connection.begin().await?;
+        let locked = channel::Entity::update_many()
+            .col_expr(channel::Column::Head, Expr::col(channel::Column::Head))
+            .filter(channel::Column::Id.eq(id))
+            .filter(channel::Column::Head.eq(state.head.to_vec()))
+            .exec(&tx)
+            .await?;
+        if locked.rows_affected != 1 {
+            bail!("CONFLICT: channel changed; retry");
+        }
+        let rows = pending::Entity::find()
+            .filter(pending::Column::Channel.eq(id))
+            .all(&tx)
+            .await?;
+        for row in rows {
+            let request: JoinRequest = decode(&row.request)?;
+            if request.body.device.id() == caller {
+                pending::Entity::delete_by_id(row.id).exec(&tx).await?;
+            }
+        }
+        tx.commit().await?;
+        Ok(proof)
+    }
+
     pub async fn join_status(
         &self,
         caller: &str,

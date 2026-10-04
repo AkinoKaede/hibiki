@@ -216,18 +216,31 @@ def test_all():
                                        env=b.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 request = waiting.stdout.readline().decode().split()[1]
-                c.cli('channel', 'withdraw', 'test', request, ok=False)
+                c.cli('channel', 'join', invite, '--psk-file', psk, '--no-wait')
+                c.cli('channel', 'leave', 'test')
+                assert request.encode() in a.cli('channel', 'pending', 'test').stdout
                 a.cli('channel', 'reject', 'test', request)
                 _, error = waiting.communicate(timeout=10)
                 assert waiting.returncode != 0 and b'rejected, withdrawn or invalidated' in error
                 assert request.encode() not in a.cli('channel', 'pending', 'test').stdout
             finally:
                 if waiting.poll() is None: waiting.kill(); waiting.wait()
-            request = b.cli('channel', 'join', invite, '--psk-file', psk, '--no-wait').stdout.decode().split()[1]
-            a.cli('channel', 'withdraw', 'test', request, ok=False)
-            b.cli('channel', 'withdraw', 'test', request)
-            assert request.encode() not in a.cli('channel', 'pending', 'test').stdout
-            print('PASS: rejection ends waiting admission; only applicants can withdraw their request', flush=True)
+            waiting = subprocess.Popen([str(CLIENT), 'channel', 'join', invite, '--psk-file', str(psk)],
+                                       env=b.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                request = waiting.stdout.readline().decode().split()[1]
+                second = b.cli('channel', 'join', invite, '--psk-file', psk, '--no-wait').stdout.decode().split()[1]
+                assert request != second
+                b.cli('channel', 'leave', 'test')
+                _, error = waiting.communicate(timeout=10)
+                assert waiting.returncode != 0 and b'rejected, withdrawn or invalidated' in error
+                assert not a.cli('channel', 'pending', 'test').stdout.strip()
+                for removed in (request, second):
+                    a.cli('channel', 'approve', 'test', removed, data=b'y\n', ok=False)
+                b.cli('channel', 'leave', 'test')
+            finally:
+                if waiting.poll() is None: waiting.kill(); waiting.wait()
+            print('PASS: leave cancels all own pending requests and ends waiting admission', flush=True)
             for member,approver in [(b,a),(c,b)]:
                 joined=member.cli('channel','join',invite,'--psk-file',psk,'--no-wait')
                 request=joined.stdout.decode().split()[1]
@@ -235,6 +248,16 @@ def test_all():
                 assert request.encode() in approver.cli('channel','pending','test').stdout
                 approver.cli('channel','approve','test',request,data=b'y\n')
                 member.cli('channel','list')
+            b.cli('use', 'test')
+            b.cli('channel', 'leave', 'test')
+            assert 'default_channel' not in b.config.read_text()
+            assert b'active=false' in b.cli('channel', 'list').stdout
+            assert b'active=true' in a.cli('channel', 'list').stdout
+            b.cli('channel', 'leave', 'test')
+            request = b.cli('channel', 'join', invite, '--psk-file', psk, '--no-wait').stdout.decode().split()[1]
+            a.cli('channel', 'approve', 'test', request, data=b'y\n')
+            assert b'active=true' in b.cli('channel', 'list').stdout
+            print('PASS: the same leave command exits membership, clears the default and permits rejoining', flush=True)
             for d in devices: d.cli('channel','list');d.cli('use','test')
             fpr,public,card=make_card(b)
             a.gpg('--import',data=public)

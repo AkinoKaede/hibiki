@@ -701,3 +701,132 @@ async fn concurrent_withdrawal_and_approval_have_only_one_winner() {
     assert_eq!(state.member(&b).is_ok(), approved.is_ok());
     assert!(f.db.pending(&a, channel).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn withdraw_all_is_scoped_to_device_and_channel_and_blocks_old_requests() {
+    let f = Fixture::new().await;
+    let channel = &f.proof.genesis.body.id;
+    let a = f.a.device.id();
+    let b = f.b.device.id();
+    let outsider = Identity::generate("outsider".into()).unwrap();
+    let requests = [f.request(), f.request()];
+    for request in &requests {
+        f.db.join(&b, request.clone(), "test-secret".into())
+            .await
+            .unwrap();
+    }
+    let other_request = JoinRequest::create(&outsider, &f.proof.verify().unwrap()).unwrap();
+    f.db.join(
+        &outsider.device.id(),
+        other_request.clone(),
+        "test-secret".into(),
+    )
+    .await
+    .unwrap();
+    let verifier = hash_psk("test-secret").unwrap();
+    let other_channel =
+        f.db.create(
+            &a,
+            ChannelGenesis::create(&f.a, "Other".into(), &verifier).unwrap(),
+            verifier,
+        )
+        .await
+        .unwrap();
+    let other_channel_request =
+        JoinRequest::create(&f.b, &other_channel.verify().unwrap()).unwrap();
+    f.db.join(&b, other_channel_request.clone(), "test-secret".into())
+        .await
+        .unwrap();
+
+    // A member with no own pending requests cannot remove anyone else's.
+    assert_eq!(f.db.withdraw_pending(&a, channel).await.unwrap(), f.proof);
+    assert_eq!(f.db.pending(&a, channel).await.unwrap().len(), 3);
+    assert_eq!(f.db.withdraw_pending(&b, channel).await.unwrap(), f.proof);
+    assert_eq!(
+        f.db.pending(&a, channel).await.unwrap(),
+        vec![other_request]
+    );
+    assert_eq!(
+        f.db.pending(&a, &other_channel.genesis.body.id)
+            .await
+            .unwrap(),
+        vec![other_channel_request]
+    );
+    for request in requests {
+        let event = MembershipEvent::create(
+            &f.a,
+            &f.proof.verify().unwrap(),
+            MembershipAction::Admit(request),
+        )
+        .unwrap();
+        assert!(f.db.append(&a, event, None).await.is_err());
+    }
+    assert_eq!(f.db.withdraw_pending(&b, channel).await.unwrap(), f.proof);
+}
+
+#[tokio::test]
+async fn withdraw_all_after_approval_returns_membership_and_cancels_remaining_requests() {
+    let f = Fixture::new().await;
+    let channel = &f.proof.genesis.body.id;
+    let a = f.a.device.id();
+    let b = f.b.device.id();
+    let requests = [f.request(), f.request()];
+    for request in &requests {
+        f.db.join(&b, request.clone(), "test-secret".into())
+            .await
+            .unwrap();
+    }
+    let approval = MembershipEvent::create(
+        &f.a,
+        &f.proof.verify().unwrap(),
+        MembershipAction::Admit(requests[0].clone()),
+    )
+    .unwrap();
+    f.db.append(&a, approval, None).await.unwrap();
+    let proof = f.db.withdraw_pending(&b, channel).await.unwrap();
+    assert!(proof.verify().unwrap().member(&b).is_ok());
+    let departure =
+        MembershipEvent::create(&f.b, &proof.verify().unwrap(), MembershipAction::Leave).unwrap();
+    let proof = f.db.append(&b, departure, None).await.unwrap();
+    assert!(proof.verify().unwrap().member(&b).is_err());
+    let stale = MembershipEvent::create(
+        &f.a,
+        &proof.verify().unwrap(),
+        MembershipAction::Admit(requests[1].clone()),
+    )
+    .unwrap();
+    assert!(f.db.append(&a, stale, None).await.is_err());
+    assert!(f.db.pending(&a, channel).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn withdraw_all_racing_approval_returns_a_consistent_membership_snapshot() {
+    let f = Fixture::new().await;
+    let channel = &f.proof.genesis.body.id;
+    let a = f.a.device.id();
+    let b = f.b.device.id();
+    let request = f.request();
+    f.db.join(&b, request.clone(), "test-secret".into())
+        .await
+        .unwrap();
+    let event = MembershipEvent::create(
+        &f.a,
+        &f.proof.verify().unwrap(),
+        MembershipAction::Admit(request),
+    )
+    .unwrap();
+    let other = Database::open(&f._dir.path().join("db")).await.unwrap();
+    let (approved, withdrawn) = tokio::join!(
+        f.db.append(&a, event, None),
+        other.withdraw_pending(&b, channel),
+    );
+    let proof = match withdrawn {
+        Ok(proof) => proof,
+        Err(error) => {
+            assert!(error.to_string().contains("CONFLICT"));
+            other.withdraw_pending(&b, channel).await.unwrap()
+        }
+    };
+    assert_eq!(proof.verify().unwrap().member(&b).is_ok(), approved.is_ok());
+    assert!(f.db.pending(&a, channel).await.unwrap().is_empty());
+}

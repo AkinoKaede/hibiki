@@ -99,6 +99,10 @@ pub enum Control {
         channel: String,
         request: String,
     },
+    /// Withdraw all of the caller's pending requests and return the current proof.
+    WithdrawPending {
+        channel: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)] // Bounded, serialized wire value.

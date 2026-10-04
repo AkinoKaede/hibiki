@@ -265,7 +265,7 @@ hibiki channel join 'hibiki-v1:...'
 hibiki channel approve personal
 ```
 
-Compare the joining device's 24 public-key verification words before answering `y`. Approval defaults to No. Pending requests remain until approved, rejected by a member, withdrawn by the applicant, invalidated by PSK rotation, or removed with the channel. A waiting `join` exits when its request is removed. Ctrl-C only stops waiting; use `hibiki channel withdraw NAME REQUEST_ID` to withdraw it. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
+Compare the joining device's 24 public-key verification words before answering `y`. Approval defaults to No. Pending requests remain until approved, rejected by a member, withdrawn by the applicant, invalidated by PSK rotation, or removed with the channel. A waiting `join` exits when its request is removed. Ctrl-C only stops waiting; use `hibiki channel leave NAME` to cancel joining. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
 
 ### 3. Enable the services each device will provide
 
@@ -409,13 +409,14 @@ hibiki channel list
 hibiki device list
 hibiki channel pending personal
 hibiki channel reject personal REQUEST_ID
-hibiki channel withdraw personal REQUEST_ID
 hibiki channel rotate-psk personal
 hibiki channel revoke personal DEVICE_ID
 hibiki channel leave personal
 ```
 
 Any active member can reject one pending request; only its applicant can withdraw it. Rejection removes that request and does not permanently ban the device. A new admission still requires the PSK and member approval. Approval and removal are atomic: a removed request cannot subsequently be approved.
+
+`hibiki channel leave NAME` withdraws all of this device's pending requests for the channel and leaves if it is already a member, including if approval happened just before cancellation. No request ID is needed. It also clears the default channel when applicable; repeating it after leaving is harmless.
 
 PSKs control admission. The relay stores Argon2id verifiers; rotating a PSK invalidates pending requests but preserves approved membership. Use `--psk-file` for automation. A revoked identity cannot rejoin the same channel; a device that voluntarily leaves can request admission again.
 

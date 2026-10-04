@@ -140,6 +140,9 @@ impl Service {
                     .await?;
                 Ok(Reply::Ok)
             }
+            Control::WithdrawPending { channel } => Ok(Reply::Proof(
+                self.db.withdraw_pending(device, &channel).await?,
+            )),
             Control::JoinStatus { channel, request } => Ok(Reply::JoinStatus(
                 self.db.join_status(device, &channel, &request).await?,
             )),

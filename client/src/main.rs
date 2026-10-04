@@ -88,11 +88,6 @@ enum ChannelCommand {
         name: String,
         request_id: String,
     },
-    /// Withdraw this device's own pending request.
-    Withdraw {
-        name: String,
-        request_id: String,
-    },
     RotatePsk {
         name: String,
         #[arg(long)]
@@ -100,7 +95,7 @@ enum ChannelCommand {
         #[arg(long, conflicts_with = "psk_file")]
         prompt_psk: bool,
     },
-    /// Leave a channel using this device's signed membership record.
+    /// Leave a channel or withdraw this device's pending join requests.
     Leave {
         name: String,
     },
@@ -121,7 +116,7 @@ fn psk(file: Option<PathBuf>, generate: bool) -> Result<(String, bool)> {
         Ok((rpassword::prompt_password("Channel PSK: ")?, false))
     }
 }
-use hibiki_core::management::{append, refresh};
+use hibiki_core::management::{append, leave, refresh};
 
 fn hostname() -> Result<String> {
     let mut info = std::mem::MaybeUninit::<libc::utsname>::uninit();
@@ -337,10 +332,7 @@ async fn run() -> Result<()> {
                 "Ask a trusted member to run hibiki channel approve {:?} and verify the 24 words and request ID {request_id} before answering y.",
                 state.name
             );
-            eprintln!(
-                "To withdraw: hibiki channel withdraw {:?} {request_id}",
-                state.name
-            );
+            eprintln!("To cancel joining: hibiki channel leave {:?}", state.name);
             if !no_wait {
                 loop {
                     let Reply::JoinStatus(status) = conn
@@ -438,19 +430,6 @@ async fn run() -> Result<()> {
             };
             println!("{SUCCESS}rejected{SUCCESS:#} {request_id}");
         }
-        ChannelCommand::Withdraw { name, request_id } => {
-            let id = app.resolve_channel(&name)?;
-            let Reply::Ok = conn
-                .request(Control::WithdrawJoin {
-                    channel: id,
-                    request: request_id.clone(),
-                })
-                .await?
-            else {
-                bail!("invalid withdrawal response");
-            };
-            println!("{SUCCESS}withdrawn{SUCCESS:#} {request_id}");
-        }
         ChannelCommand::RotatePsk {
             name,
             psk_file,
@@ -470,7 +449,7 @@ async fn run() -> Result<()> {
         }
         ChannelCommand::Leave { name } => {
             let id = app.resolve_channel(&name)?;
-            append(&app, &conn, &id, MembershipAction::Leave, None).await?;
+            leave(&app, &conn, &id).await?;
             if app.config.default_channel.as_ref() == Some(&id) {
                 app.config.default_channel = None;
                 app.save_config()?;
