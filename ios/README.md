@@ -47,6 +47,100 @@ xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
   -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
+## App Store Connect upload
+
+The existing **build** workflow offers three manual build choices: **all**
+(the default), **desktop**, and **ios**. The iOS job imports signing credentials,
+archives with Xcode, exports an App Store IPA, and uploads with `altool` using
+an App Store Connect API key.
+Pushes and pull requests do not trigger an iOS upload.
+
+### One-time setup
+
+Create an App Store Connect app with bundle ID `com.akinokaede.hibiki`, and enable
+NFC Tag Reading for its explicit Apple Developer App ID. Generate an **App Store
+distribution** provisioning profile that permits the app's NFC `TAG` entitlement.
+The smart-card sandbox entitlement remains in the app and is not listed in Apple
+iOS provisioning profiles. Export the matching Apple Distribution certificate
+**with its private key** as a `.p12` file. Development, Ad Hoc,
+and enterprise profiles are not accepted.
+
+Use a team API key with its Issuer ID, or a personal API key without an Issuer
+ID. Its role must permit access to this app and uploading builds (Developer,
+App Manager, or Admin as applicable). Add the following under the
+repository's **Settings → Secrets and variables → Actions**:
+
+| Kind | Name | Value |
+| --- | --- | --- |
+| Secret | `ASC_KEY` | Base64-encoded `.p8` key |
+| Secret | `ASC_KEY_ID` | API key ID |
+| Secret | `ASC_KEY_ISSUER_ID` | Issuer ID for a team key; omit for a personal key |
+| Secret | `APPLE_DISTRIBUTION_CERTIFICATES_P12` | Base64-encoded distribution certificate and private key |
+| Secret | `APPLE_DISTRIBUTION_P12_PASSWORD` | P12 export password; an empty password is supported |
+| Secret | `APPLE_PROVISIONING_PROFILE` | Base64-encoded App Store `.mobileprovision` file |
+| Variable | `APPLE_TEAM_ID` | Apple Developer team ID |
+| Variable | `ASC_APP_ID` | Numeric Apple ID from the app's App Information page |
+
+On macOS, encode a credential with `base64 -i /path/to/file | pbcopy`, then paste
+it directly into the corresponding GitHub secret. Keep these files out of Git.
+The workflow creates a random temporary Keychain password and removes the
+Keychain, installed profile, and private files when the release script exits.
+Use GitHub-hosted runners for this workflow.
+Before importing the P12, the job registers the certificate's account-holder name,
+certificate common name, organization, and Team ID with GitHub Actions `add-mask`.
+Saved text logs are also redacted before artifact upload. The signed IPA retains
+its required signing metadata.
+
+### Run a build
+
+1. Open **Actions → build → Run workflow** and select the source branch or tag.
+2. Leave `build` as **all** to build desktop packages and upload iOS, or choose
+   **ios** to upload iOS alone.
+3. Set the required `version` input to a three-component numeric version such as
+   `0.1.0`, without `v`. It controls the iOS marketing version, Rust binary
+   versions, and package filenames. Desktop releases automatically use Git tag
+   `v0.1.0`; iOS-only runs do not create a tag. The input does not have to match
+   the checked-in Cargo version. Prerelease suffixes are not accepted; the
+   desktop `prereleased` checkbox marks the GitHub Release and does not affect iOS.
+4. Normally leave `ios_build_number` empty: the job queries every ASC build for
+   that iOS marketing version and uses the highest integer plus one, starting
+   at 1. An override must be a larger integer, at most 9999. Upload jobs are
+   serialized across branches; avoid concurrent uploads from other tools.
+
+The job uses macOS 15 with Xcode 26.3, builds the Release Rust XCFramework, resolves
+locked Swift packages, and overrides version/signing settings on the Xcode
+command line. The selected app, profile, signing identity, expiry, team, and
+entitlements are checked before compilation.
+
+The job saves the IPA, dSYM archive, and available logs as an
+`ios-RUN_ID-ATTEMPT` Actions artifact for 14 days, including logs on failure.
+After upload, it waits up to ten minutes for the build to appear in ASC and
+reports its processing state. Successful upload does not mean Apple processing
+or review has finished. TestFlight group distribution and App Store review are
+managed manually; the workflow does not cancel or modify existing submissions.
+
+If Apple accepts an upload but visibility times out, inspect ASC before rerunning.
+If the build number has been consumed but is not returned by the API yet, wait
+or supply a larger number. For signing errors, regenerate the profile after
+enabling the required capabilities and ensure the P12 contains its matching
+private key. For HTTP 401/403 or upload authentication errors, verify that the
+Issuer ID matches the team key (or is unset for a personal key), and that the
+key can access and upload to this app.
+
+The app declares `ITSAppUsesNonExemptEncryption = true`; supply any required
+export-compliance documentation in ASC. The workflow preserves this declaration.
+Use the hardware release checklist below before distributing a build.
+
+Release tooling checks (Python 3.11+):
+
+```sh
+python3 -m venv /tmp/hibiki-release-venv
+/tmp/hibiki-release-venv/bin/pip install -r ios/scripts/release-requirements.txt
+/tmp/hibiki-release-venv/bin/python -m unittest discover -s ios/scripts -p test_release.py
+shellcheck ios/scripts/release.sh
+actionlint .github/workflows/build.yml
+```
+
 ## Pairing
 
 1. Enter your server address in **Server URL**; the field starts empty. Without

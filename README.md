@@ -85,16 +85,24 @@ There are three GitHub Actions workflows:
 
 - **test** runs Rust checks and GnuPG integration tests on both amd64 (x86_64)
   and arm64 (aarch64), on Linux and macOS, for pushes, pull requests and manual
-  dispatches. iOS CI is currently disabled.
+  dispatches. iOS simulator tests are not currently run in CI.
 - **build** builds all six binary targets on relevant source/packaging pushes
   and pull requests, and
   uploads the archives as Actions artifacts. To prepare a release, start it from
-  Actions → build → Run workflow, select the source branch/tag, enter a `tag`
-  matching `[workspace.package].version` (for example `v0.1.0`), and set the
+  Actions → build → Run workflow, select the source branch/tag, enter a `version`
+  without a `v` prefix (for example `0.1.0`), and set the
   `prereleased` checkbox. Manual runs also create a **draft** GitHub Release with
-  the archives and `SHA256SUMS`. An existing tag must point to the selected
+  the archives and `SHA256SUMS`. The Git tag is automatically `vVERSION`; desktop
+  binary/package versions and the iOS version follow the input. Versions are
+  applied only in the CI checkout, including its Cargo lockfile. An existing tag must point to the selected
   commit; no existing release or tag is overwritten. Use a new version/tag for
-  a new draft. No Docker image is built at this stage.
+  a new draft. The `build` selector defaults to **all**, which also signs and uploads
+  the iOS app to App Store Connect. Choose **desktop** for desktop packages only,
+  or **ios** for an iOS upload without a draft Release (`prereleased`
+  is ignored for **ios**). iOS uploads require the Apple credentials described
+  in the [iOS release guide](ios/README.md#app-store-connect-upload).
+  Push and pull request builds continue to build desktop packages only.
+  No Docker image is built at this stage.
 - **docker** runs only after you publish the draft Release (or promote a
   prerelease to a full release). It smoke-tests the container on native amd64 and arm64 Linux runners and publishes a
   multi-platform `linux/amd64,linux/arm64` image to

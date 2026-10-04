@@ -7,6 +7,7 @@ on:
       - Cargo.lock
       - .cargo/**
       - scripts/package.py
+      - scripts/set-version.py
       - packaging/**
       - examples/**
       - tests/server.py
@@ -16,9 +17,22 @@ on:
     paths: *build-paths
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Release tag matching the workspace version (e.g. v0.1.0)'
+      build:
+        description: 'Build desktop packages, upload iOS to App Store Connect, or both'
         required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - desktop
+          - ios
+      version:
+        description: 'Release version without v (e.g. 0.1.0); Git tag is generated automatically'
+        required: true
+        type: string
+      ios_build_number:
+        description: 'iOS build number (default: next available number from App Store Connect)'
+        required: false
         type: string
       prereleased:
         description: 'Mark the draft as a prerelease'
@@ -28,7 +42,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: build-${{ inputs.tag || github.ref }}
+  group: build-${{ github.event_name }}-${{ inputs.build || 'desktop' }}-${{ inputs.version || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 jobs:
   validate:
@@ -40,21 +54,23 @@ jobs:
       - name: Validate version and existing tag
         if: github.event_name == 'workflow_dispatch'
         env:
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          BUILD: ${{ inputs.build }}
         run: |
           python3 - <<'PYCODE'
-          import os, subprocess, tomllib
-          with open('Cargo.toml', 'rb') as source:
-              version = tomllib.load(source)['workspace']['package']['version']
-          tag = os.environ['RELEASE_TAG']
-          if tag != f'v{version}':
-              raise SystemExit('Tag must match the workspace version')
+          import os, subprocess
+          version = os.environ['RELEASE_VERSION']
+          subprocess.run(['python3', 'scripts/set-version.py', version, '--check'], check=True)
+          if os.environ['BUILD'] == 'ios':
+              raise SystemExit(0)
+          tag = f'v{version}'
           existing = subprocess.run(['git', 'rev-parse', '--verify', f'refs/tags/{tag}^{{commit}}'], capture_output=True, text=True)
           head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
           if existing.returncode == 0 and existing.stdout.strip() != head:
               raise SystemExit('Existing tag points to a different commit; select that tag in Run workflow')
           PYCODE
   package:
+    if: github.event_name != 'workflow_dispatch' || inputs.build != 'ios'
     needs: validate
     strategy:
       fail-fast: false
@@ -82,6 +98,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Apply workflow version
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/set-version.py "$RELEASE_VERSION"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: '. -> target/packages'
@@ -124,7 +145,7 @@ jobs:
           if-no-files-found: error
 
   draft:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.build != 'ios'
     needs: package
     runs-on: ubuntu-24.04
     permissions:
@@ -144,7 +165,7 @@ jobs:
       - name: Create draft release for review
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: v${{ inputs.version }}
           PRERELEASED: ${{ inputs.prereleased }}
           RELEASE_COMMIT: ${{ github.sha }}
         shell: bash
@@ -154,3 +175,66 @@ jobs:
             options+=(--prerelease)
           fi
           gh release create "$RELEASE_TAG" dist/*.tar.xz dist/SHA256SUMS "${options[@]}"
+
+  ios:
+    name: Build and upload iOS
+    if: github.event_name == 'workflow_dispatch' && (inputs.build == 'ios' || inputs.build == 'all')
+    needs: validate
+    runs-on: macos-15
+    timeout-minutes: 90
+    concurrency:
+      group: ios-app-store-connect
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+          xcodebuild -version
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply workflow version
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/set-version.py "$RELEASE_VERSION"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ios-release-xcode-26.3
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/hibiki-source-packages
+          key: ios-spm-26.3-${{ hashFiles('ios/HIbiki.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+      - name: Install release dependencies and check release tooling
+        run: |
+          python3 -m pip install -r ios/scripts/release-requirements.txt
+          python3 -m unittest discover -s ios/scripts -p 'test_release.py'
+          ./ios/scripts/check-zh-localization.sh
+      - name: Archive and upload to App Store Connect
+        env:
+          ASC_KEY: ${{ secrets.ASC_KEY }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_KEY_ISSUER_ID: ${{ secrets.ASC_KEY_ISSUER_ID }}
+          ASC_APP_ID: ${{ vars.ASC_APP_ID }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+          APPLE_DISTRIBUTION_CERTIFICATES_P12: ${{ secrets.APPLE_DISTRIBUTION_CERTIFICATES_P12 }}
+          APPLE_DISTRIBUTION_P12_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_P12_PASSWORD }}
+          APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+          IOS_VERSION: ${{ inputs.version }}
+          IOS_BUILD_NUMBER: ${{ inputs.ios_build_number }}
+        run: ./ios/scripts/release.sh
+      - name: Save iOS build artifacts and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ios/build-release/export/*.ipa
+            ios/build-release/*.dSYMs.zip
+            ios/build-release/*.log
+          if-no-files-found: ignore
+          retention-days: 14

@@ -24,6 +24,10 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Apply release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python3 scripts/set-version.py "${RELEASE_TAG#v}"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
@@ -68,6 +72,10 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+      - name: Apply release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python3 scripts/set-version.py "${RELEASE_TAG#v}"
       - name: Image name
         id: image
         env:
