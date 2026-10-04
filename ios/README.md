@@ -129,8 +129,9 @@ private key. For HTTP 401/403 or upload authentication errors, verify that the
 Issuer ID matches the team key (or is unset for a personal key), and that the
 key can access and upload to this app.
 
-The app declares `ITSAppUsesNonExemptEncryption = true`; supply any required
-export-compliance documentation in ASC. The workflow preserves this declaration.
+The app leaves the export-compliance declaration unset. Complete the encryption
+questionnaire in App Store Connect after uploading and supply any required
+documentation before distributing the build.
 Use the hardware release checklist below before distributing a build.
 
 Release tooling checks (Python 3.11+):
