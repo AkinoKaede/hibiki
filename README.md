@@ -1,6 +1,6 @@
-# HIbiki
+# Hibiki
 
-Use an OpenPGP Card on another device and enter its PIN on any participating device. HIbiki forwards **scdaemon and pinentry over Assuan stdio**, while your native `gpg`, `gpg-agent`, and Git signing workflow stay on the requesting machine.
+Use an OpenPGP Card on another device and enter its PIN on any participating device. Hibiki forwards **scdaemon and pinentry over Assuan stdio**, while your native `gpg`, `gpg-agent`, and Git signing workflow stay on the requesting machine.
 
 For example, laptop A can sign a commit using a card attached to desktop B, with the PIN entered on device C. A's agent receives the PIN and passes it to B's selected card session. Multiple devices can offer input at once; the first successful response wins and the other prompts close.
 
@@ -298,7 +298,7 @@ These switches control whether the device accepts requests and participates as a
 | Offer password input | `false` | `true` |
 | Provide both | `true` | `true` |
 
-When `program` is omitted, HIbiki locates the native program using `gpgconf --list-components`. Both services support this automatic discovery; `gpgconf` must be in the daemon's `PATH`, or set `gpgconf_program` to its absolute path. Run `gpgconf --list-components` to inspect the selected binaries. Discovery uses GnuPG's reported component paths and does not automatically choose a GUI Pinentry such as `pinentry-mac`. Set `[pinentry].program` explicitly when needed. A native program path must not point to a HIbiki adapter.
+When `program` is omitted, Hibiki locates the native program using `gpgconf --list-components`. Both services support this automatic discovery; `gpgconf` must be in the daemon's `PATH`, or set `gpgconf_program` to its absolute path. Run `gpgconf --list-components` to inspect the selected binaries. Discovery uses GnuPG's reported component paths and does not automatically choose a GUI Pinentry such as `pinentry-mac`. Set `[pinentry].program` explicitly when needed. A native program path must not point to a Hibiki adapter.
 
 Pinentry uses the providing device's display environment. Choose a GUI Pinentry available on that device, or set its local `GPG_TTY` and `TERM` in the daemon's environment for terminal input. Requesting devices cannot supply remote display, TTY, owner, or filesystem settings.
 
@@ -335,7 +335,7 @@ Restart the agent for the GnuPG home you configured, including after changing th
 gpgconf --homedir /your/gnupg/home --kill gpg-agent
 ```
 
-The next GPG operation starts the agent again. For a custom HIbiki configuration, set `HIBIKI_CONFIG` before starting the agent so the adapters inherit it. Management commands also accept `--config PATH`.
+The next GPG operation starts the agent again. For a custom Hibiki configuration, set `HIBIKI_CONFIG` before starting the agent so the adapters inherit it. Management commands also accept `--config PATH`.
 
 ## Diagnose setup and connection issues
 
@@ -387,26 +387,26 @@ For Git signing, run these commands in your repository:
 git config gpg.program "$(command -v gpg)"
 git config user.signingkey YOUR_FINGERPRINT
 git config commit.gpgsign true
-git commit -S -m 'Signed with HIbiki'
+git commit -S -m 'Signed with Hibiki'
 ```
 
 ## Session behavior and limits
 
-**Card access.** HIbiki discovers enabled providers in parallel and selects the first OpenPGP Card matching the requested serial number or keygrip. Without a target, it selects the first available card. Once selected, card state, data, PIN inquiries, signing, and decryption stay on that backend until an explicit reset or card selection. A failure does not switch cards or replay a private operation.
+**Card access.** Hibiki discovers enabled providers in parallel and selects the first OpenPGP Card matching the requested serial number or keygrip. Without a target, it selects the first available card. Once selected, card state, data, PIN inquiries, signing, and decryption stay on that backend until an explicit reset or card selection. A failure does not switch cards or replay a private operation.
 
-Each device grants one exclusive scdaemon session at a time; busy devices reject additional sessions. HIbiki starts its own native scdaemon with `--server` in `$XDG_DATA_HOME/hibiki/scdaemon`. Reader settings can go in that directory's `scdaemon.conf`. It does not connect to existing agent/scdaemon sockets or terminate other services holding a reader.
+Each device grants one exclusive scdaemon session at a time; busy devices reject additional sessions. Hibiki starts its own native scdaemon with `--server` in `$XDG_DATA_HOME/hibiki/scdaemon`. Reader settings can go in that directory's `scdaemon.conf`. It does not connect to existing agent/scdaemon sockets or terminate other services holding a reader.
 
 **Password entry.** Each `GETPIN`, `CONFIRM`, or `MESSAGE` request starts a fresh race among enabled local and remote providers, including devices that return online before the command deadline. The first complete successful response wins. A canceled or failed window only eliminates that candidate; remaining candidates can still succeed. Losing processes are closed, and their partial input is discarded.
 
-The native agent or card validates the password. A retry starts a new race; HIbiki never tries the losing candidates' passwords. Answers go only to the requester. Multiple Pinentry inquiries are serialized upstream, with each answer routed back to its original candidate.
+The native agent or card validates the password. A retry starts a new race; Hibiki never tries the losing candidates' passwords. Answers go only to the requester. Multiple Pinentry inquiries are serialized upstream, with each answer routed back to its original candidate.
 
-**Transport and lifecycle.** Both agent-to-adapter and HIbiki-to-native-program connections use stdio. The adapters reach the local daemon through a private Unix socket. Assuan inquiries preserve their parameters, binary data, percent escapes, and native error codes.
+**Transport and lifecycle.** Both agent-to-adapter and Hibiki-to-native-program connections use stdio. The adapters reach the local daemon through a private Unix socket. Assuan inquiries preserve their parameters, binary data, percent escapes, and native error codes.
 
 - No extra scdaemon socket is exposed. `GETINFO socket_name` returns no data, and additional concurrent card connections from the same agent are unsupported.
 - Card discovery, public-key reading, signing, and decryption are supported. PIN changes, key writing, key generation, and raw APDU commands are rejected on both ends.
 - Each active command has a 120-second default timeout, configurable from 1 to 3600 seconds. Idle time does not consume the next command's deadline.
 - Caller exit, timeout, revocation, or channel deletion cancels pending work and closes affected backends. Offline members can join a waiting operation before its original deadline; the first success cancels every other queued copy. Relay reconnection preserves live callers and uses new encrypted sessions.
-- A selected card stays bound to its original device and serial. Reconnection restores confirmed selection and SETDATA preparation for commands not yet executed. An execution claim is durable: if execution started and its result was lost, HIbiki reports an unknown result and never automatically repeats the private command.
+- A selected card stays bound to its original device and serial. Reconnection restores confirmed selection and SETDATA preparation for commands not yet executed. An execution claim is durable: if execution started and its result was lost, Hibiki reports an unknown result and never automatically repeats the private command.
 - The relay persists operation IDs, deadlines, targets, and execution states, not PINs, plaintext command data, or results. Queue limits are 128 operations per caller or target and 4096 in total. Pending work survives a relay restart only when the live caller resumes it; restarting the caller daemon does not restore vanished calls.
 - The daemon currently needs a relay connection even when only local providers are used.
 
@@ -444,7 +444,7 @@ Devices authenticate with Ed25519 identities and establish `Noise_XX_25519_ChaCh
 
 The relay can see membership, routing, timing, and ciphertext sizes, but cannot read Assuan traffic. It queues operation metadata for offline devices while the original caller is still waiting. Approved channel members can use enabled services and approve additional members.
 
-Card private keys stay on the card; software private keys stay on the requesting device. PINs and passphrases pass through the input device and requester, and card PINs also reach the selected card provider. HIbiki clears secret buffers after use, does not cache passwords or enable Pinentry's external password cache, and keeps protocol bodies and secrets out of logs. Native agent caching still applies.
+Card private keys stay on the card; software private keys stay on the requesting device. PINs and passphrases pass through the input device and requester, and card PINs also reach the selected card provider. Hibiki clears secret buffers after use, does not cache passwords or enable Pinentry's external password cache, and keeps protocol bodies and secrets out of logs. Native agent caching still applies.
 
 | Data | Location |
 | --- | --- |
