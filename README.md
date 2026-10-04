@@ -38,6 +38,10 @@ export PATH="$PWD/target/release:$PATH"
 | `hibiki-scdaemon` | Stdio adapter used by the requesting device's agent |
 | `hibiki-pinentry` | Stdio adapter used by the requesting device's agent |
 
+`hibiki` highlights status, warnings, errors, and pairing details in color when
+writing to a terminal. Redirected output stays plain text. Set `NO_COLOR=1` to
+disable colors or `CLICOLOR_FORCE=1` to force them.
+
 ## Packages and releases
 
 GitHub Actions builds separate `hibiki-VERSION-TARGET.tar.xz` and

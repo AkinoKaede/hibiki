@@ -19,6 +19,8 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures-util = "0.3"
 clap = { version = "4", features = ["derive", "env"] }
+anstream = "1"
+anstyle = "1"
 axum = { version = "0.8", features = ["ws"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 sea-orm = { version = "2.0.4", default-features = false, features = ["macros", "sqlx-sqlite", "runtime-tokio-rustls"] }

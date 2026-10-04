@@ -1,6 +1,12 @@
+use anstream::{eprintln, println};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use hibiki::{network::Connection, pairing, storage::App};
+use hibiki::{
+    network::Connection,
+    pairing,
+    storage::App,
+    terminal::{ERROR, HEADING, SUCCESS, WARNING},
+};
 use hibiki_lib::{
     channel::*,
     digest,
@@ -132,9 +138,20 @@ fn hostname() -> Result<String> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{ERROR}Error:{ERROR:#} {error:?}");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_ansi(anstream::AutoStream::choice(&std::io::stderr()) != anstream::ColorChoice::Never)
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
@@ -154,7 +171,7 @@ async fn main() -> Result<()> {
             None => hostname().context("could not use hostname as device name; specify --name")?,
         };
         let app = App::initialize(server, name, allow_insecure)?;
-        println!("device {}", app.identity.device.id());
+        println!("{HEADING}device{HEADING:#} {}", app.identity.device.id());
         hibiki::diagnostics::setup(&app);
         return Ok(());
     }
@@ -178,7 +195,7 @@ async fn main() -> Result<()> {
             .member(&app.identity.device.id())?;
         app.config.default_channel = Some(id);
         app.save_config()?;
-        println!("default channel: {name}");
+        println!("{SUCCESS}default channel:{SUCCESS:#} {name}");
         eprintln!(
             "Run hibiki doctor to check readiness; hibiki setup shows GPG and background-service steps."
         );
@@ -224,10 +241,10 @@ async fn main() -> Result<()> {
                 bail!("server altered channel genesis");
             }
             let proof = app.bootstrap(proof, None)?;
-            println!("channel {}", proof.genesis.body.id);
+            println!("{HEADING}channel{HEADING:#} {}", proof.genesis.body.id);
             eprintln!("Next: hibiki channel invite NAME; on requesting devices, hibiki use NAME.");
             if generated {
-                println!("PSK {secret}");
+                println!("{HEADING}PSK{HEADING:#} {secret}");
             }
         }
         ChannelCommand::Invite { name } => {
@@ -283,7 +300,7 @@ async fn main() -> Result<()> {
                 }
                 proof.verify()?.member(&app.identity.device.id())?;
                 app.bootstrap(proof, None)?;
-                println!("joined {} {}", invite.name, invite.id);
+                println!("{SUCCESS}joined{SUCCESS:#} {} {}", invite.name, invite.id);
                 eprintln!(
                     "Next on requesting devices: hibiki use {:?}; then hibiki doctor.",
                     invite.name
@@ -314,7 +331,7 @@ async fn main() -> Result<()> {
                 psk: secret,
             })
             .await?;
-            println!("request {request_id}");
+            println!("{HEADING}request{HEADING:#} {request_id}");
             std::io::stdout().flush()?;
             eprintln!(
                 "Ask a trusted member to run hibiki channel approve {:?} and compare all 24 public-key words and request ID {request_id} before answering y.",
@@ -341,7 +358,7 @@ async fn main() -> Result<()> {
                                 .await?
                                 .verify()?
                                 .member(&app.identity.device.id())?;
-                            println!("joined {} {}", state.name, id);
+                            println!("{SUCCESS}joined{SUCCESS:#} {} {}", state.name, id);
                             eprintln!(
                                 "Next on requesting devices: hibiki use {:?}; then hibiki doctor.",
                                 state.name
@@ -399,9 +416,9 @@ async fn main() -> Result<()> {
             if let Some(request) = request {
                 let request_id = request.id()?;
                 append(&app, &conn, &id, MembershipAction::Admit(request), None).await?;
-                println!("approved {request_id}");
+                println!("{SUCCESS}approved{SUCCESS:#} {request_id}");
             } else {
-                println!("not approved");
+                println!("{WARNING}not approved{WARNING:#}");
             }
         }
         ChannelCommand::Reject { name, request_id } => {
@@ -419,7 +436,7 @@ async fn main() -> Result<()> {
             else {
                 bail!("invalid rejection response");
             };
-            println!("rejected {request_id}");
+            println!("{SUCCESS}rejected{SUCCESS:#} {request_id}");
         }
         ChannelCommand::Withdraw { name, request_id } => {
             let id = app.resolve_channel(&name)?;
@@ -432,7 +449,7 @@ async fn main() -> Result<()> {
             else {
                 bail!("invalid withdrawal response");
             };
-            println!("withdrawn {request_id}");
+            println!("{SUCCESS}withdrawn{SUCCESS:#} {request_id}");
         }
         ChannelCommand::RotatePsk {
             name,
@@ -446,9 +463,9 @@ async fn main() -> Result<()> {
                 verifier_commitment: digest(verifier.as_bytes()),
             };
             append(&app, &conn, &id, action, Some(verifier)).await?;
-            println!("PSK updated; existing members retained");
+            println!("{SUCCESS}PSK updated; existing members retained{SUCCESS:#}");
             if generated {
-                println!("PSK {secret}");
+                println!("{HEADING}PSK{HEADING:#} {secret}");
             }
         }
         ChannelCommand::Leave { name } => {
@@ -458,10 +475,10 @@ async fn main() -> Result<()> {
                 app.config.default_channel = None;
                 app.save_config()?;
             }
-            println!("left {name} {id}");
+            println!("{SUCCESS}left{SUCCESS:#} {name} {id}");
             if app.proof(&id)?.verify()?.members().is_empty() {
                 eprintln!(
-                    "No members remain; the server administrator must delete and recreate the channel to use it again."
+                    "{WARNING}No members remain;{WARNING:#} the server administrator must delete and recreate the channel to use it again."
                 );
             }
         }
@@ -477,7 +494,7 @@ async fn main() -> Result<()> {
                 None,
             )
             .await?;
-            println!("revoked {device_id}");
+            println!("{SUCCESS}revoked{SUCCESS:#} {device_id}");
         }
         ChannelCommand::List => {
             for proof in app.proofs()? {
@@ -485,7 +502,7 @@ async fn main() -> Result<()> {
                     Ok(current) => current,
                     Err(_) => {
                         println!(
-                            "{} {} unavailable",
+                            "{} {} {WARNING}unavailable{WARNING:#}",
                             proof.genesis.body.id, proof.genesis.body.name
                         );
                         continue;

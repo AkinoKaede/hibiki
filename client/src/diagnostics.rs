@@ -2,7 +2,9 @@ use crate::{
     frontend::{DaemonStatus, LocalRequest},
     network::Connection,
     storage::App,
+    terminal::{ERROR, HEADING, SUCCESS, WARNING},
 };
+use anstream::{eprintln, println};
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{
     decode, encode,
@@ -39,7 +41,7 @@ pub async fn daemon_status(app: &App) -> Result<DaemonStatus> {
 }
 
 pub fn setup(app: &App) {
-    eprintln!("\nNext steps (show again with hibiki setup):");
+    eprintln!("\n{HEADING}Next steps (show again with hibiki setup):{HEADING:#}");
     eprintln!("1. Join an administrator/member invitation: hibiki channel join 'INVITATION'");
     eprintln!("   Obtain the PSK separately; compare verification words for member approval.");
     eprintln!("2. On requesting devices, select the joined channel: hibiki use NAME");
@@ -83,26 +85,26 @@ pub fn setup(app: &App) {
 
 pub async fn inspect(app: &App, doctor: bool) -> Result<()> {
     println!(
-        "device: {} {:?}",
+        "{HEADING}device:{HEADING:#} {} {:?}",
         app.identity.device.id(),
         app.identity.device.name
     );
-    println!("configuration: {:?}", app.config_file);
-    println!("relay: {:?}", app.config.server);
-    println!("IPC: {:?}", app.paths.ipc_socket());
+    println!("{HEADING}configuration:{HEADING:#} {:?}", app.config_file);
+    println!("{HEADING}relay:{HEADING:#} {:?}", app.config.server);
+    println!("{HEADING}IPC:{HEADING:#} {:?}", app.paths.ipc_socket());
     let mut failures = 0;
     match daemon_status(app).await {
         Ok(status) => {
             println!(
-                "daemon: running; relay: {}",
+                "{HEADING}daemon:{HEADING:#} {SUCCESS}running{SUCCESS:#}; relay: {}",
                 if status.relay_connected {
-                    "connected"
+                    format!("{SUCCESS}connected{SUCCESS:#}")
                 } else {
-                    "reconnecting"
+                    format!("{WARNING}reconnecting{WARNING:#}")
                 }
             );
             println!(
-                "active providers: scdaemon={} pinentry={}",
+                "{HEADING}active providers:{HEADING:#} scdaemon={} pinentry={}",
                 status.config.scdaemon.enabled, status.config.pinentry.enabled
             );
             if !status.relay_connected {
@@ -113,13 +115,15 @@ pub async fn inspect(app: &App, doctor: bool) -> Result<()> {
                 let mut active = status.config;
                 active.default_channel = app.config.default_channel.clone();
                 if active != app.config {
-                    println!("FAIL: daemon configuration differs from disk; restart hibiki daemon");
+                    println!(
+                        "{ERROR}FAIL:{ERROR:#} daemon configuration differs from disk; restart hibiki daemon"
+                    );
                     failures += 1;
                 }
             }
         }
         Err(error) => {
-            println!("FAIL: {error:#}");
+            println!("{ERROR}FAIL:{ERROR:#} {error:#}");
             failures += 1;
         }
     }
@@ -129,27 +133,34 @@ pub async fn inspect(app: &App, doctor: bool) -> Result<()> {
             state.member(&app.identity.device.id())?;
             Ok(state.name)
         }) {
-            Ok(name) => println!("selected channel: {name:?} ({id})"),
+            Ok(name) => println!("{HEADING}selected channel:{HEADING:#} {name:?} ({id})"),
             Err(error) => {
                 println!(
-                    "FAIL: selected channel: {error:#}; run hibiki channel list and hibiki use NAME"
+                    "{ERROR}FAIL:{ERROR:#} selected channel: {error:#}; run hibiki channel list and hibiki use NAME"
                 );
                 failures += 1;
             }
         },
-        None => println!("selected channel: none; requesting devices must run hibiki use NAME"),
+        None => println!(
+            "{HEADING}selected channel:{HEADING:#} {WARNING}none{WARNING:#}; requesting devices must run hibiki use NAME"
+        ),
     }
     if doctor {
         for service in [ServiceKind::Scdaemon, ServiceKind::Pinentry] {
             if !app.config.service(service).enabled {
-                println!("{service:?}: disabled (remote requests remain available)");
+                println!(
+                    "{service:?}: {WARNING}disabled{WARNING:#} (remote requests remain available)"
+                );
                 continue;
             }
             match crate::provider::program(app, service).await {
-                Ok(path) => println!("{service:?}: executable {}", path.display()),
+                Ok(path) => println!(
+                    "{service:?}: {SUCCESS}executable{SUCCESS:#} {}",
+                    path.display()
+                ),
                 Err(error) => {
                     println!(
-                        "FAIL: {service:?}: {error:#}; set its program or disable this provider"
+                        "{ERROR}FAIL:{ERROR:#} {service:?}: {error:#}; set its program or disable this provider"
                     );
                     failures += 1;
                 }
@@ -173,14 +184,16 @@ pub async fn inspect(app: &App, doctor: bool) -> Result<()> {
         .await;
         match relay {
             Ok(Ok(allowed)) => {
-                println!("relay authentication: OK; client channel creation: {allowed}")
+                println!(
+                    "relay authentication: {SUCCESS}OK{SUCCESS:#}; client channel creation: {allowed}"
+                )
             }
             Ok(Err(error)) => {
-                println!("FAIL: relay authentication: {error:#}");
+                println!("{ERROR}FAIL:{ERROR:#} relay authentication: {error:#}");
                 failures += 1;
             }
             Err(_) => {
-                println!("FAIL: relay authentication timed out");
+                println!("{ERROR}FAIL:{ERROR:#} relay authentication timed out");
                 failures += 1;
             }
         }

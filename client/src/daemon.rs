@@ -1,7 +1,9 @@
 use crate::{
     network::{Connection, Event},
     storage::{App, ensure_runtime},
+    terminal::{SUCCESS, WARNING},
 };
+use anstream::eprintln;
 use anyhow::{Context, Result, bail};
 pub use hibiki_core::session::Hub;
 use hibiki_core::session::announce;
@@ -151,7 +153,7 @@ pub async fn run(app: App) -> Result<()> {
         let (connection, mut events) = match opened {
             Ok(v) => v,
             Err(_) => {
-                eprintln!("relay unavailable; reconnecting");
+                eprintln!("{WARNING}relay unavailable; reconnecting{WARNING:#}");
                 tokio::select! {_=tokio::signal::ctrl_c()=>break,_=tokio::time::sleep(Duration::from_secs(delay))=>{}}
                 delay = (delay * 2).min(30);
                 continue;
@@ -179,7 +181,7 @@ pub async fn run(app: App) -> Result<()> {
         }
         available.send_replace(Some(hub.clone()));
         hub.changed.notify_waiters();
-        eprintln!("HIbiki daemon connected");
+        eprintln!("{SUCCESS}HIbiki daemon connected{SUCCESS:#}");
         delay = 1;
         let mut refresh = tokio::time::interval(Duration::from_secs(10));
         let mut jobs = tokio::task::JoinSet::new();

@@ -1,4 +1,9 @@
 //! Local, fail-closed presentation of a signed admission request.
+use crate::terminal::{HEADING, WARNING};
+use anstream::{
+    AutoStream,
+    stream::{AsLockedWrite, RawStream},
+};
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{
     channel::{JoinRequest, VerifiedChannelState},
@@ -7,12 +12,19 @@ use hibiki_lib::{
 };
 use std::io::{BufRead, Read, Write};
 
-pub fn show_device(output: &mut impl Write, device: &Device) -> Result<()> {
+pub fn show_device(output: &mut (impl RawStream + AsLockedWrite), device: &Device) -> Result<()> {
+    write_device(&mut AutoStream::auto(output), device)
+}
+
+fn write_device(output: &mut impl Write, device: &Device) -> Result<()> {
     let words = device.public_key_words()?;
     // Debug formatting escapes terminal control sequences in untrusted display names.
-    writeln!(output, "Device name: {:?}", device.name)?;
-    writeln!(output, "Device ID: {}", device.id())?;
-    writeln!(output, "Ed25519 public-key words: {words}")?;
+    writeln!(output, "{HEADING}Device name:{HEADING:#} {:?}", device.name)?;
+    writeln!(output, "{HEADING}Device ID:{HEADING:#} {}", device.id())?;
+    writeln!(
+        output,
+        "{HEADING}Ed25519 public-key words: {words}{HEADING:#}"
+    )?;
     writeln!(
         output,
         "These 24 words encode a public identity key, not a recovery phrase or an OpenPGP key."
@@ -21,7 +33,7 @@ pub fn show_device(output: &mut impl Write, device: &Device) -> Result<()> {
     Ok(())
 }
 fn answer(input: &mut impl BufRead, output: &mut impl Write, prompt: &str) -> Result<String> {
-    write!(output, "{prompt}")?;
+    write!(output, "{WARNING}{prompt}{WARNING:#}")?;
     output.flush()?;
     let mut response = String::new();
     input.take(1025).read_line(&mut response)?;
@@ -36,8 +48,10 @@ pub fn choose_approval(
     state: &VerifiedChannelState,
     request_id: Option<&str>,
     input: &mut impl BufRead,
-    output: &mut impl Write,
+    output: &mut (impl RawStream + AsLockedWrite),
 ) -> Result<Option<JoinRequest>> {
+    let mut output = AutoStream::auto(output);
+    let output = &mut output;
     let mut candidates = Vec::new();
     for request in requests {
         request.verify()?;
@@ -62,7 +76,11 @@ pub fn choose_approval(
         writeln!(output, "No pending requests.")?;
         return Ok(None);
     }
-    writeln!(output, "Channel: {:?} ({})", state.name, state.id)?;
+    writeln!(
+        output,
+        "{HEADING}Channel:{HEADING:#} {:?} ({})",
+        state.name, state.id
+    )?;
     let index = if candidates.len() == 1 {
         0
     } else {
@@ -87,11 +105,11 @@ pub fn choose_approval(
             .context("invalid request selection; nothing approved")?
     };
     let (id, request) = candidates.swap_remove(index);
-    writeln!(output, "Request ID: {id}")?;
-    show_device(output, &request.body.device)?;
+    writeln!(output, "{HEADING}Request ID:{HEADING:#} {id}")?;
+    write_device(output, &request.body.device)?;
     writeln!(
         output,
-        "Compare all 24 words and the request ID with the joining device using a trusted channel."
+        "{WARNING}Compare all 24 words and the request ID with the joining device using a trusted channel.{WARNING:#}"
     )?;
     if answer(input, output, "Approve this device? [y/N]: ")?.eq_ignore_ascii_case("y") {
         return Ok(Some(request));
