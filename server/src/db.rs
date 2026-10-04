@@ -28,11 +28,10 @@ impl Database {
             });
         let connection = sea_orm::Database::connect(options).await?;
         let db = Self { connection };
-        db.migrate().await?;
+        db.initialize_schema().await?;
         Ok(db)
     }
-    /// Additive migration: retain the original signed proof blobs and legacy tables.
-    async fn migrate(&self) -> Result<()> {
+    async fn initialize_schema(&self) -> Result<()> {
         let tx = self.connection.begin().await?;
         let schema = Schema::new(self.connection.get_database_backend());
         for mut statement in [
@@ -45,20 +44,6 @@ impl Database {
             schema.create_table_from_entity(crate::entities::operation::Entity),
         ] {
             tx.execute(statement.if_not_exists()).await?;
-        }
-        for row in channel::Entity::find().all(&tx).await? {
-            registry::Entity::insert(registry::ActiveModel {
-                id: Set(row.id),
-                name: Set(row.name),
-            })
-            .on_conflict(
-                OnConflict::column(registry::Column::Id)
-                    .do_nothing()
-                    .to_owned(),
-            )
-            .try_insert()
-            .exec(&tx)
-            .await?;
         }
         tx.commit().await?;
         Ok(())
@@ -316,7 +301,6 @@ impl Database {
             id: Set(request.id()?),
             channel: Set(state.id),
             request: Set(encode(&request)?),
-            expires: Set(body.expires_at as i64),
             epoch: Set(body.psk_epoch as i64),
         })
         .on_conflict(
@@ -343,6 +327,75 @@ impl Database {
             .map(|row| decode(&row.request).map_err(Into::into))
             .collect()
     }
+    /// Remove exactly one request. The channel CAS serializes this with approval,
+    /// rotation, revocation and deletion, including other database connections.
+    pub async fn remove_pending(
+        &self,
+        caller: &str,
+        id: &str,
+        request_id: &str,
+        withdraw: bool,
+    ) -> Result<()> {
+        let state = self.get(id).await?.verify()?;
+        if !withdraw {
+            state.member(caller)?;
+        }
+        let tx = self.connection.begin().await?;
+        let locked = channel::Entity::update_many()
+            .col_expr(channel::Column::Head, Expr::col(channel::Column::Head))
+            .filter(channel::Column::Id.eq(id))
+            .filter(channel::Column::Head.eq(state.head.to_vec()))
+            .exec(&tx)
+            .await?;
+        if locked.rows_affected != 1 {
+            bail!("CONFLICT: channel changed; retry");
+        }
+        let row = pending::Entity::find_by_id(request_id)
+            .filter(pending::Column::Channel.eq(id))
+            .filter(pending::Column::Epoch.eq(state.psk_epoch as i64))
+            .one(&tx)
+            .await?
+            .context("request is no longer pending")?;
+        let request: JoinRequest = decode(&row.request)?;
+        if withdraw && request.body.device.id() != caller {
+            bail!("only the requesting device may withdraw its request");
+        }
+        pending::Entity::delete_by_id(row.id).exec(&tx).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn join_status(
+        &self,
+        caller: &str,
+        id: &str,
+        request_id: &str,
+    ) -> Result<hibiki_lib::protocol::JoinState> {
+        use hibiki_lib::protocol::JoinState;
+        let tx = self.connection.begin().await?;
+        let Some(channel) = channel::Entity::find_by_id(id).one(&tx).await? else {
+            return Ok(JoinState::Absent);
+        };
+        let proof: MembershipProof = decode(&channel.proof)?;
+        let state = proof.verify()?;
+        if state.member(caller).is_ok() {
+            return Ok(JoinState::Member);
+        }
+        let row = pending::Entity::find_by_id(request_id)
+            .filter(pending::Column::Channel.eq(id))
+            .filter(pending::Column::Epoch.eq(state.psk_epoch as i64))
+            .one(&tx)
+            .await?;
+        let Some(row) = row else {
+            return Ok(JoinState::Absent);
+        };
+        let request: JoinRequest = decode(&row.request)?;
+        if request.body.device.id() != caller {
+            bail!("request belongs to another device");
+        }
+        Ok(JoinState::Pending)
+    }
+
     pub async fn append(
         &self,
         caller: &str,

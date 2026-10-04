@@ -117,7 +117,7 @@ mod persistence_tests {
     use crate::{MobileClient, create_identity};
     use hibiki_core::storage::atomic_write;
     #[tokio::test]
-    async fn migrates_legacy_record_and_removal_survives_reopening() {
+    async fn registry_and_removal_survive_reopening() {
         let root =
             std::env::temp_dir().join(format!("hibiki-registry-{}", hibiki_lib::random_id()));
         let identity = create_identity("registry test".into()).unwrap();
@@ -136,17 +136,19 @@ mod persistence_tests {
             transport: CardTransport::Nfc,
             keys: vec![],
         };
+        let mut registry = Registry::default();
+        registry.upsert(card, "Security Key".into(), true, true);
         atomic_write(
-            &root.join("data/card.bin"),
-            &hibiki_lib::encode(&card).unwrap(),
+            &root.join("data/cards.bin"),
+            &hibiki_lib::encode(&registry).unwrap(),
         )
         .unwrap();
         drop(first);
-        let migrated = open();
-        assert_eq!(migrated.registered_cards().len(), 1);
-        assert_eq!(migrated.selected_card().unwrap().serial, "one");
-        migrated.remove_card("one".into()).await.unwrap();
-        drop(migrated);
+        let registered = open();
+        assert_eq!(registered.registered_cards().len(), 1);
+        assert_eq!(registered.selected_card().unwrap().serial, "one");
+        registered.remove_card("one".into()).await.unwrap();
+        drop(registered);
         let reopened = open();
         assert!(reopened.registered_cards().is_empty());
         assert!(reopened.selected_card().is_none());

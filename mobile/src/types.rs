@@ -34,7 +34,6 @@ pub struct PendingInfo {
     pub id: String,
     pub channel: String,
     pub device: DeviceInfo,
-    pub expires_at: u64,
 }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct Invitation {
@@ -46,8 +45,14 @@ pub struct Invitation {
 pub struct JoinInfo {
     pub channel: String,
     pub request: String,
-    pub expires_at: u64,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PairingState {
+    Pending,
+    Member,
+    Absent,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, uniffi::Enum)]
 pub enum CardTransport {
     Usb,

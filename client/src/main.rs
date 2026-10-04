@@ -4,14 +4,14 @@ use hibiki::{network::Connection, pairing, storage::App};
 use hibiki_lib::{
     channel::*,
     digest,
-    protocol::{Control, Reply},
+    protocol::{Control, JoinState, Reply},
 };
 use std::{io::Write, path::PathBuf, time::Duration};
 
 #[derive(Parser)]
 #[command(version, about = "Manage HIbiki devices and Assuan services")]
 struct Args {
-    #[arg(long, global = true)]
+    #[arg(long, global = true, env = "HIBIKI_CONFIG")]
     config: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
@@ -39,6 +39,12 @@ enum Commands {
         name: String,
     },
     Daemon,
+    /// Show live daemon, relay and selected-channel status.
+    Status,
+    /// Diagnose daemon, relay authentication and enabled native providers.
+    Doctor,
+    /// Show setup steps and GPG adapter paths without modifying configuration.
+    Setup,
 }
 #[derive(Subcommand)]
 enum DeviceCommand {
@@ -70,6 +76,16 @@ enum ChannelCommand {
         name: String,
         /// Omit to choose a pending request interactively. Always asks for y/N confirmation.
         request_id: Option<String>,
+    },
+    /// Reject one pending request; the device may submit a new request.
+    Reject {
+        name: String,
+        request_id: String,
+    },
+    /// Withdraw this device's own pending request.
+    Withdraw {
+        name: String,
+        request_id: String,
     },
     RotatePsk {
         name: String,
@@ -139,9 +155,19 @@ async fn main() -> Result<()> {
         };
         let app = App::initialize(server, name, allow_insecure)?;
         println!("device {}", app.identity.device.id());
+        hibiki::diagnostics::setup(&app);
         return Ok(());
     }
     let mut app = App::load(args.config.as_deref())?;
+    match args.command {
+        Commands::Status => return hibiki::diagnostics::inspect(&app, false).await,
+        Commands::Doctor => return hibiki::diagnostics::inspect(&app, true).await,
+        Commands::Setup => {
+            hibiki::diagnostics::setup(&app);
+            return Ok(());
+        }
+        _ => {}
+    }
     if let Commands::Daemon = args.command {
         return hibiki::daemon::run(app).await;
     }
@@ -153,6 +179,9 @@ async fn main() -> Result<()> {
         app.config.default_channel = Some(id);
         app.save_config()?;
         println!("default channel: {name}");
+        eprintln!(
+            "Run hibiki doctor to check readiness; hibiki setup shows GPG and background-service steps."
+        );
         return Ok(());
     }
     if let Commands::Device {
@@ -196,6 +225,7 @@ async fn main() -> Result<()> {
             }
             let proof = app.bootstrap(proof, None)?;
             println!("channel {}", proof.genesis.body.id);
+            eprintln!("Next: hibiki channel invite NAME; on requesting devices, hibiki use NAME.");
             if generated {
                 println!("PSK {secret}");
             }
@@ -254,6 +284,10 @@ async fn main() -> Result<()> {
                 proof.verify()?.member(&app.identity.device.id())?;
                 app.bootstrap(proof, None)?;
                 println!("joined {} {}", invite.name, invite.id);
+                eprintln!(
+                    "Next on requesting devices: hibiki use {:?}; then hibiki doctor.",
+                    invite.name
+                );
                 conn.close();
                 return Ok(());
             }
@@ -286,12 +320,38 @@ async fn main() -> Result<()> {
                 "Ask a trusted member to run hibiki channel approve {:?} and compare all 24 public-key words and request ID {request_id} before answering y.",
                 state.name
             );
+            eprintln!(
+                "To withdraw: hibiki channel withdraw {:?} {request_id}",
+                state.name
+            );
             if !no_wait {
                 loop {
-                    let proof = refresh(&app, &conn, &id).await?;
-                    if proof.verify()?.member(&app.identity.device.id()).is_ok() {
-                        println!("joined {} {}", state.name, id);
-                        break;
+                    let Reply::JoinStatus(status) = conn
+                        .request(Control::JoinStatus {
+                            channel: id.clone(),
+                            request: request_id.clone(),
+                        })
+                        .await?
+                    else {
+                        bail!("invalid join status response");
+                    };
+                    match status {
+                        JoinState::Member => {
+                            refresh(&app, &conn, &id)
+                                .await?
+                                .verify()?
+                                .member(&app.identity.device.id())?;
+                            println!("joined {} {}", state.name, id);
+                            eprintln!(
+                                "Next on requesting devices: hibiki use {:?}; then hibiki doctor.",
+                                state.name
+                            );
+                            break;
+                        }
+                        JoinState::Absent => bail!(
+                            "request was rejected, withdrawn or invalidated; obtain a current invitation and submit a new request"
+                        ),
+                        JoinState::Pending => {}
                     }
                     tokio::select! {
                         _ = tokio::signal::ctrl_c() => bail!("stopped waiting; request remains pending"),
@@ -343,6 +403,36 @@ async fn main() -> Result<()> {
             } else {
                 println!("not approved");
             }
+        }
+        ChannelCommand::Reject { name, request_id } => {
+            let id = app.resolve_channel(&name)?;
+            refresh(&app, &conn, &id)
+                .await?
+                .verify()?
+                .member(&app.identity.device.id())?;
+            let Reply::Ok = conn
+                .request(Control::RejectJoin {
+                    channel: id,
+                    request: request_id.clone(),
+                })
+                .await?
+            else {
+                bail!("invalid rejection response");
+            };
+            println!("rejected {request_id}");
+        }
+        ChannelCommand::Withdraw { name, request_id } => {
+            let id = app.resolve_channel(&name)?;
+            let Reply::Ok = conn
+                .request(Control::WithdrawJoin {
+                    channel: id,
+                    request: request_id.clone(),
+                })
+                .await?
+            else {
+                bail!("invalid withdrawal response");
+            };
+            println!("withdrawn {request_id}");
         }
         ChannelCommand::RotatePsk {
             name,

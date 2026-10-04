@@ -1,9 +1,13 @@
+# Search order: /etc/hibiki/server.toml, /usr/local/etc/hibiki/server.toml.
+# --config or HIBIKI_SERVER_CONFIG selects one file explicitly.
 # Default local address; expose through a TLS endpoint for remote use.
 listen = "127.0.0.1:7749"
-# Relative to this configuration file. The parent directory must be owned by
-# the running user and have mode 0700.
-database = "data/hibiki.sqlite3"
-# Allow authenticated clients to create channels (default: true).
-# Set false to reserve creation for the server administrator. Existing member
-# management and claiming server-created channels remain available.
-allow_client_channel_creation = true
+# Default system data path. Relative overrides use the configuration directory.
+# For local-prefix storage, set /usr/local/var/lib/hibiki/hibiki.sqlite3 explicitly.
+# Missing directories are created; existing ones must be owned by the running
+# user and have mode 0700.
+database = "/var/lib/hibiki/hibiki.sqlite3"
+# Reserve channel creation for the server administrator (default: false).
+# Existing member management and claiming server-created channels remain
+# available. Set true to allow authenticated clients to create channels.
+allow_client_channel_creation = false

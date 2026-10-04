@@ -194,7 +194,7 @@ def make_card(device, algorithm="rsa2048"):
 def test_all():
     with tempfile.TemporaryDirectory(prefix='hi-',dir='/tmp') as temp:
         root=Path(temp);server_data=root/'server';server_data.mkdir(mode=0o700)
-        config=server_data/'server.toml';config.write_text('listen = "127.0.0.1:0"\ndatabase = "hibiki.sqlite3"\nallow_client_channel_creation = false\n')
+        config=server_data/'server.toml';config.write_text('listen = "127.0.0.1:0"\ndatabase = "hibiki.sqlite3"\n')
         server_log=server_data/'server.log';log=server_log.open('w')
         server=subprocess.Popen([str(SERVER),'--config',str(config)],stdout=log,stderr=log)
         devices=[]
@@ -211,6 +211,23 @@ def test_all():
             a.cli('channel','join',bootstrap,'--psk-file',psk)
             b.cli('channel','join',bootstrap,'--psk-file',psk,ok=False)
             invite=a.cli('channel','invite','test').stdout.decode().strip()
+            # Removing a request terminates the waiting CLI without admitting it.
+            waiting = subprocess.Popen([str(CLIENT), 'channel', 'join', invite, '--psk-file', str(psk)],
+                                       env=b.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                request = waiting.stdout.readline().decode().split()[1]
+                c.cli('channel', 'withdraw', 'test', request, ok=False)
+                a.cli('channel', 'reject', 'test', request)
+                _, error = waiting.communicate(timeout=10)
+                assert waiting.returncode != 0 and b'rejected, withdrawn or invalidated' in error
+                assert request.encode() not in a.cli('channel', 'pending', 'test').stdout
+            finally:
+                if waiting.poll() is None: waiting.kill(); waiting.wait()
+            request = b.cli('channel', 'join', invite, '--psk-file', psk, '--no-wait').stdout.decode().split()[1]
+            a.cli('channel', 'withdraw', 'test', request, ok=False)
+            b.cli('channel', 'withdraw', 'test', request)
+            assert request.encode() not in a.cli('channel', 'pending', 'test').stdout
+            print('PASS: rejection ends waiting admission; only applicants can withdraw their request', flush=True)
             for member,approver in [(b,a),(c,b)]:
                 joined=member.cli('channel','join',invite,'--psk-file',psk,'--no-wait')
                 request=joined.stdout.decode().split()[1]
@@ -223,6 +240,9 @@ def test_all():
             a.gpg('--import',data=public)
             a.services();b.services(scdaemon=True,pinentry=True);c.services(pinentry=True)
             for d in devices: d.start()
+            assert b'daemon: running; relay: connected' in a.cli('status').stdout
+            assert b'client channel creation: false' in a.cli('doctor').stdout
+            assert b'hibiki use NAME' in a.cli('setup').stderr
             print('PASS: fresh HIbiki pairing, server-only creation and independent services',flush=True)
 
             # Queue metadata survives a relay restart; only a live caller resumes it.
@@ -421,6 +441,31 @@ def test_all():
             run([SERVER,'--config',config,'channel','delete','test'])
             pe.p.wait(timeout=12);pe.close();wait_for(b.idle)
             print('PASS: online channel deletion closes active service sessions',flush=True)
+
+            server.terminate(); server.wait(timeout=10)
+            a.stop(); a.services(timeout=1)
+            a.log = a.log_path.open('w')
+            a.daemon = subprocess.Popen([str(CLIENT), 'daemon'], env=a.env, stdout=a.log, stderr=a.log)
+            wait_for(lambda: 'relay unavailable' in a.log_path.read_text())
+            status = a.cli('status', ok=False)
+            assert b'daemon: running; relay: reconnecting' in status.stdout
+            adapter = subprocess.Popen([str(BIN/'hibiki-pinentry')], env=a.env,
+                                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                with selectors.DefaultSelector() as selector:
+                    selector.register(adapter.stdout, selectors.EVENT_READ)
+                    assert selector.select(4), 'startup wait exceeded the configured deadline'
+                response = adapter.stdout.readline()
+                assert response.startswith(b'ERR ') and b'startup wait timed out' in response, response
+            finally:
+                adapter.terminate(); adapter.wait(timeout=5)
+                adapter.stdin.close(); adapter.stdout.close(); adapter.stderr.close()
+            a.stop(); a.services(scdaemon=True)
+            a.config.write_text(a.config.read_text().replace(str(a.root/'test-scdaemon'), str(a.root/'missing-scdaemon')))
+            error = a.cli('daemon', ok=False).stderr
+            assert b'enabled but unavailable' in error, error
+            print('PASS: live offline status, bounded adapter startup and enabled-provider preflight', flush=True)
+
         except Exception:
             for d in devices:
                 print('DIAGNOSTIC',d.root.name, d.log_path.read_text() if hasattr(d,'log_path') else '',file=sys.stderr)

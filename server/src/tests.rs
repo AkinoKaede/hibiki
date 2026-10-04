@@ -1,6 +1,82 @@
 use super::{db::Database, service::Service};
 use hibiki_lib::{channel::*, digest, identity::Identity, now};
 
+#[test]
+fn server_defaults_and_shipped_configs_use_system_storage_and_admin_creation() {
+    for config in [
+        super::Config::default(),
+        toml::from_str("").unwrap(),
+        toml::from_str(include_str!("../../examples/server.toml")).unwrap(),
+        toml::from_str(include_str!("../container.toml")).unwrap(),
+    ] {
+        assert_eq!(
+            config.database,
+            std::path::Path::new("/var/lib/hibiki/hibiki.sqlite3")
+        );
+        assert!(!config.allow_client_channel_creation);
+    }
+}
+
+#[test]
+fn config_search_falls_back_to_local_and_prefers_system_without_merging() {
+    let dir = tempfile::tempdir().unwrap();
+    let [system, local] = super::CONFIG_PATHS.map(|path| dir.path().join(&path[1..]));
+    let candidates = [system.as_path(), local.as_path()];
+    let (config, selected) = super::load_config(None, &candidates).unwrap();
+    assert!(selected.is_none());
+    assert_eq!(config.database, super::Config::default().database);
+
+    std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+    std::fs::write(&local, "listen = '127.0.0.1:9000'\n").unwrap();
+    let (config, selected) = super::load_config(None, &candidates).unwrap();
+    assert_eq!(selected.as_deref(), Some(local.as_path()));
+    assert_eq!(config.listen, "127.0.0.1:9000");
+    assert_eq!(config.database, super::Config::default().database);
+
+    std::fs::create_dir_all(system.parent().unwrap()).unwrap();
+    std::fs::write(&system, "database = 'data/system.sqlite3'\n").unwrap();
+    let (config, selected) = super::load_config(None, &candidates).unwrap();
+    assert_eq!(selected.as_deref(), Some(system.as_path()));
+    assert_eq!(config.database, std::path::Path::new("data/system.sqlite3"));
+    assert_eq!(config.listen, super::Config::default().listen);
+}
+
+#[test]
+fn explicit_config_wins_and_missing_explicit_config_never_falls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let system = dir.path().join("system.toml");
+    let local = dir.path().join("local.toml");
+    std::fs::write(&system, "listen = '127.0.0.1:9000'\n").unwrap();
+    std::fs::write(
+        &local,
+        "database = '/usr/local/var/lib/hibiki/hibiki.sqlite3'\n",
+    )
+    .unwrap();
+    let (config, selected) = super::load_config(Some(&local), &[&system]).unwrap();
+    assert_eq!(selected.as_deref(), Some(local.as_path()));
+    assert_eq!(
+        config.database,
+        std::path::Path::new("/usr/local/var/lib/hibiki/hibiki.sqlite3")
+    );
+    std::fs::remove_file(&local).unwrap();
+    assert!(super::load_config(Some(&local), &[&system]).is_err());
+}
+
+#[test]
+fn invalid_or_unreadable_preferred_config_never_falls_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.toml");
+    let second = dir.path().join("second.toml");
+    std::fs::write(&second, "").unwrap();
+    std::fs::write(&first, "not valid toml").unwrap();
+    let error = super::load_config(None, &[&first, &second]).err().unwrap();
+    assert!(error.to_string().contains("invalid configuration"));
+    std::fs::remove_file(&first).unwrap();
+    std::fs::create_dir(&first).unwrap();
+    let error = super::load_config(None, &[&first, &second]).err().unwrap();
+    assert!(error.to_string().contains("could not read configuration"));
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     db: Database,
@@ -99,18 +175,16 @@ async fn admission_requires_psk_pending_and_one_authorized_signature() {
     );
 }
 #[tokio::test]
-async fn legacy_expired_requests_remain_approvable_and_approval_is_atomic() {
+async fn pending_requests_do_not_expire_and_approval_is_atomic() {
     let f = Fixture::new().await;
-    let mut expired = f.request();
-    expired.body.created_at = now() - 601;
-    expired.body.expires_at = now() - 1;
-    expired.signature = f.b.sign("join/v1", &expired.body).unwrap();
+    let mut request = f.request();
+    request.body.created_at = now() - 86400;
+    request.signature = f.b.sign("join/v1", &request.body).unwrap();
     assert!(
-        f.db.join(&f.b.device.id(), expired.clone(), "test-secret".into())
+        f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
             .await
             .is_ok()
     );
-    let request = expired;
     f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
         .await
         .unwrap();
@@ -427,68 +501,6 @@ async fn delete_cleans_pending_preserves_other_channels_and_never_reuses_id() {
 }
 
 #[tokio::test]
-async fn seaorm_opens_legacy_database_without_changing_signed_records() {
-    use sea_orm::{ConnectionTrait, DbBackend, Statement};
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("legacy.sqlite");
-    let connection = sea_orm::Database::connect(format!("sqlite:{}?mode=rwc", path.display()))
-        .await
-        .unwrap();
-    for sql in [
-        "CREATE TABLE devices (id TEXT PRIMARY KEY, bundle BLOB NOT NULL)",
-        "CREATE TABLE channels (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, proof BLOB NOT NULL, head BLOB NOT NULL, verifier TEXT NOT NULL)",
-        "CREATE TABLE pending (id TEXT PRIMARY KEY, channel TEXT NOT NULL REFERENCES channels(id), request BLOB NOT NULL, expires INTEGER NOT NULL, epoch INTEGER NOT NULL)",
-    ] {
-        connection.execute_unprepared(sql).await.unwrap();
-    }
-    let identity = Identity::generate("legacy".into()).unwrap();
-    let verifier = hash_psk("test-secret").unwrap();
-    let proof = MembershipProof {
-        genesis: ChannelGenesis::create(&identity, "Legacy".into(), &verifier).unwrap(),
-        events: vec![],
-    };
-    let bytes = hibiki_lib::encode(&proof).unwrap();
-    connection
-        .execute_raw(Statement::from_sql_and_values(
-            DbBackend::Sqlite,
-            "INSERT INTO channels(id,name,proof,head,verifier) VALUES(?,?,?,?,?)",
-            [
-                proof.genesis.body.id.clone().into(),
-                "Legacy".into(),
-                bytes.clone().into(),
-                proof.genesis.hash().unwrap().to_vec().into(),
-                verifier.clone().into(),
-            ],
-        ))
-        .await
-        .unwrap();
-    connection.close().await.unwrap();
-    let db = Database::open(&path).await.unwrap();
-    assert_eq!(
-        hibiki_lib::encode(&db.get(&proof.genesis.body.id).await.unwrap()).unwrap(),
-        bytes
-    );
-    assert_eq!(
-        db.admin_list().await.unwrap(),
-        vec![(proof.genesis.body.id.clone(), "Legacy".into(), false)]
-    );
-    assert!(
-        db.reserve("ws://localhost/hibiki".into(), "Legacy".into(), verifier)
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        Database::open(&path)
-            .await
-            .unwrap()
-            .get(&proof.genesis.body.id)
-            .await
-            .unwrap(),
-        proof
-    );
-}
-
-#[tokio::test]
 async fn concurrent_claim_and_delete_never_resurrects_a_channel() {
     let f = Fixture::new().await;
     let invite =
@@ -579,4 +591,113 @@ async fn member_can_leave_and_rejoin_only_after_new_approval() {
         .await
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn pending_removal_checks_ownership_and_blocks_stale_approval() {
+    use hibiki_lib::protocol::JoinState;
+    let f = Fixture::new().await;
+    let request = f.request();
+    let id = request.id().unwrap();
+    let channel = &f.proof.genesis.body.id;
+    let outsider = Identity::generate("outsider".into()).unwrap();
+    f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.db.join_status(&f.b.device.id(), channel, &id)
+            .await
+            .unwrap(),
+        JoinState::Pending
+    );
+    assert!(
+        f.db.remove_pending(&outsider.device.id(), channel, &id, false)
+            .await
+            .is_err()
+    );
+    assert!(
+        f.db.remove_pending(&outsider.device.id(), channel, &id, true)
+            .await
+            .is_err()
+    );
+    assert!(
+        f.db.remove_pending(&f.a.device.id(), channel, &id, true)
+            .await
+            .is_err()
+    );
+    assert!(
+        f.db.join_status(&outsider.device.id(), channel, &id)
+            .await
+            .is_err()
+    );
+    let event = MembershipEvent::create(
+        &f.a,
+        &f.proof.verify().unwrap(),
+        MembershipAction::Admit(request.clone()),
+    )
+    .unwrap();
+    f.db.remove_pending(&f.b.device.id(), channel, &id, true)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.db.join_status(&f.b.device.id(), channel, &id)
+            .await
+            .unwrap(),
+        JoinState::Absent
+    );
+    assert!(
+        f.db.append(&f.a.device.id(), event.clone(), None)
+            .await
+            .is_err()
+    );
+    assert!(
+        f.db.get(channel)
+            .await
+            .unwrap()
+            .verify()
+            .unwrap()
+            .member(&f.b.device.id())
+            .is_err()
+    );
+    f.db.join(&f.b.device.id(), request, "test-secret".into())
+        .await
+        .unwrap();
+    f.db.remove_pending(&f.a.device.id(), channel, &id, false)
+        .await
+        .unwrap();
+    assert!(f.db.append(&f.a.device.id(), event, None).await.is_err());
+    assert!(
+        f.db.pending(&f.a.device.id(), channel)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn concurrent_withdrawal_and_approval_have_only_one_winner() {
+    let f = Fixture::new().await;
+    let request = f.request();
+    let id = request.id().unwrap();
+    let channel = &f.proof.genesis.body.id;
+    f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
+        .await
+        .unwrap();
+    let event = MembershipEvent::create(
+        &f.a,
+        &f.proof.verify().unwrap(),
+        MembershipAction::Admit(request),
+    )
+    .unwrap();
+    let other = Database::open(&f._dir.path().join("db")).await.unwrap();
+    let a = f.a.device.id();
+    let b = f.b.device.id();
+    let (approved, withdrawn) = tokio::join!(
+        f.db.append(&a, event, None),
+        other.remove_pending(&b, channel, &id, true),
+    );
+    assert_ne!(approved.is_ok(), withdrawn.is_ok());
+    let state = f.db.get(channel).await.unwrap().verify().unwrap();
+    assert_eq!(state.member(&b).is_ok(), approved.is_ok());
+    assert!(f.db.pending(&a, channel).await.unwrap().is_empty());
 }

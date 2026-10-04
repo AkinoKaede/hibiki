@@ -48,9 +48,9 @@ struct SetupView: View {
                 Text("Your keys stay with you.").font(.title2.bold())
                 Text("Enter passwords and use your security key for GPG operations on your trusted computers.").foregroundStyle(.secondary)
             }
-            Section("Connect to your relay") {
-                TextField("wss://hibiki.example.com", text: $model.server).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("relayURL")
-                TextField("Device name", text: $model.name).accessibilityIdentifier("deviceName")
+            Section("Connect to your server") {
+                TextField("Server URL", text: $model.server).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled().accessibilityIdentifier("serverURL")
+                TextField("Hostname", text: $model.name).accessibilityIdentifier("hostname")
             }
             Section {
                 DisclosureGroup("Advanced") {
@@ -75,7 +75,12 @@ struct StatusView: View {
                     Image(systemName: model.connection == "online" ? "checkmark.shield.fill" : "network.slash").font(.largeTitle).foregroundStyle(model.connection == "online" ? .green : .secondary)
                     VStack(alignment: .leading, spacing: 5) { Text(model.statusText).font(.title2.bold()); Text(verbatim: model.device?.name ?? "HIbiki").foregroundStyle(.secondary) }
                 }.padding(.vertical, 12)
-                LabeledContent("Relay") { Text(verbatim: model.server).font(.caption).lineLimit(2) }
+                LabeledContent("Server") { Text(verbatim: model.server).font(.caption).lineLimit(2) }
+            }
+            if !model.channels.contains(where: { $0.active }), model.pairing == nil {
+                Section("Finish setup") {
+                    Text("Join a channel in the Channels tab, then enable the services you want this device to provide.")
+                }
             }
             Section("Provide services") {
                 Toggle("Password entry", isOn: $model.pinEnabled).onChange(of: model.pinEnabled) { _, _ in model.updateServices() }
@@ -90,7 +95,8 @@ struct StatusView: View {
                     Text("Compare these words on an existing member device before approving.")
                     Text(verbatim: model.device?.words ?? "").font(.system(.body, design: .monospaced)).textSelection(.enabled)
                     LabeledContent("Request") { Text(verbatim: pairing.request).font(.caption).textSelection(.enabled) }
-                    Text("This request stays pending until approved or invalidated.")
+                    Text("This request stays pending until approved, rejected, withdrawn, or invalidated.")
+                    WithdrawRequestButton(model: model)
                 }
             }
             Section {
@@ -106,7 +112,7 @@ struct ChannelsView: View {
     var body: some View {
         List {
             if model.channels.isEmpty {
-                ContentUnavailableView("No channels yet", systemImage: "person.2", description: Text("Join a trusted device’s channel, or create your own."))
+                ContentUnavailableView("No channels yet", systemImage: "person.2", description: Text("Join a channel using an invitation from its administrator or a trusted member."))
             }
             ForEach(model.channels) { channel in
                 NavigationLink { ChannelView(channelID: channel.id, model: model) } label: {
@@ -118,7 +124,13 @@ struct ChannelsView: View {
             }
             Section {
                 NavigationLink("Join a channel") { JoinView(model: model) }
-                NavigationLink("Create a channel") { CreateChannelView(model: model) }
+                if model.allowChannelCreation == true {
+                    NavigationLink("Create a channel") { CreateChannelView(model: model) }
+                } else if model.allowChannelCreation == false {
+                    Text("Channel creation is managed by the server administrator. Ask for an initialization invitation.").foregroundStyle(.secondary)
+                } else {
+                    Text("Connect to the server to check channel creation policy.").foregroundStyle(.secondary)
+                }
             }
         }.navigationTitle("Channels").refreshable { await model.refresh() }
     }
@@ -136,19 +148,32 @@ struct JoinView: View {
                 Button("Request to join") {
                     let secret = psk; psk = ""
                     Task { await model.perform {
-                        model.pairing = try await model.client?.join(invitation: invite.trimmingCharacters(in: .whitespacesAndNewlines), psk: secret)
+                        model.rememberPairing(try await model.client?.join(invitation: invite.trimmingCharacters(in: .whitespacesAndNewlines), psk: secret))
                         await model.refresh()
                     } }
-                }.disabled(invite.isEmpty || psk.isEmpty || model.busy || model.connection != "online")
-            } footer: { Text("Obtain the invitation and PSK separately from a trusted member. The invitation must use your configured relay.") }
+                }.disabled(invite.isEmpty || psk.isEmpty || model.busy || model.connection != "online" || model.pairing != nil)
+            } footer: { Text("Obtain the invitation and PSK separately from a trusted member. The invitation must use your configured server.") }
             if let pairing = model.pairing {
                 Section("Waiting for approval") {
                     Text(verbatim: model.device?.words ?? "").font(.system(.body, design: .monospaced)).textSelection(.enabled)
                     Text(verbatim: pairing.request).font(.caption).textSelection(.enabled)
                     Text("Compare all 24 words and the request ID on the approving device.")
+                    WithdrawRequestButton(model: model)
                 }
             }
         }.navigationTitle("Join channel").onDisappear { psk = "" }
+    }
+}
+
+struct WithdrawRequestButton: View {
+    @Bindable var model: AppModel
+    @State private var confirming = false
+    var body: some View {
+        Button("Withdraw request", role: .destructive) { confirming = true }
+            .disabled(model.busy || model.connection != "online")
+            .confirmationDialog("Withdraw this join request?", isPresented: $confirming, titleVisibility: .visible) {
+                Button("Withdraw request", role: .destructive) { Task { await model.withdrawPairing() } }
+            }
     }
 }
 
@@ -164,7 +189,7 @@ struct CreateChannelView: View {
                 Button("Create channel") { Task { await model.perform {
                     result = try await model.client?.createChannel(name: name)
                     await model.refresh()
-                } } }.disabled(name.isEmpty || model.busy || model.connection != "online")
+                } } }.disabled(name.isEmpty || model.busy || model.connection != "online" || model.allowChannelCreation != true)
             }
         }
         .navigationTitle("Create channel")
@@ -294,6 +319,8 @@ struct ApprovalView: View {
     @Bindable var model: AppModel
     @State private var verified = false
     @State private var approved = false
+    @State private var rejected = false
+    @State private var rejecting = false
     var body: some View {
         Form {
             Section("Joining device") { Text(verbatim: request.device.name); Text(verbatim: request.device.id).font(.caption.monospaced()).textSelection(.enabled) }
@@ -304,9 +331,18 @@ struct ApprovalView: View {
                 Button(approved ? "Approved" : "Approve device") { Task { await model.perform {
                     try await model.client?.approve(channel: request.channel, requestId: request.id)
                     approved = true; await model.refresh()
-                } } }.disabled(!verified || approved || model.busy)
+                } } }.disabled(!verified || approved || rejected || model.busy || model.connection != "online")
+                Button(rejected ? "Rejected" : "Reject request", role: .destructive) { rejecting = true }
+                    .disabled(approved || rejected || model.busy || model.connection != "online")
             } footer: { Text("These words identify a public device key. They are not a recovery phrase.") }
         }.navigationTitle("Approve device")
+        .confirmationDialog("Reject this join request?", isPresented: $rejecting, titleVisibility: .visible) {
+            Button("Reject request", role: .destructive) { Task { await model.perform {
+                try await model.client?.rejectJoin(channel: request.channel, requestId: request.id)
+                rejected = true
+                await model.refresh()
+            } } }
+        } message: { Text("This removes only this request. The device may request to join again.") }
     }
 }
 
@@ -460,17 +496,17 @@ struct SettingsView: View {
             Section("Connection") {
                 Text(verbatim: model.server)
                 LabeledContent("Availability", value: String(localized: "While app is open"))
-                LabeledContent("Protocol", value: "hibiki/2")
-                Button("Disconnect from relay", role: .destructive) { confirmDisconnect = true }
-                    .disabled(model.busy).accessibilityIdentifier("disconnectRelay")
+                LabeledContent("Protocol", value: "hibiki/1")
+                Button("Disconnect from server", role: .destructive) { confirmDisconnect = true }
+                    .disabled(model.busy).accessibilityIdentifier("disconnectServer")
             }
             Section("About") { Text("HIbiki"); Text("PINs are not saved. Private keys stay on the card or the requesting computer.").foregroundStyle(.secondary) }
         }.navigationTitle("Settings")
-        .confirmationDialog("Disconnect from this relay?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
+        .confirmationDialog("Disconnect from this server?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) { Task { await model.disconnectRelay() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This stops current requests and removes this device’s local pairing. You can then connect to another relay. Security key registrations are kept. You will need to pair again, even with this relay. Other members can remove the old device from their channels.")
+            Text("This stops current requests and removes this device’s local pairing. You can then connect to another server. Security key registrations are kept. You will need to pair again, even with this server. Other members can remove the old device from their channels.")
         }
     }
 }

@@ -20,6 +20,34 @@ def available_port():
         return listener.getsockname()[1]
 
 
+def check_relative_database(binary, directory, with_config):
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(('HIBIKI_', 'XDG_'))}
+    # A system relay must not require a login HOME or use client XDG paths.
+    env.pop('HOME', None)
+    arguments = ['--database', 'data/hibiki.sqlite3']
+    base = directory
+    if with_config:
+        base = directory / 'deploy'
+        base.mkdir(mode=0o700)
+        config = base / 'server.toml'
+        config.write_text('database = "data/hibiki.sqlite3"\n')
+        arguments = ['--config', str(config)]
+    command = [str(binary), *arguments, 'channel']
+    subprocess.run([*command, 'create', 'default-path', '--server',
+                    'wss://relay.example/hibiki'], cwd=directory, env=env,
+                   check=True, capture_output=True, timeout=20)
+    database = base / 'data' / 'hibiki.sqlite3'
+    assert database.stat().st_mode & 0o777 == 0o600
+    assert database.parent.stat().st_mode & 0o777 == 0o700
+    assert not (directory / '.local/share/hibiki/server/hibiki.sqlite3').exists()
+    if with_config:
+        assert not (directory / 'data').exists()
+    result = subprocess.run([*command, 'list'], cwd=directory, env=env,
+                            check=True, capture_output=True, text=True, timeout=10)
+    assert 'default-path' in result.stdout
+
+
 def check_run(binary, directory, shutdown_signal, cli_overrides):
     config = directory / 'server.toml'
     config.write_text('listen = "invalid"\ndatabase = "unused.sqlite3"\n')
@@ -81,10 +109,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', type=Path, default=ROOT / 'target/debug/hibiki-server')
     args = parser.parse_args()
+    for with_config in [False, True]:
+        with tempfile.TemporaryDirectory(prefix='hibiki-server-paths-') as temporary:
+            check_relative_database(args.server.resolve(), Path(temporary), with_config)
     for cli_overrides, shutdown_signal in [(False, signal.SIGTERM), (True, signal.SIGINT)]:
         with tempfile.TemporaryDirectory(prefix='hibiki-server-test-') as temporary:
             check_run(args.server.resolve(), Path(temporary), shutdown_signal, cli_overrides)
-    print('Server environment, CLI precedence, persistence and graceful shutdown passed')
+    print('Server relative paths, environment, CLI precedence, persistence and graceful shutdown passed')
 
 
 if __name__ == '__main__':

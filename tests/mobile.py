@@ -211,7 +211,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hi-mobile-', dir='/tmp') as temp:
         root = Path(temp)
         config = root/'server.toml'
-        config.write_text('listen="127.0.0.1:0"\ndatabase="relay.sqlite3"\n')
+        config.write_text('listen="127.0.0.1:0"\ndatabase="relay.sqlite3"\nallow_client_channel_creation=true\n')
         log = (root/'server.log').open('w')
         server = subprocess.Popen([str(SERVER), '--config', str(config)], stdout=log, stderr=log)
         devices = []
@@ -394,6 +394,11 @@ def main():
             created=mobile.wait('created')
             guest=Device(root,'guest',url); devices.append(guest)
             guest_psk=root/'guest-psk'; guest_psk.write_text(created['psk']); guest_psk.chmod(0o600)
+            mobile.send(action='policy'); assert mobile.wait('policy')['allow_creation']
+            rejected = guest.cli('channel','join',created['invite'],'--psk-file',guest_psk,'--no-wait').stdout.decode().split()[1]
+            mobile.send(action='reject', channel=created['channel'], request=rejected); mobile.wait('rejected')
+            mobile.send(action='pending', channel=created['channel'])
+            assert not mobile.wait('pending')['requests']
             joined_guest=guest.cli('channel','join',created['invite'],'--psk-file',guest_psk,'--no-wait').stdout.decode().split()[1]
             mobile.send(action='pending',channel=created['channel']); pending=mobile.wait('pending')['requests']
             assert len(pending)==1 and pending[0]['id']==joined_guest and len(pending[0]['words'].split())==24
@@ -403,6 +408,17 @@ def main():
             mobile.send(action='revoke',channel=created['channel'],device=guest.id); mobile.wait('revoked')
             assert b'active=false' in guest.cli('channel','list').stdout
             mobile.send(action='leave',channel=created['channel']); mobile.wait('left')
+            a.cli('channel', 'create', 'withdraw-test', '--psk-file', psk)
+            withdrawal_invite = a.cli('channel', 'invite', 'withdraw-test').stdout.decode().strip()
+            mobile.send(action='join', invite=withdrawal_invite, psk=psk.read_text())
+            withdrawal = mobile.wait('joined')
+            mobile.send(action='pairing_status', channel=withdrawal['channel'], request=withdrawal['request'])
+            assert mobile.wait('pairing_status')['state'] == 'Pending'
+            mobile.send(action='withdraw', channel=withdrawal['channel'], request=withdrawal['request']); mobile.wait('withdrawn')
+            mobile.send(action='pairing_status', channel=withdrawal['channel'], request=withdrawal['request'])
+            assert mobile.wait('pairing_status')['state'] == 'Absent'
+            assert withdrawal['request'].encode() not in a.cli('channel', 'pending', 'withdraw-test').stdout
+            print('PASS: mobile relay policy, request rejection, withdrawal and pairing status', flush=True)
             print('PASS: mobile create/invite, pending verification, approval, PSK rotation, revocation and leave', flush=True)
             mobile.send(action='stop'); mobile.wait('stopped')
             print('PASS: losing mobile prompt canceled; background stop cancels requests', flush=True)

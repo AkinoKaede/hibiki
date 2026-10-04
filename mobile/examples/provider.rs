@@ -70,6 +70,25 @@ async fn main() -> anyhow::Result<()> {
 async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
     let text = |name: &str| v[name].as_str().unwrap_or_default().to_string();
     match text("action").as_str() {
+        "policy" => {
+            emit(json!({"kind":"policy","allow_creation":client.allows_channel_creation().await?}));
+        }
+        "reject" => {
+            client.reject_join(text("channel"), text("request")).await?;
+            emit(json!({"kind":"rejected"}));
+        }
+        "withdraw" => {
+            client
+                .withdraw_join(text("channel"), text("request"))
+                .await?;
+            emit(json!({"kind":"withdrawn"}));
+        }
+        "pairing_status" => {
+            let state = client
+                .pairing_status(text("channel"), text("request"))
+                .await?;
+            emit(json!({"kind":"pairing_status","state":format!("{state:?}")}));
+        }
         "create" => {
             let result = client.create_channel(text("name")).await?;
             emit(

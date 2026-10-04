@@ -3,7 +3,7 @@
 <plist version="1.0"><dict>
 <key>CFBundleDisplayName</key><string>HIbiki</string>
 <key>NFCReaderUsageDescription</key><string>Read your security key’s public information and perform OpenPGP signing and decryption when you tap it.</string>
-<key>NSLocalNetworkUsageDescription</key><string>Connect to your HIbiki relay on the local network.</string>
+<key>NSLocalNetworkUsageDescription</key><string>Connect to your HIbiki server on the local network.</string>
 <key>com.apple.developer.nfc.readersession.iso7816.select-identifiers</key><array><string>D27600012401</string></array>
 <key>UIApplicationSceneManifest</key><dict><key>UIApplicationSupportsMultipleScenes</key><false/></dict>
 <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>

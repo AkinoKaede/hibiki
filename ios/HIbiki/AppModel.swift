@@ -22,6 +22,7 @@ final class AppModel {
     var cardEnabled: Bool
     var initialized = false
     var pairing: JoinInfo?
+    var allowChannelCreation: Bool?
     private let hardware = CardHardware()
     private var eventTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
@@ -40,25 +41,51 @@ final class AppModel {
         skipTLSCertificateValidation = defaults.bool(forKey: "skipTLSCertificateValidation")
         pinEnabled = defaults.bool(forKey: "pinEnabled")
         cardEnabled = defaults.bool(forKey: "cardEnabled")
+        if let channel = defaults.string(forKey: "pairingChannel"), let request = defaults.string(forKey: "pairingRequest") {
+            pairing = JoinInfo(channel: channel, request: request)
+        }
     }
 
-    nonisolated static func relayURL(from input: String) throws -> String {
+    nonisolated static func serverURLs(from input: String) throws -> [String] {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        let address = value.contains("://") ? value : "wss://" + value
+        let explicitScheme = value.contains("://")
+        let address = explicitScheme ? value : "wss://" + value
         guard !value.isEmpty, !value.contains(where: { $0.isWhitespace }),
               var url = URLComponents(string: address),
               let scheme = url.scheme?.lowercased(), ["ws", "wss"].contains(scheme),
               let host = url.host, !host.isEmpty,
               url.user == nil, url.password == nil, url.fragment == nil,
               url.port.map({ (1...65535).contains($0) }) ?? true else {
-            throw NSError(domain: "HIbiki.RelayAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address using wss:// or ws://.")])
+            throw NSError(domain: "HIbiki.ServerAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address, with or without wss:// or ws://.")])
         }
         url.scheme = scheme
         if url.path.isEmpty || url.path == "/" { url.path = "/hibiki" }
         guard let result = url.url?.absoluteString else {
-            throw NSError(domain: "HIbiki.RelayAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address using wss:// or ws://.")])
+            throw NSError(domain: "HIbiki.ServerAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address, with or without wss:// or ws://.")])
         }
-        return result
+        if explicitScheme { return [result] }
+        url.scheme = "ws"
+        return [result, url.url!.absoluteString]
+    }
+
+    static func discoverServer(from input: String, probe: (String) async throws -> Void) async throws -> String {
+        let candidates = try serverURLs(from: input)
+        var failures: [String] = []
+        for candidate in candidates {
+            try Task.checkCancellation()
+            do {
+                // Each probe checks the HIbiki protocol and authentication, not just the port.
+                try await probe(candidate)
+                try Task.checkCancellation()
+                return candidate
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+                failures.append("\(candidate): \(error.localizedDescription)")
+            }
+        }
+        throw NSError(domain: "HIbiki.ServerConnection", code: 1, userInfo: [NSLocalizedDescriptionKey: failures.joined(separator: "\n\n")])
     }
 
     var currentPrompt: PinPrompt? { prompts.first }
@@ -96,17 +123,23 @@ final class AppModel {
                 self.defaults.removeObject(forKey: "relayResetPending")
             }
             guard !self.server.isEmpty, !self.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            let server = try Self.relayURL(from: self.server)
+            let input = self.server
             let name = self.name.trimmingCharacters(in: .whitespacesAndNewlines)
             let skipTLS = self.skipTLSCertificateValidation
             // A previous interrupted setup may already have saved an identity; never replace it.
             let savedIdentity = try SecureStorage.identity()
             let identity = try savedIdentity ?? createIdentity(name: name)
+            let server: String
             do {
-                try await checkRelay(server: server, identity: identity, skipTlsCertificateValidation: skipTLS)
+                server = try await Self.discoverServer(from: input) { candidate in
+                    guard self.foreground else { throw CancellationError() }
+                    try await checkRelay(server: candidate, identity: identity, skipTlsCertificateValidation: skipTLS)
+                }
+            } catch is CancellationError {
+                return
             } catch {
                 self.show(error)
-                self.error = String(localized: "Could not connect to the relay. Check the address and try again.") + "\n\n" + (self.error ?? "")
+                self.error = String(localized: "Could not connect to the server. Check the address and try again.") + "\n\n" + (self.error ?? "")
                 return
             }
             guard self.foreground, !Task.isCancelled else { return }
@@ -139,7 +172,8 @@ final class AppModel {
         await core?.stop()
         device = nil
         channels = []
-        pairing = nil
+        rememberPairing(nil)
+        allowChannelCreation = nil
         card = nil
         registeredCards = []
         usbPresent = false
@@ -211,6 +245,7 @@ final class AppModel {
         await hardware.closeAll()
         await client?.stop()
         connection = "offline"
+        allowChannelCreation = nil
     }
     func refresh() async {
         guard let client, foreground else { return }
@@ -220,8 +255,37 @@ final class AppModel {
             let channels = try await client.channels()
             guard self.client === client, !Task.isCancelled else { return }
             self.channels = channels
-            if let pairing, channels.contains(where: { $0.id == pairing.channel && $0.active }) { self.pairing = nil }
+            if connection == "online" {
+                let allowed = try await client.allowsChannelCreation()
+                guard self.client === client, !Task.isCancelled, connection == "online" else { return }
+                allowChannelCreation = allowed
+                if let pairing, !busy {
+                    let state = try await client.pairingStatus(channel: pairing.channel, requestId: pairing.request)
+                    guard self.client === client, !Task.isCancelled, !busy, self.pairing?.request == pairing.request else { return }
+                    switch state {
+                    case .member: rememberPairing(nil)
+                    case .absent:
+                        rememberPairing(nil)
+                        error = String(localized: "The join request was rejected, withdrawn, or invalidated. Obtain a current invitation to try again.")
+                    case .pending: break
+                    }
+                }
+            }
         } catch { /* The connection state communicates transient relay failures. */ }
+    }
+    func rememberPairing(_ value: JoinInfo?) {
+        // Initialization invitations claim membership immediately and have no pending ID.
+        pairing = value?.request.isEmpty == false ? value : nil
+        defaults.set(pairing?.channel, forKey: "pairingChannel")
+        defaults.set(pairing?.request, forKey: "pairingRequest")
+    }
+    func withdrawPairing() async {
+        guard let pairing, let client else { return }
+        await perform {
+            try await client.withdrawJoin(channel: pairing.channel, requestId: pairing.request)
+            if self.client === client, self.pairing?.request == pairing.request { self.rememberPairing(nil) }
+            await self.refresh()
+        }
     }
     func updateServices() {
         guard !disconnecting else { return }
@@ -260,7 +324,9 @@ final class AppModel {
     }
     private func handle(_ event: NativeEvent, core: MobileClient) {
         switch event {
-        case .connection(let state): connection = state
+        case .connection(let state):
+            connection = state
+            if state != "online" { allowChannelCreation = nil }
         case .prompt(let prompt):
             guard foreground, core.requestIsPending(token: prompt.token) else { return }
             prompts.append(prompt)

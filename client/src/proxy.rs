@@ -9,12 +9,10 @@ use anyhow::{Context, Result, bail};
 use hibiki_core::operation::QueuedOperation;
 use hibiki_lib::{
     assuan::{self, AssuanResult, Line, Response},
-    decode,
     protocol::{ServiceKind, TargetState},
 };
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tokio::{
-    io::AsyncReadExt,
     net::{UnixStream, unix::OwnedWriteHalf},
     sync::{mpsc, oneshot},
     task::JoinSet,
@@ -523,17 +521,7 @@ async fn card_transaction(
     }
 }
 
-pub async fn serve(hub: Arc<Hub>, mut stream: UnixStream) -> Result<()> {
-    let open = tokio::time::timeout(Duration::from_secs(5), async {
-        let length = stream.read_u32().await? as usize;
-        if length > 8192 {
-            bail!("IPC header limit");
-        }
-        let mut bytes = vec![0; length];
-        stream.read_exact(&mut bytes).await?;
-        Ok::<LocalOpen, anyhow::Error>(decode(&bytes)?)
-    })
-    .await??;
+pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result<()> {
     hub.authorized(&open.channel, &hub.app.identity.device.id())?;
     let lease = hub.track_local(&open.channel)?;
     let stop = lease.stop.clone();

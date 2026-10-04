@@ -140,8 +140,9 @@ CLI flags override environment variables, which override the TOML configuration:
 | `HIBIKI_SERVER_DATABASE` | `--database` | SQLite path |
 | `HIBIKI_SERVER_ALLOW_CLIENT_CHANNEL_CREATION` | `--allow-client-channel-creation` | `true` or `false` |
 
-For example, add `-e HIBIKI_SERVER_ALLOW_CLIENT_CHANNEL_CREATION=false` to
-`docker run` to reserve channel creation for the administrator. The image sets
+Channel creation is reserved for the administrator by default. Add
+`-e HIBIKI_SERVER_ALLOW_CLIENT_CHANNEL_CREATION=true` to `docker run` only if
+authenticated clients should be able to create channels. The image sets
 `HIBIKI_SERVER_CONFIG=/etc/hibiki/server.toml` and `RUST_LOG=info` by default.
 If changing the listen port, also change the published port and set the image's
 `HIBIKI_SERVER_HEALTHCHECK_URL` to the corresponding local `/healthz` URL.
@@ -196,31 +197,52 @@ Do not also run `hibiki daemon` manually while the service is active.
 
 ### 1. Run a relay
 
-Copy the [server configuration](examples/server.toml) into a private directory, then start the server:
+Install the [server configuration](examples/server.toml) and prepare the system data directory for the account that will run the relay. These commands use your current account:
 
 ```sh
-mkdir -m 700 deploy
-cp examples/server.toml deploy/server.toml
-hibiki-server --config deploy/server.toml
+sudo install -d -m 0755 /etc/hibiki
+sudo install -m 0644 examples/server.toml /etc/hibiki/server.toml
+sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" /var/lib/hibiki
+hibiki-server
 ```
 
 The server runs in the foreground and listens on `127.0.0.1:7749` by default. It serves WebSocket traffic at `/hibiki` and a health endpoint at `/healthz`. For remote use, expose it through a TLS endpoint and use a `wss://` URL. Channel admission relies on TLS to protect the pre-shared key (PSK).
 
-The example stores its database at `deploy/data/hibiki.sqlite3`. If `database` is omitted, the default is `$XDG_DATA_HOME/hibiki/server/hibiki.sqlite3`, or `~/.local/share/hibiki/server/hibiki.sqlite3` when XDG is unset. Relative database paths resolve against the configuration file's directory.
+The relay searches for configuration in this order:
+
+1. An explicit `--config` or `HIBIKI_SERVER_CONFIG` path (CLI takes precedence).
+2. `/etc/hibiki/server.toml`.
+3. `/usr/local/etc/hibiki/server.toml` for local installations.
+
+It loads the first existing file without merging configurations, or uses built-in defaults if neither default file exists. An explicitly selected missing file, or an unreadable or invalid configuration, is an error; it does not fall through to another configuration. CLI flags override environment variables, which override the configuration. The server does not require `HOME` or search client XDG directories.
+
+The database defaults to `/var/lib/hibiki/hibiki.sqlite3` regardless of which configuration file is selected. For a local-prefix deployment, install the configuration at `/usr/local/etc/hibiki/server.toml` and explicitly set `database = "/usr/local/var/lib/hibiki/hibiki.sqlite3"` if the data should also live under `/usr/local`. Prepare that data directory for the relay's account using the same ownership and mode as above.
+
+For a dedicated service account, assign the data directory to that account instead; the directory must have mode `0700` and database files use `0600`. Administrator commands use the same configuration search order as the relay.
+
+For an unprivileged local deployment, copy the example into `deploy/server.toml`, change `database` to `"data/hibiki.sqlite3"`, and run `hibiki-server --config deploy/server.toml`. Use the same `--config` for administrator commands. Relative database overrides resolve against the configuration file's directory, or the current working directory if no configuration is loaded. Missing data directories are created with mode `0700`.
 
 The following steps use `wss://hibiki.example.com/hibiki`; replace it with your relay URL. For local development, use `ws://127.0.0.1:7749/hibiki` and add `--allow-insecure` to each `hibiki init` command.
 
 ### 2. Pair devices in a channel
 
-On the first device (`--name` is optional and defaults to the system hostname):
+Channel creation is reserved for the server administrator by default. On the relay host, create a channel (the relay can keep running):
+
+```sh
+hibiki-server channel create personal --server wss://hibiki.example.com/hibiki
+```
+
+Keep the printed PSK and single-use `hibiki-init-v1:...` invitation. Share them separately through trusted channels with the first device's owner. For Docker, run the same command with `docker exec` and `--config /etc/hibiki/server.toml` as described above.
+
+On the first device (`--name` is optional and defaults to the system hostname), claim the channel and produce a member invitation:
 
 ```sh
 hibiki init --server wss://hibiki.example.com/hibiki --name laptop
-hibiki channel create personal
+hibiki channel join 'hibiki-init-v1:...'
 hibiki channel invite personal
 ```
 
-Keep the PSK printed by `create`. Share the invitation and PSK separately through trusted channels.
+`join` prompts for the administrator-provided PSK; this first claim does not need member approval. Share the new `hibiki-v1:...` member invitation and PSK separately through trusted channels. If the administrator explicitly sets `allow_client_channel_creation = true`, the first device can instead run `hibiki channel create personal` followed by `hibiki channel invite personal`.
 
 On each additional device:
 
@@ -235,7 +257,7 @@ hibiki channel join 'hibiki-v1:...'
 hibiki channel approve personal
 ```
 
-Compare the joining device's 24 public-key verification words before answering `y`. Approval defaults to No. Pending requests remain until approved, invalidated by PSK rotation, or removed with the channel. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
+Compare the joining device's 24 public-key verification words before answering `y`. Approval defaults to No. Pending requests remain until approved, rejected by a member, withdrawn by the applicant, invalidated by PSK rotation, or removed with the channel. A waiting `join` exits when its request is removed. Ctrl-C only stops waiting; use `hibiki channel withdraw NAME REQUEST_ID` to withdraw it. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
 
 ### 3. Enable the services each device will provide
 
@@ -260,7 +282,7 @@ These switches control whether the device accepts requests and participates as a
 | Offer password input | `false` | `true` |
 | Provide both | `true` | `true` |
 
-When `program` is omitted, HIbiki locates the native program using `gpgconf --list-components`. A native program path must not point to a HIbiki adapter.
+When `program` is omitted, HIbiki locates the native program using `gpgconf --list-components`. Both services support this automatic discovery; `gpgconf` must be in the daemon's `PATH`, or set `gpgconf_program` to its absolute path. Run `gpgconf --list-components` to inspect the selected binaries. Discovery uses GnuPG's reported component paths and does not automatically choose a GUI Pinentry such as `pinentry-mac`. Set `[pinentry].program` explicitly when needed. A native program path must not point to a HIbiki adapter.
 
 Pinentry uses the providing device's display environment. Choose a GUI Pinentry available on that device, or set its local `GPG_TTY` and `TERM` in the daemon's environment for terminal input. Requesting devices cannot supply remote display, TTY, owner, or filesystem settings.
 
@@ -270,7 +292,7 @@ Run the daemon on every participating device:
 hibiki daemon
 ```
 
-The daemon runs in the foreground. Restart it after changing service configuration. Providing a service does not require changes to that device's `gpg-agent.conf`.
+The daemon runs in the foreground. Before connecting, it verifies that every enabled native provider resolves to an executable; a missing or invalid program stops startup with an actionable error. This check does not open a reader or display a PIN dialog. Restart it after changing service configuration. Providing a service does not require changes to that device's `gpg-agent.conf`.
 
 ### 4. Connect the requesting device's agent
 
@@ -298,6 +320,30 @@ gpgconf --homedir /your/gnupg/home --kill gpg-agent
 ```
 
 The next GPG operation starts the agent again. For a custom HIbiki configuration, set `HIBIKI_CONFIG` before starting the agent so the adapters inherit it. Management commands also accept `--config PATH`.
+
+## Diagnose setup and connection issues
+
+`hibiki init` prints the next setup steps. Run `hibiki setup` at any time to see the
+configuration path, channel-selection instructions, GPG adapter paths and
+background-service guidance again. These commands do not modify GnuPG configuration.
+
+```sh
+hibiki status
+hibiki doctor
+```
+
+`status` queries the live local daemon even before its first relay connection. It
+shows relay connectivity, active provider switches, the selected channel and
+configuration changes that require a restart. `doctor` additionally checks enabled
+native executables and authenticates with the relay to report channel-creation
+policy. Both exit nonzero when a checked component needs attention. Native checks
+do not test physical card access or GUI/TTY availability. For custom configuration,
+CLI commands and adapters both honor `HIBIKI_CONFIG`; CLI `--config` takes precedence.
+
+Local adapter startup waits at most `operation_timeout_seconds` (default 120)
+for the first relay connection, then returns an Assuan error suggesting `hibiki status`.
+Each waiting connection runs independently, so it does not block status queries or
+other callers. Once connected, existing operation/reconnection deadlines apply.
 
 ## Sign and decrypt
 
@@ -354,19 +400,23 @@ The native agent or card validates the password. A retry starts a new race; HIbi
 hibiki channel list
 hibiki device list
 hibiki channel pending personal
+hibiki channel reject personal REQUEST_ID
+hibiki channel withdraw personal REQUEST_ID
 hibiki channel rotate-psk personal
 hibiki channel revoke personal DEVICE_ID
 hibiki channel leave personal
 ```
 
+Any active member can reject one pending request; only its applicant can withdraw it. Rejection removes that request and does not permanently ban the device. A new admission still requires the PSK and member approval. Approval and removal are atomic: a removed request cannot subsequently be approved.
+
 PSKs control admission. The relay stores Argon2id verifiers; rotating a PSK invalidates pending requests but preserves approved membership. Use `--psk-file` for automation. A revoked identity cannot rejoin the same channel; a device that voluntarily leaves can request admission again.
 
-To reserve channel creation for the server administrator, set `allow_client_channel_creation = false` in the server configuration:
+Channel creation is reserved for the server administrator by default (`allow_client_channel_creation = false`):
 
 ```sh
-hibiki-server --config deploy/server.toml channel create personal --server wss://hibiki.example.com/hibiki
-hibiki-server --config deploy/server.toml channel list
-hibiki-server --config deploy/server.toml channel delete personal
+hibiki-server channel create personal --server wss://hibiki.example.com/hibiki
+hibiki-server channel list
+hibiki-server channel delete personal
 ```
 
 Server-side creation prints a single-use `hibiki-init-v1:...` invitation and a PSK. The first device claims it with `hibiki channel join`; later devices use ordinary invitations. A running relay checks for administrator deletions every second and closes affected sessions. Recreating a channel name produces a new channel ID.
@@ -387,7 +437,7 @@ Card private keys stay on the card; software private keys stay on the requesting
 
 Private files use mode `0600` and directories use `0700`. Back up identity and trust records together.
 
-The protocol identifier is **`hibiki/2`** and the WebSocket path is **`/hibiki`**. Upgrade the relay and every device together; version 1 clients receive a protocol mismatch. Existing identities, signed membership proofs, and stored pending approvals are retained. Database migration adds an operation metadata table without rewriting signed records. Previously deleted expired approvals cannot be recovered; submit a new request.
+The protocol identifier is **`hibiki/1`** and the WebSocket path is **`/hibiki`**. It includes relay policy discovery and pending-request rejection, withdrawal and status queries. Relay and clients must use matching builds; pre-release formats are not supported.
 
 ## Development and testing
 

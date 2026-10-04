@@ -7,7 +7,78 @@ pub use hibiki_core::session::Hub;
 use hibiki_core::session::announce;
 use hibiki_lib::protocol::*;
 use std::{sync::Arc, time::Duration};
+async fn local_connection(
+    app: Arc<App>,
+    mut available: tokio::sync::watch::Receiver<Option<Arc<Hub>>>,
+    mut stream: tokio::net::UnixStream,
+) -> Result<()> {
+    use crate::frontend::{DaemonStatus, LocalRequest};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(app.config.operation_timeout_seconds);
+    let request = tokio::time::timeout_at(
+        deadline.min(tokio::time::Instant::now() + Duration::from_secs(5)),
+        async {
+            let length = stream.read_u32().await? as usize;
+            if length > 8192 {
+                bail!("IPC header limit");
+            }
+            let mut bytes = vec![0; length];
+            stream.read_exact(&mut bytes).await?;
+            Ok::<LocalRequest, anyhow::Error>(hibiki_lib::decode(&bytes)?)
+        },
+    )
+    .await??;
+    let open = match request {
+        LocalRequest::Status => {
+            let status = DaemonStatus {
+                device: app.identity.device.id(),
+                relay_connected: available
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|hub| !hub.connection().closed.is_cancelled()),
+                config: app.config.clone(),
+            };
+            let bytes = hibiki_lib::encode(&status)?;
+            tokio::time::timeout(Duration::from_secs(2), async {
+                stream.write_u32(bytes.len() as u32).await?;
+                stream.write_all(&bytes).await
+            })
+            .await??;
+            return Ok(());
+        }
+        LocalRequest::Open(open) => open,
+    };
+    let ready = tokio::time::timeout_at(deadline, async {
+        loop {
+            if let Some(hub) = available.borrow().clone() {
+                return Ok::<_, anyhow::Error>(hub);
+            }
+            available.changed().await?;
+        }
+    })
+    .await;
+    match ready {
+        Ok(Ok(hub)) => crate::proxy::serve(hub, stream, open).await,
+        _ => {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                crate::assuan_io::write_line(
+                    &mut stream,
+                    &hibiki_lib::assuan::error(
+                        hibiki_lib::assuan::GENERAL,
+                        "relay unavailable; startup wait timed out; run hibiki status",
+                    ),
+                ),
+            )
+            .await??;
+            Ok(())
+        }
+    }
+}
+
 pub async fn run(app: App) -> Result<()> {
+    crate::provider::preflight(&app).await?;
     use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
     ensure_runtime(&app.paths)?;
     let lock = std::fs::OpenOptions::new()
@@ -47,9 +118,10 @@ pub async fn run(app: App) -> Result<()> {
     let local_slots = Arc::new(tokio::sync::Semaphore::new(128));
     let mut delay = 1;
     let mut stable_hub: Option<Arc<Hub>> = None;
-    let (available, mut available_rx) = tokio::sync::watch::channel::<Option<Arc<Hub>>>(None);
+    let (available, available_rx) = tokio::sync::watch::channel::<Option<Arc<Hub>>>(None);
     let listener_stop = tokio_util::sync::CancellationToken::new();
     let accept_stop = listener_stop.clone();
+    let listener_app = app.clone();
     let listener_job = tokio::spawn(async move {
         let mut local_jobs = tokio::task::JoinSet::new();
         loop {
@@ -59,11 +131,12 @@ pub async fn run(app: App) -> Result<()> {
                 accepted=listener.accept()=>{
                     let Ok((stream,_))=accepted else { break; };
                     if let Ok(permit)=local_slots.clone().try_acquire_owned() {
-                        while available_rx.borrow().is_none() {
-                            tokio::select! { _=accept_stop.cancelled()=>return, _=available_rx.changed()=>{} }
-                        }
-                        let hub=available_rx.borrow().as_ref().unwrap().clone();
-                        local_jobs.spawn(async move { let _permit=permit; let _=crate::proxy::serve(hub,stream).await; });
+                        let app = listener_app.clone();
+                        let available = available_rx.clone();
+                        local_jobs.spawn(async move {
+                            let _permit = permit;
+                            let _ = local_connection(app, available, stream).await;
+                        });
                     }
                 }
             }
@@ -148,4 +221,57 @@ pub async fn run(app: App) -> Result<()> {
     listener_stop.cancel();
     let _ = listener_job.await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::frontend::{DaemonStatus, LocalOpen, LocalRequest};
+    use hibiki_lib::{decode, encode, identity::Identity, paths::AppPaths};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test(start_paused = true)]
+    async fn offline_startup_expires_without_blocking_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = Arc::new(App {
+            config: crate::storage::Config {
+                operation_timeout_seconds: 2,
+                ..Default::default()
+            },
+            config_file: dir.path().join("client.toml"),
+            paths: AppPaths::resolve(&Default::default(), dir.path(), dir.path(), unsafe {
+                libc::geteuid()
+            }),
+            identity: Arc::new(Identity::generate("test".into()).unwrap()),
+        });
+        let (_sender, available) = tokio::sync::watch::channel(None);
+        let (mut caller, accepted) = tokio::net::UnixStream::pair().unwrap();
+        let task = tokio::spawn(local_connection(app.clone(), available.clone(), accepted));
+        let request = encode(&LocalRequest::Open(LocalOpen {
+            channel: "test".into(),
+            service: ServiceKind::Pinentry,
+            pid: 1,
+            display: None,
+        }))
+        .unwrap();
+        caller.write_u32(request.len() as u32).await.unwrap();
+        caller.write_all(&request).await.unwrap();
+        tokio::task::yield_now().await;
+        let (mut status_client, status_stream) = tokio::net::UnixStream::pair().unwrap();
+        let status_task = tokio::spawn(local_connection(app, available, status_stream));
+        let request = encode(&LocalRequest::Status).unwrap();
+        status_client.write_u32(request.len() as u32).await.unwrap();
+        status_client.write_all(&request).await.unwrap();
+        let size = status_client.read_u32().await.unwrap();
+        let mut bytes = vec![0; size as usize];
+        status_client.read_exact(&mut bytes).await.unwrap();
+        assert!(!decode::<DaemonStatus>(&bytes).unwrap().relay_connected);
+        status_task.await.unwrap().unwrap();
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let mut output = String::new();
+        caller.read_to_string(&mut output).await.unwrap();
+        assert!(output.starts_with("ERR "), "{output}");
+        assert!(output.contains("startup wait timed out"));
+        task.await.unwrap().unwrap();
+    }
 }

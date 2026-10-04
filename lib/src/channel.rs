@@ -72,9 +72,6 @@ pub struct JoinBody {
     pub nonce: String,
     pub psk_epoch: u64,
     pub created_at: u64,
-    /// Retained in signed records for compatibility; new requests use zero.
-    /// Admission no longer expires, including legacy requests with a timestamp.
-    pub expires_at: u64,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct JoinRequest {
@@ -91,7 +88,6 @@ impl JoinRequest {
             nonce: random_id(),
             psk_epoch: state.psk_epoch,
             created_at: now(),
-            expires_at: 0,
         };
         Ok(Self {
             signature: identity.sign("join/v1", &body)?,
@@ -103,12 +99,8 @@ impl JoinRequest {
     }
     pub fn verify(&self) -> Result<()> {
         self.body.device.verify()?;
-        if !valid_id(&self.body.nonce)
-            || (self.body.expires_at != 0 && self.body.expires_at <= self.body.created_at)
-            || (self.body.expires_at != 0
-                && self.body.expires_at.saturating_sub(self.body.created_at) > 600)
-        {
-            return Err(Error::Invalid("join request lifetime/nonce".into()));
+        if !valid_id(&self.body.nonce) {
+            return Err(Error::Invalid("join request nonce".into()));
         }
         verify(
             &self.body.device.signing_key,

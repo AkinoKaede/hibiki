@@ -1,5 +1,6 @@
 pub mod assuan_io;
 pub mod daemon;
+pub mod diagnostics;
 pub mod endpoint;
 pub mod frontend;
 pub mod network;

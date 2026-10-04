@@ -27,7 +27,7 @@ python3 ios/scripts/generate-project.py
 
 `build-rust.sh` generates UniFFI Swift bindings and `HIbikiCore.xcframework`; these
 are build artifacts and are not committed. Re-run it after Rust changes. Use
-`./ios/scripts/build-rust.sh Release` before an Archive/Release build. Both Debug and Release accept `ws://` and `wss://` relays. TLS certificate
+`./ios/scripts/build-rust.sh Release` before an Archive/Release build. Both Debug and Release accept `ws://` and `wss://` servers. TLS certificate
 validation is enabled by default.
 
 Choose your own development team in Xcode to run on a physical device. Enable
@@ -46,19 +46,19 @@ xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
 
 ## Pairing
 
-1. Enter your relay address; the field starts empty and the placeholder is only
-   an example. A bare domain uses `wss://`, and an omitted path (or `/`) becomes
-   `/hibiki`: `hibiki.example.com` connects to `wss://hibiki.example.com/hibiki`.
-   Explicit `ws://`, ports, and custom paths are preserved. The device name
-   defaults to the model reported by DeviceKit (for example, `iPhone 16 Pro`).
-   You can edit it; saved names are preserved. Use the same relay as your computers. Plaintext `ws://` is accepted without
-   a switch. Under the collapsed **Advanced** section, **Skip TLS Certificate
+1. Enter your server address in **Server URL**; the field starts empty. Without
+   a scheme, the app probes `wss://` first and then `ws://` if WSS fails. Each
+   candidate must complete HIbiki protocol validation and device authentication.
+   An explicit `wss://` or `ws://` uses only that protocol. Ports, custom paths and
+   queries are preserved; an omitted path (or `/`) becomes `/hibiki`.
+   **Hostname** defaults to the model reported by DeviceKit (for example,
+   `iPhone 16 Pro`). You can edit it; saved names are preserved. Use the same
+   server as your computers. Under **Advanced**, **Skip TLS Certificate
    Validation** disables certificate trust, hostname and validity checks for TLS
    when explicitly enabled. It is off by default and does not affect plaintext
-   connections. The previous Debug plaintext preference does not enable it.
-   **Get started** checks the relay connection, TLS policy, protocol, and device
-   authentication before saving setup. An unreachable or incompatible server
-   leaves you on setup with an error; the check times out after 15 seconds.
+   connections. **Get started** saves only a successfully authenticated server
+   URL, including the detected protocol. Each probe has a 15-second limit (up to
+   30 seconds for both protocols); failed setup keeps the address editable.
 2. Create a channel, or paste a `hibiki-v1:` / `hibiki-init-v1:` invitation and
    enter the separately shared PSK.
 3. For member invitations, compare **all 24 public-key words and the request ID**
@@ -69,11 +69,11 @@ xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
    README. The app can approve members, share invitations, rotate PSKs, revoke
    identities, and leave channels.
 
-To switch servers, open **Settings → Connection → Disconnect from relay** and
+To switch servers, open **Settings → Connection → Disconnect from server** and
 confirm. This works offline, stops current requests, clears local pairing and the
 device identity, and returns to setup with an empty address field. Security key registrations and the device
 name are kept; password/card services and the TLS bypass are reset to off. Connect
-to the new relay and pair again. Returning to the old relay also requires pairing
+to the new server and pair again. Returning to the old server also requires pairing
 with a new device identity. This local disconnect does not delete server-side
 channels or revoke the old membership; remaining members can remove the old device.
 An interrupted reset is completed before setup or restore can reuse any state.
@@ -141,7 +141,7 @@ remains the requesting agent's responsibility; HIbiki does not report `PIN_REPEA
 
 ## Lifecycle and storage
 
-Only the foreground app receives requests. Backgrounding disconnects the relay,
+Only the foreground app receives requests. Backgrounding disconnects the server,
 cancels prompts and native requests, and releases card connections. The temporary
 inactive state caused by the NFC sheet does not disconnect. Returning reconnects
 and accepts still-pending requests. Completed, canceled, expired, and previously
@@ -167,16 +167,16 @@ python3 tests/mobile.py
 python3 tests/mobile_tls.py
 xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
-  CODE_SIGNING_ALLOWED=NO test
+  CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= test
 ```
 
-`tests/mobile.py` uses the production mobile core against a real relay and GnuPG,
+`tests/mobile.py` uses the production mobile core against a real server and GnuPG,
 with isolated software APDU responses and temporary test keys. It never opens a
 reader or the user's GnuPG home. Public keygrip vectors were independently produced
 with libgcrypt. The simulator tests exercise the Swift bridge and onboarding.
 `tests/mobile_tls.py` verifies default rejection of a self-signed, wrong-host TLS
 certificate, successful connection with explicit bypass, and plaintext connection
-without bypass, using only a local test relay.
+without bypass, using only a local test server.
 
 The GnuPG/APDU tests cover RSA 2048/3072/4096, Ed25519/X25519 and all three
 supported NIST curves, plus channel admission, rotation, revocation, cancellation,
@@ -192,6 +192,18 @@ Hardware release checklist (must run on an actual iPhone and YubiKey):
   algorithms over both USB and NFC.
 - PIN from the phone, computer, and third device; cancellation and competing inputs.
 - Touch-required operations, removal, changing the presented key, NFC timeout,
-  locked phone, backgrounding, relay disconnection, revocation and channel deletion.
+  locked phone, backgrounding, server disconnection, revocation and channel deletion.
 - Respect the key's PIN retry counter. Automated tests intentionally use only
   emulated cards for wrong-PIN and blocked-PIN scenarios.
+
+## Server policy and pending requests
+
+The app uses protocol `hibiki/1`; the server and clients must use matching builds.
+The Channels screen shows Create only when the connected server permits client channel
+creation. Otherwise, obtain an initialization invitation from the administrator.
+
+A joining device can withdraw its pending request from Status or Join channel.
+The pending request ID is saved locally so this remains available after reopening
+the app. Approval, rejection, withdrawal or PSK rotation ends the waiting state.
+An active member can reject a request from its verification screen; rejection
+removes only that request and permits a later new application.

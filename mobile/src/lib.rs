@@ -240,18 +240,7 @@ impl MobileClient {
             let registry = if path.exists() {
                 decode::<registry::Registry>(&read_private(&path)?)?
             } else {
-                let mut registry = registry::Registry::default();
-                let legacy = app.paths.data.join("card.bin");
-                if legacy.exists() {
-                    registry.upsert(
-                        decode::<CardInfo>(&read_private(&legacy)?)?,
-                        "Security Key".into(),
-                        true,
-                        true,
-                    );
-                    atomic_write(&path, &encode(&registry)?)?;
-                }
-                registry
+                registry::Registry::default()
             };
             let broker = Broker::new();
             let provider = MobileProvider::new(broker.clone(), registry.provider_card());
@@ -529,7 +518,6 @@ impl MobileClient {
                 return Ok(JoinInfo {
                     channel: invite.id,
                     request: String::new(),
-                    expires_at: 0,
                 });
             }
             let invite = Invite::import(&invitation)?;
@@ -551,7 +539,6 @@ impl MobileClient {
             let result = JoinInfo {
                 channel: id,
                 request: request.id()?,
-                expires_at: 0,
             };
             hub.connection()
                 .request(Control::Join {
@@ -563,6 +550,95 @@ impl MobileClient {
         }
         .await;
         result.map_err(|e: anyhow::Error| e.into())
+    }
+    pub async fn allows_channel_creation(&self) -> MobileResult<bool> {
+        let result: Result<bool> = async {
+            let Reply::Policy {
+                allow_client_channel_creation,
+            } = self
+                .connected()?
+                .connection()
+                .request(Control::Policy)
+                .await?
+            else {
+                bail!("invalid relay policy response");
+            };
+            Ok(allow_client_channel_creation)
+        }
+        .await;
+        result.map_err(Into::into)
+    }
+    pub async fn reject_join(&self, channel: String, request_id: String) -> MobileResult<()> {
+        let result: Result<()> = async {
+            let hub = self.connected()?;
+            hub.refresh(&channel)
+                .await?
+                .verify()?
+                .member(&self.app.identity.device.id())?;
+            let Reply::Ok = hub
+                .connection()
+                .request(Control::RejectJoin {
+                    channel,
+                    request: request_id,
+                })
+                .await?
+            else {
+                bail!("invalid rejection response");
+            };
+            Ok(())
+        }
+        .await;
+        result.map_err(Into::into)
+    }
+    pub async fn withdraw_join(&self, channel: String, request_id: String) -> MobileResult<()> {
+        let result: Result<()> = async {
+            let Reply::Ok = self
+                .connected()?
+                .connection()
+                .request(Control::WithdrawJoin {
+                    channel,
+                    request: request_id,
+                })
+                .await?
+            else {
+                bail!("invalid withdrawal response");
+            };
+            Ok(())
+        }
+        .await;
+        result.map_err(Into::into)
+    }
+    pub async fn pairing_status(
+        &self,
+        channel: String,
+        request_id: String,
+    ) -> MobileResult<PairingState> {
+        let result: Result<PairingState> = async {
+            let hub = self.connected()?;
+            let Reply::JoinStatus(state) = hub
+                .connection()
+                .request(Control::JoinStatus {
+                    channel: channel.clone(),
+                    request: request_id,
+                })
+                .await?
+            else {
+                bail!("invalid join status response");
+            };
+            Ok(match state {
+                hibiki_lib::protocol::JoinState::Pending => PairingState::Pending,
+                hibiki_lib::protocol::JoinState::Absent => PairingState::Absent,
+                hibiki_lib::protocol::JoinState::Member => {
+                    hub.refresh(&channel)
+                        .await?
+                        .verify()?
+                        .member(&self.app.identity.device.id())?;
+                    PairingState::Member
+                }
+            })
+        }
+        .await;
+        result.map_err(Into::into)
     }
     pub async fn pending(&self, channel: String) -> MobileResult<Vec<PendingInfo>> {
         let result = async {
@@ -586,7 +662,6 @@ impl MobileClient {
                         id: r.id()?,
                         channel: channel.clone(),
                         device: device_info(&r.body.device, false)?,
-                        expires_at: 0,
                     })
                 })
                 .collect::<Result<Vec<_>>>()

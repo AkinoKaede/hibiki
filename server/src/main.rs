@@ -5,10 +5,7 @@ mod service;
 use anyhow::{Context, Result, bail};
 use axum::serve::ListenerExt;
 use clap::{Parser, Subcommand};
-use hibiki_lib::{
-    channel::{hash_psk, make_psk},
-    paths::AppPaths,
-};
+use hibiki_lib::channel::{hash_psk, make_psk};
 use serde::Deserialize;
 use std::{
     fs::{self, OpenOptions},
@@ -16,12 +13,18 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const CONFIG_PATHS: [&str; 2] = [
+    "/etc/hibiki/server.toml",
+    "/usr/local/etc/hibiki/server.toml",
+];
+
 #[derive(Parser)]
 #[command(
     version,
     about = "Hibiki relay for end-to-end encrypted GPG operations"
 )]
 struct Args {
+    /// Configuration file (otherwise search /etc/hibiki, then /usr/local/etc/hibiki).
     #[arg(long, global = true, env = "HIBIKI_SERVER_CONFIG")]
     config: Option<PathBuf>,
     /// Override the listen address from the configuration file.
@@ -69,18 +72,39 @@ enum ChannelCommand {
 #[serde(default, deny_unknown_fields)]
 struct Config {
     listen: String,
-    database: Option<PathBuf>,
+    database: PathBuf,
     allow_client_channel_creation: bool,
 }
 impl Default for Config {
     fn default() -> Self {
         Self {
             listen: "127.0.0.1:7749".into(),
-            database: None,
-            allow_client_channel_creation: true,
+            database: "/var/lib/hibiki/hibiki.sqlite3".into(),
+            allow_client_channel_creation: false,
         }
     }
 }
+
+fn load_config(explicit: Option<&Path>, defaults: &[&Path]) -> Result<(Config, Option<PathBuf>)> {
+    let explicit_paths = explicit.map(|path| [path]);
+    let candidates = explicit_paths.as_ref().map_or(defaults, |paths| &paths[..]);
+    for path in candidates {
+        match fs::read_to_string(path) {
+            Ok(contents) => {
+                let config = toml::from_str(&contents)
+                    .with_context(|| format!("invalid configuration: {}", path.display()))?;
+                return Ok((config, Some(path.to_path_buf())));
+            }
+            Err(error) if explicit.is_none() && error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("could not read configuration: {}", path.display()));
+            }
+        }
+    }
+    Ok((Config::default(), None))
+}
+
 fn private_dir(path: &Path) -> Result<()> {
     if !path.exists() {
         use std::os::unix::fs::DirBuilderExt;
@@ -105,36 +129,25 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     let args = Args::parse();
-    let paths = AppPaths::discover()?;
-    let candidate = paths
-        .config_candidates(args.config.as_deref(), "server.toml")
-        .into_iter()
-        .find(|p| p.is_file());
-    if args.config.is_some() && candidate.is_none() {
-        bail!("configuration file not found");
-    }
-    let mut config: Config = if let Some(path) = &candidate {
-        toml::from_str(&fs::read_to_string(path)?)?
-    } else {
-        Config::default()
-    };
+    let (mut config, candidate) =
+        load_config(args.config.as_deref(), &CONFIG_PATHS.map(Path::new))?;
     if let Some(listen) = args.listen {
         config.listen = listen;
     }
     if let Some(database) = args.database {
-        config.database = Some(database);
+        config.database = database;
     }
     if let Some(allowed) = args.allow_client_channel_creation {
         config.allow_client_channel_creation = allowed;
     }
-    let database = match config.database {
-        Some(p) if p.is_absolute() => p,
-        Some(p) => candidate
+    let database = if config.database.is_absolute() {
+        config.database
+    } else {
+        candidate
             .as_ref()
             .and_then(|c| c.parent())
             .unwrap_or(Path::new("."))
-            .join(p),
-        None => paths.data.join("server").join("hibiki.sqlite3"),
+            .join(config.database)
     };
     private_dir(database.parent().context("database directory")?)?;
     if !database.exists() {

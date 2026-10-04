@@ -7,7 +7,6 @@ pub struct Model {
     pub id: String,
     pub channel: String,
     pub request: Vec<u8>,
-    pub expires: i64,
     pub epoch: i64,
 }
 

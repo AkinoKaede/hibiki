@@ -2,20 +2,95 @@ import XCTest
 @testable import HIbiki
 
 final class CoreBridgeTests: XCTestCase {
-    func testRelayAddressExpandsOnlyMissingSchemeAndRootPath() throws {
+    @MainActor
+    func testPendingPairingSurvivesRestartAndCanBeCleared() throws {
+        let suite = "hibiki-tests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(defaults: defaults)
+        XCTAssertNil(model.allowChannelCreation)
+        model.rememberPairing(JoinInfo(channel: "channel", request: "request"))
+        let restored = AppModel(defaults: defaults)
+        XCTAssertEqual(restored.pairing?.request, "request")
+        restored.rememberPairing(nil)
+        XCTAssertNil(AppModel(defaults: defaults).pairing)
+        restored.rememberPairing(JoinInfo(channel: "claimed", request: ""))
+        XCTAssertNil(restored.pairing)
+    }
+
+    func testServerAddressCandidatesPreserveExplicitSchemePortPathAndQuery() throws {
         for (input, expected) in [
-            ("hibiki.example.com", "wss://hibiki.example.com/hibiki"),
-            ("  wss://hibiki.example.com/\n", "wss://hibiki.example.com/hibiki"),
-            ("ws://localhost:7749", "ws://localhost:7749/hibiki"),
-            ("localhost:7749", "wss://localhost:7749/hibiki"),
-            ("ws://[::1]:7749/", "ws://[::1]:7749/hibiki"),
-            ("wss://hibiki.example.com/hibiki", "wss://hibiki.example.com/hibiki"),
-            ("wss://hibiki.example.com/custom?region=one", "wss://hibiki.example.com/custom?region=one"),
-            ("wss://hibiki.example.com?region=one", "wss://hibiki.example.com/hibiki?region=one")
-        ] { XCTAssertEqual(try AppModel.relayURL(from: input), expected) }
+            ("hibiki.example.com", ["wss://hibiki.example.com/hibiki", "ws://hibiki.example.com/hibiki"]),
+            ("  wss://hibiki.example.com/\n", ["wss://hibiki.example.com/hibiki"]),
+            ("ws://localhost:7749", ["ws://localhost:7749/hibiki"]),
+            ("localhost:7749", ["wss://localhost:7749/hibiki", "ws://localhost:7749/hibiki"]),
+            ("[::1]:7749/", ["wss://[::1]:7749/hibiki", "ws://[::1]:7749/hibiki"]),
+            ("ws://[::1]:7749/", ["ws://[::1]:7749/hibiki"]),
+            ("wss://hibiki.example.com/hibiki", ["wss://hibiki.example.com/hibiki"]),
+            ("WSS://hibiki.example.com/custom?region=one", ["wss://hibiki.example.com/custom?region=one"]),
+            ("hibiki.example.com/custom?region=one", ["wss://hibiki.example.com/custom?region=one", "ws://hibiki.example.com/custom?region=one"]),
+            ("wss://hibiki.example.com?region=one", ["wss://hibiki.example.com/hibiki?region=one"])
+        ] { XCTAssertEqual(try AppModel.serverURLs(from: input), expected) }
         for invalid in ["", "  ", "not a host", "https://example.com", "wss://", "ws://localhost:99999", "wss://user:pass@example.com", "wss://example.com/#fragment"] {
-            XCTAssertThrowsError(try AppModel.relayURL(from: invalid), invalid)
+            XCTAssertThrowsError(try AppModel.serverURLs(from: invalid), invalid)
         }
+    }
+    @MainActor
+    func testServerDiscoveryPrefersWSSAndStopsOnSuccess() async throws {
+        var attempts: [String] = []
+        let selected = try await AppModel.discoverServer(from: "example.com") { attempts.append($0) }
+        XCTAssertEqual(selected, "wss://example.com/hibiki")
+        XCTAssertEqual(attempts, [selected])
+    }
+    @MainActor
+    func testServerDiscoveryFallsBackToWSAfterFailedWSS() async throws {
+        var attempts: [String] = []
+        let selected = try await AppModel.discoverServer(from: "localhost:7749/custom?q=1") {
+            attempts.append($0)
+            if $0.hasPrefix("wss:") { throw URLError(.secureConnectionFailed) }
+        }
+        XCTAssertEqual(selected, "ws://localhost:7749/custom?q=1")
+        XCTAssertEqual(attempts, ["wss://localhost:7749/custom?q=1", selected])
+    }
+    @MainActor
+    func testServerDiscoveryNeverChangesExplicitProtocol() async throws {
+        for scheme in ["wss", "ws"] {
+            var attempts: [String] = []
+            do {
+                _ = try await AppModel.discoverServer(from: "\(scheme)://example.com") {
+                    attempts.append($0)
+                    throw URLError(.cannotConnectToHost)
+                }
+                XCTFail("An unreachable explicit address must fail")
+            } catch { XCTAssertEqual(attempts, ["\(scheme)://example.com/hibiki"]) }
+        }
+    }
+    @MainActor
+    func testServerDiscoveryReportsBothFailures() async throws {
+        var attempts: [String] = []
+        do {
+            _ = try await AppModel.discoverServer(from: "example.com") {
+                attempts.append($0)
+                throw URLError(.cannotConnectToHost)
+            }
+            XCTFail("Both failed probes must fail setup")
+        } catch {
+            XCTAssertEqual(attempts.count, 2)
+            for attempt in attempts { XCTAssertTrue(error.localizedDescription.contains(attempt)) }
+        }
+    }
+    @MainActor
+    func testServerDiscoveryDoesNotFallbackAfterCancellation() async throws {
+        var attempts: [String] = []
+        do {
+            _ = try await AppModel.discoverServer(from: "example.com") {
+                attempts.append($0)
+                throw CancellationError()
+            }
+            XCTFail("Canceled discovery must not select a server")
+        } catch is CancellationError {
+            XCTAssertEqual(attempts, ["wss://example.com/hibiki"])
+        } catch { XCTFail("Expected cancellation: \(error)") }
     }
     @MainActor
     func testRelayStartsEmptyAndKeepsAnExplicitlySavedAddress() throws {
@@ -94,7 +169,7 @@ final class CoreBridgeTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let removed = ["config/client.toml", "state/session", "cache/item", "runtime/lock", "data/channels/example/FORKED", "data/channels/example/trust.bin", "data/operations/request"]
-        let retained = ["data/cards.bin", "data/card.bin"]
+        let retained = ["data/cards.bin"]
         for path in removed + retained {
             let url = root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

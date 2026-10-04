@@ -38,10 +38,21 @@ pub async fn program(app: &App, service: ServiceKind) -> Result<PathBuf> {
     let path = if let Some(p) = &app.config.service(service).program {
         p.clone()
     } else {
-        let out = Command::new(&app.config.gpgconf_program)
-            .arg("--list-components")
-            .output()
-            .await?;
+        let out = tokio::time::timeout(
+            Duration::from_secs(5),
+            Command::new(&app.config.gpgconf_program)
+                .arg("--list-components")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .context("gpgconf discovery timed out")?
+        .with_context(|| {
+            format!(
+                "could not run {:?}; install GnuPG or set gpgconf_program",
+                app.config.gpgconf_program
+            )
+        })?;
         if !out.status.success() {
             bail!("gpgconf failed to locate native service");
         }
@@ -69,6 +80,14 @@ pub async fn program(app: &App, service: ServiceKind) -> Result<PathBuf> {
             .context("native program not found in PATH")?
             .canonicalize()?
     };
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = std::fs::metadata(&resolved)?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        bail!(
+            "native program is not an executable file: {}",
+            resolved.display()
+        );
+    }
     if resolved
         .file_name()
         .is_some_and(|n| n.to_string_lossy().starts_with("hibiki"))
@@ -87,6 +106,21 @@ pub async fn program(app: &App, service: ServiceKind) -> Result<PathBuf> {
         }
     }
     Ok(resolved)
+}
+
+/// Check enabled providers without opening a reader or displaying a PIN prompt.
+pub async fn preflight(app: &App) -> Result<()> {
+    for service in [ServiceKind::Scdaemon, ServiceKind::Pinentry] {
+        if app.config.service(service).enabled {
+            let path = program(app, service).await.with_context(|| {
+                format!(
+                    "{service:?} is enabled but unavailable; fix its program setting or disable it"
+                )
+            })?;
+            eprintln!("{service:?}: {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 pub async fn open(
@@ -357,6 +391,27 @@ mod tests {
             identity: Arc::new(Identity::generate("test".into()).unwrap()),
         })
     }
+    #[tokio::test]
+    async fn preflight_rejects_missing_nonexecutable_and_adapter_programs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path());
+        preflight(&app).await.unwrap();
+        let config = &mut Arc::get_mut(&mut app).unwrap().config;
+        config.pinentry.program = Some(dir.path().join("missing"));
+        assert!(preflight(&app).await.is_err());
+        let config = &mut Arc::get_mut(&mut app).unwrap().config;
+        config.pinentry.enabled = false;
+        preflight(&app).await.unwrap();
+        let native = app.config.scdaemon.program.as_ref().unwrap();
+        std::fs::set_permissions(native, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(preflight(&app).await.is_err());
+        let adapter = dir.path().join("hibiki-pinentry");
+        std::fs::write(&adapter, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o700)).unwrap();
+        Arc::get_mut(&mut app).unwrap().config.scdaemon.program = Some(adapter);
+        assert!(preflight(&app).await.is_err());
+    }
+
     #[tokio::test]
     async fn disabled_services_never_start_a_program() {
         for card in [false, true] {

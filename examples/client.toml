@@ -17,6 +17,8 @@ enabled = false
 
 [pinentry]
 enabled = false
-# Choose a GUI Pinentry available here. Terminal input requires this device's
-# GPG_TTY and TERM in the daemon environment.
+# Omit program to locate the native binary with gpgconf --list-components.
+# This may select a terminal Pinentry. Set program to a GUI Pinentry for a
+# background service; terminal input requires this device's GPG_TTY and TERM
+# in the daemon environment.
 # program = "/opt/homebrew/bin/pinentry-mac"

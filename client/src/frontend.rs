@@ -15,6 +15,19 @@ pub struct LocalOpen {
     pub display: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub enum LocalRequest {
+    Open(LocalOpen),
+    Status,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DaemonStatus {
+    pub device: String,
+    pub relay_connected: bool,
+    pub config: crate::storage::Config,
+}
+
 pub async fn run(service: ServiceKind) -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut display = std::env::var("DISPLAY").ok();
@@ -51,12 +64,12 @@ pub async fn run(service: ServiceKind) -> Result<()> {
     let mut stream = UnixStream::connect(app.paths.ipc_socket())
         .await
         .context("run hibiki daemon first")?;
-    let header = encode(&LocalOpen {
+    let header = encode(&LocalRequest::Open(LocalOpen {
         channel,
         service,
         pid: std::process::id(),
         display,
-    })?;
+    }))?;
     stream.write_u32(header.len().try_into()?).await?;
     stream.write_all(&header).await?;
     let (reader, mut writer) = stream.into_split();

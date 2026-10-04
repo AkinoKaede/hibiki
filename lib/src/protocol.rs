@@ -2,7 +2,7 @@ use crate::{assuan::Line, channel::*, identity::Device};
 use serde::{Deserialize, Serialize};
 
 /// Hibiki wire protocol identifier, authenticated by the device and bound into Noise.
-pub const VERSION: &str = "hibiki/2";
+pub const VERSION: &str = "hibiki/1";
 pub const WS_PATH: &str = "/hibiki";
 pub const MAX_WIRE: usize = 4 * 1024 * 1024;
 /// An hour of caller time plus less than a second of wire timestamp rounding.
@@ -86,6 +86,19 @@ pub enum Control {
         genesis: ChannelGenesis,
         psk: String,
     },
+    Policy,
+    RejectJoin {
+        channel: String,
+        request: String,
+    },
+    WithdrawJoin {
+        channel: String,
+        request: String,
+    },
+    JoinStatus {
+        channel: String,
+        request: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)] // Bounded, serialized wire value.
@@ -96,6 +109,15 @@ pub enum Reply {
     Proofs(Vec<MembershipProof>),
     Requests(Vec<JoinRequest>),
     Peers(Vec<String>),
+    Policy { allow_client_channel_creation: bool },
+    JoinStatus(JoinState),
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum JoinState {
+    Pending,
+    Member,
+    Absent,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

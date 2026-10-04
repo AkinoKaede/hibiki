@@ -125,6 +125,24 @@ impl Service {
     ) -> Result<Reply> {
         let _authority = self.authority.lock().await;
         match cmd {
+            Control::Policy => Ok(Reply::Policy {
+                allow_client_channel_creation: self.allow_client_channel_creation,
+            }),
+            Control::RejectJoin { channel, request } => {
+                self.db
+                    .remove_pending(device, &channel, &request, false)
+                    .await?;
+                Ok(Reply::Ok)
+            }
+            Control::WithdrawJoin { channel, request } => {
+                self.db
+                    .remove_pending(device, &channel, &request, true)
+                    .await?;
+                Ok(Reply::Ok)
+            }
+            Control::JoinStatus { channel, request } => Ok(Reply::JoinStatus(
+                self.db.join_status(device, &channel, &request).await?,
+            )),
             Control::Queue { operation } => {
                 self.executor(device, connection)?;
                 Ok(Reply::Operation(
