@@ -212,7 +212,7 @@ The following steps use `wss://hibiki.example.com/hibiki`; replace it with your 
 
 ### 2. Pair devices in a channel
 
-On the first device:
+On the first device (`--name` is optional and defaults to the system hostname):
 
 ```sh
 hibiki init --server wss://hibiki.example.com/hibiki --name laptop

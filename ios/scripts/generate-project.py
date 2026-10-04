@@ -17,6 +17,9 @@ testfiles=[ref('HIbikiTests/'+p.name,'sourcecode.swift') for p in sorted((ROOT/'
 uifiles=[ref('HIbikiUITests/'+p.name,'sourcecode.swift') for p in sorted((ROOT/'HIbikiUITests').glob('*.swift'))]
 resources=[ref('HIbiki/Localizable.xcstrings','text.json.xcstrings'),ref('HIbiki/Assets.xcassets','folder.assetcatalog')]
 framework=ref('Frameworks/HIbikiCore.xcframework','wrapper.xcframework')
+devicekit_package=add('package:DeviceKit','XCRemoteSwiftPackageReference',repositoryURL='https://github.com/devicekit/DeviceKit.git',requirement={'kind':'upToNextMajorVersion','minimumVersion':'5.9.0'})
+devicekit_product=add('product:DeviceKit','XCSwiftPackageProductDependency',package=devicekit_package,productName='DeviceKit')
+devicekit_build=add('build:DeviceKit','PBXBuildFile',productRef=devicekit_product)
 products=[];targets=[]
 settings={
     'SDKROOT':'iphoneos','IPHONEOS_DEPLOYMENT_TARGET':'18.0','SWIFT_VERSION':'5.0','CLANG_ENABLE_MODULES':'YES','ENABLE_USER_SCRIPT_SANDBOXING':'NO',
@@ -36,7 +39,7 @@ for name,files,ptype in [('HIbiki',appfiles+[binding],'application'),('HIbikiTes
     app=name=='HIbiki'
     product=add(name+'product','PBXFileReference',explicitFileType='wrapper.application' if app else 'wrapper.cfbundle',path=name+('.app' if app else '.xctest'),sourceTree='BUILT_PRODUCTS_DIR');products.append(product)
     sources=add(name+'sources','PBXSourcesBuildPhase',buildActionMask=2147483647,files=[build(f) for f in files],runOnlyForDeploymentPostprocessing=0)
-    frameworks=add(name+'frameworks','PBXFrameworksBuildPhase',buildActionMask=2147483647,files=[build(framework)] if app else [],runOnlyForDeploymentPostprocessing=0)
+    frameworks=add(name+'frameworks','PBXFrameworksBuildPhase',buildActionMask=2147483647,files=[build(framework),devicekit_build] if app else [],runOnlyForDeploymentPostprocessing=0)
     resourcephase=add(name+'resources','PBXResourcesBuildPhase',buildActionMask=2147483647,files=[build(r) for r in resources] if app else [],runOnlyForDeploymentPostprocessing=0)
     extra={'PRODUCT_NAME':'$(TARGET_NAME)','PRODUCT_BUNDLE_IDENTIFIER':'com.akinokaede.hibiki'+('' if app else '.'+name),'GENERATE_INFOPLIST_FILE':'YES'}
     if app:
@@ -53,10 +56,10 @@ for name,files,ptype in [('HIbiki',appfiles+[binding],'application'),('HIbikiTes
     if not app:
         proxy=add(name+'proxy','PBXContainerItemProxy',containerPortal=uid('project'),proxyType=1,remoteGlobalIDString=uid('target:HIbiki'),remoteInfo='HIbiki')
         deps=[add(name+'dependency','PBXTargetDependency',target=uid('target:HIbiki'),targetProxy=proxy)]
-    target=add('target:'+name,'PBXNativeTarget',name=name,productName=name,productReference=product,productType='com.apple.product-type.'+ptype,buildPhases=phases,buildRules=[],dependencies=deps,buildConfigurationList=configs(name,extra));targets.append(target)
+    target=add('target:'+name,'PBXNativeTarget',name=name,productName=name,productReference=product,productType='com.apple.product-type.'+ptype,buildPhases=phases,buildRules=[],dependencies=deps,packageProductDependencies=[devicekit_product] if app else [],buildConfigurationList=configs(name,extra));targets.append(target)
 productgroup=add('products','PBXGroup',children=products,name='Products',sourceTree='<group>')
 main=add('main','PBXGroup',children=appfiles+[binding]+testfiles+uifiles+resources+[framework,ref('HIbiki/Info.plist','text.plist.xml'),ref('HIbiki/HIbiki.entitlements','text.plist.entitlements'),productgroup],sourceTree='<group>')
-add('project','PBXProject',attributes={'LastUpgradeCheck':'1800','BuildIndependentTargetsInParallel':'YES','TargetAttributes':{uid('target:HIbikiTests'):{'TestTargetID':uid('target:HIbiki')},uid('target:HIbikiUITests'):{'TestTargetID':uid('target:HIbiki')}}},buildConfigurationList=configs('project',{'ENABLE_TESTABILITY':'YES'}),compatibilityVersion='Xcode 14.0',developmentRegion='en',hasScannedForEncodings=0,knownRegions=['en','zh-Hans','Base'],mainGroup=main,productRefGroup=productgroup,projectDirPath='',projectRoot='',targets=targets)
+add('project','PBXProject',attributes={'LastUpgradeCheck':'1800','BuildIndependentTargetsInParallel':'YES','TargetAttributes':{uid('target:HIbikiTests'):{'TestTargetID':uid('target:HIbiki')},uid('target:HIbikiUITests'):{'TestTargetID':uid('target:HIbiki')}}},buildConfigurationList=configs('project',{'ENABLE_TESTABILITY':'YES'}),compatibilityVersion='Xcode 14.0',developmentRegion='en',hasScannedForEncodings=0,knownRegions=['en','zh-Hans','Base'],mainGroup=main,productRefGroup=productgroup,projectDirPath='',projectRoot='',targets=targets,packageReferences=[devicekit_package])
 def render(value,level=0):
     if isinstance(value,dict):return '{\n'+''.join('\t'*(level+1)+json.dumps(str(k))+ ' = '+render(v,level+1)+';\n' for k,v in value.items())+'\t'*level+'}'
     if isinstance(value,list):return '('+', '.join(render(v,level) for v in value)+')'

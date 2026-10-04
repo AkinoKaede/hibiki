@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use hibiki::{network::Connection, pairing, storage::App};
 use hibiki_lib::{
@@ -21,8 +21,9 @@ enum Commands {
     Init {
         #[arg(long)]
         server: String,
+        /// Device display name; defaults to the operating system hostname.
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         #[arg(long)]
         allow_insecure: bool,
     },
@@ -100,6 +101,20 @@ fn psk(file: Option<PathBuf>, generate: bool) -> Result<(String, bool)> {
 }
 use hibiki_core::management::{append, refresh};
 
+fn hostname() -> Result<String> {
+    let mut info = std::mem::MaybeUninit::<libc::utsname>::uninit();
+    // uname initializes the structure on success, with a NUL-terminated nodename.
+    if unsafe { libc::uname(info.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let info = unsafe { info.assume_init() };
+    let name = unsafe { std::ffi::CStr::from_ptr(info.nodename.as_ptr()) }.to_str()?;
+    if name.is_empty() || name.len() > 128 {
+        bail!("hostname must be 1 to 128 bytes");
+    }
+    Ok(name.to_owned())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -118,6 +133,10 @@ async fn main() -> Result<()> {
                 "init writes the XDG user configuration; use XDG_CONFIG_HOME to choose its location"
             );
         }
+        let name = match name {
+            Some(name) => name,
+            None => hostname().context("could not use hostname as device name; specify --name")?,
+        };
         let app = App::initialize(server, name, allow_insecure)?;
         println!("device {}", app.identity.device.id());
         return Ok(());

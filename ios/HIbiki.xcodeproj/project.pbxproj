@@ -71,6 +71,23 @@
 			"path" = "Frameworks/HIbikiCore.xcframework";
 			"sourceTree" = "<group>";
 		};
+		"08FC9446E4EA183B226AEE65" = {
+			"isa" = "XCRemoteSwiftPackageReference";
+			"repositoryURL" = "https://github.com/devicekit/DeviceKit.git";
+			"requirement" = {
+				"kind" = "upToNextMajorVersion";
+				"minimumVersion" = "5.9.0";
+			};
+		};
+		"38CC08E9906CB414CE268FF7" = {
+			"isa" = "XCSwiftPackageProductDependency";
+			"package" = "08FC9446E4EA183B226AEE65";
+			"productName" = "DeviceKit";
+		};
+		"6700444FC3D0C4DB1EDE8025" = {
+			"isa" = "PBXBuildFile";
+			"productRef" = "38CC08E9906CB414CE268FF7";
+		};
 		"E462C8E1884374E75D71994B" = {
 			"isa" = "PBXFileReference";
 			"explicitFileType" = "wrapper.application";
@@ -114,7 +131,7 @@
 		"24D8A35CDED47E0327DE37BA" = {
 			"isa" = "PBXFrameworksBuildPhase";
 			"buildActionMask" = 2147483647;
-			"files" = ("C90F643F6DFFF631AE9F9040");
+			"files" = ("C90F643F6DFFF631AE9F9040", "6700444FC3D0C4DB1EDE8025");
 			"runOnlyForDeploymentPostprocessing" = 0;
 		};
 		"F9BEC9ECF5CA44F4269D3423" = {
@@ -222,6 +239,7 @@
 			"buildPhases" = ("E9C6A9E751819729CDA4770E", "1FC6A313944725488E521FDA", "24D8A35CDED47E0327DE37BA", "012E1F2E90D4C0A6A7E6A6D5");
 			"buildRules" = ();
 			"dependencies" = ();
+			"packageProductDependencies" = ("38CC08E9906CB414CE268FF7");
 			"buildConfigurationList" = "A7C6BCFFD8DD84D9084D929A";
 		};
 		"D1E7F6C6621B8045D428A48F" = {
@@ -332,6 +350,7 @@
 			"buildPhases" = ("28E82B311E3A09BE0370431B", "F3B28BCB46595A76F3228E12", "5EE8A02D76EDE40BCFFE0686");
 			"buildRules" = ();
 			"dependencies" = ("7DEEEF5D555F32397D0F9A87");
+			"packageProductDependencies" = ();
 			"buildConfigurationList" = "6AA2BD4F4A74C1F276DF2528";
 		};
 		"6FF875020E96FD97048A4E35" = {
@@ -440,6 +459,7 @@
 			"buildPhases" = ("0EA0C17666EDD5F2CED3E309", "B1AA0254126DF20667B967D5", "BEE3F8F7DE17B93A3BDFA371");
 			"buildRules" = ();
 			"dependencies" = ("E2B5C211D55B21DEFE9EA52F");
+			"packageProductDependencies" = ();
 			"buildConfigurationList" = "4D9C94A497FC906417DBDE1E";
 		};
 		"0A3E27B8CA818264D75C8D81" = {
@@ -540,6 +560,7 @@
 			"projectDirPath" = "";
 			"projectRoot" = "";
 			"targets" = ("397999952154E0B81333FC80", "8D21BF058B6F932732D6C498", "B8A63CD3AEC9E40729D8B96C");
+			"packageReferences" = ("08FC9446E4EA183B226AEE65");
 		};
 	};
 	"rootObject" = "244210E48437B6556980A702";

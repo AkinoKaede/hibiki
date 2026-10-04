@@ -1,3 +1,4 @@
+import DeviceKit
 import SwiftUI
 import Observation
 
@@ -15,7 +16,7 @@ final class AppModel {
     var usbPresent = false
     var foreground = true
     var server = UserDefaults.standard.string(forKey: "server") ?? "wss://hibiki.akinokaede.com/hibiki"
-    var name = UserDefaults.standard.string(forKey: "deviceName") ?? UIDevice.current.name
+    var name = UserDefaults.standard.string(forKey: "deviceName") ?? Device.current.realDevice.description
     var skipTLSCertificateValidation = UserDefaults.standard.bool(forKey: "skipTLSCertificateValidation")
     var pinEnabled = UserDefaults.standard.bool(forKey: "pinEnabled")
     var cardEnabled = UserDefaults.standard.bool(forKey: "cardEnabled")

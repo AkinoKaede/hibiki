@@ -18,7 +18,8 @@ open ios/HIbiki.xcodeproj
 ```
 
 Select the shared **HIbiki** scheme. The checked-in Xcode project requires no
-third-party project generator. After adding source files, regenerate it with:
+third-party project generator. Xcode resolves DeviceKit through Swift Package Manager
+to supply the default device model name. After adding source files, regenerate it with:
 
 ```sh
 python3 ios/scripts/generate-project.py
@@ -45,8 +46,9 @@ xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki \
 
 ## Pairing
 
-1. The default relay is `wss://hibiki.akinokaede.com/hibiki`. Enter a device name
-   and use the same relay as your computers. Plaintext `ws://` is accepted without
+1. The default relay is `wss://hibiki.akinokaede.com/hibiki`. The device name
+   defaults to the model reported by DeviceKit (for example, `iPhone 16 Pro`).
+   You can edit it; saved names are preserved. Use the same relay as your computers. Plaintext `ws://` is accepted without
    a switch. Under the collapsed **Advanced** section, **Skip TLS Certificate
    Validation** disables certificate trust, hostname and validity checks for TLS
    when explicitly enabled. It is off by default and does not affect plaintext
