@@ -90,12 +90,26 @@ def check_run(binary, directory, shutdown_signal, cli_overrides):
                         if time.monotonic() >= deadline:
                             raise AssertionError('relay did not become healthy')
                         time.sleep(0.05)
+                result = subprocess.run([*command, 'health'], env=env, check=True,
+                                        capture_output=True, text=True, timeout=10)
+                assert result.stdout == 'ok\n'
+                # The probe uses loopback for a wildcard listen address and
+                # must not initialize or open its configured database.
+                probe_data = directory / 'probe-data'
+                subprocess.run([str(binary), '--config', str(config),
+                                '--listen', f'0.0.0.0:{port}', '--database',
+                                str(probe_data / 'unused.sqlite3'), 'health'],
+                               env=env, check=True, capture_output=True, timeout=10)
+                assert not probe_data.exists()
                 assert database.stat().st_mode & 0o777 == 0o600
                 assert not (directory / 'unused.sqlite3').exists()
                 if cli_overrides:
                     assert not (directory / 'env.sqlite3').exists()
                 process.send_signal(shutdown_signal)
                 assert process.wait(timeout=10) == 0
+                result = subprocess.run([*command, 'health'], env=env,
+                                        capture_output=True, timeout=10)
+                assert result.returncode == 1
             finally:
                 if process.poll() is None:
                     process.kill()
@@ -115,7 +129,7 @@ def main():
     for cli_overrides, shutdown_signal in [(False, signal.SIGTERM), (True, signal.SIGINT)]:
         with tempfile.TemporaryDirectory(prefix='hibiki-server-test-') as temporary:
             check_run(args.server.resolve(), Path(temporary), shutdown_signal, cli_overrides)
-    print('Server relative paths, environment, CLI precedence, persistence and graceful shutdown passed')
+    print('Server relative paths, environment, CLI precedence, health checks, persistence and graceful shutdown passed')
 
 
 if __name__ == '__main__':

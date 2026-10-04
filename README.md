@@ -113,7 +113,7 @@ Build and start a relay from the repository root:
 
 ```sh
 docker compose -f server/compose.yml up -d --build
-curl --fail http://127.0.0.1:7749/healthz
+docker compose -f server/compose.yml exec server hibiki-server health
 ```
 
 The Compose service binds only the host loopback address. Put a TLS reverse
@@ -148,8 +148,12 @@ Channel creation is reserved for the administrator by default. Add
 `-e HIBIKI_SERVER_ALLOW_CLIENT_CHANNEL_CREATION=true` to `docker run` only if
 authenticated clients should be able to create channels. The image sets
 `HIBIKI_SERVER_CONFIG=/etc/hibiki/server.toml` and `RUST_LOG=info` by default.
-If changing the listen port, also change the published port and set the image's
-`HIBIKI_SERVER_HEALTHCHECK_URL` to the corresponding local `/healthz` URL.
+Both the image and Compose use `hibiki-server health` for health checks. It probes
+`/healthz` at the configured listen address, using loopback for wildcard addresses,
+and exits 0 for an HTTP success response or 1 for failure (including a 2-second
+timeout). It does not open or create the database. CLI and environment listen
+overrides also apply to the probe. If changing the listen port, also change the
+published port; the health check follows the configuration automatically.
 The relay handles SIGTERM and SIGINT for graceful shutdown.
 
 Administrator commands can run against the same database:

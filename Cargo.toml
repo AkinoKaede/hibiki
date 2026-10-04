@@ -22,6 +22,8 @@ clap = { version = "4", features = ["derive", "env"] }
 anstream = "1"
 anstyle = "1"
 axum = { version = "0.8", features = ["ws"] }
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 sea-orm = { version = "2.0.4", default-features = false, features = ["macros", "sqlx-sqlite", "runtime-tokio-rustls"] }
 snow = "0.10"

@@ -11,7 +11,7 @@ RUN cargo build --locked --release -p hibiki-server
 
 FROM debian:trixie-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 hibiki \
     && useradd --uid 10001 --gid hibiki --home-dir /var/lib/hibiki --no-create-home hibiki \
@@ -24,5 +24,5 @@ VOLUME ["/var/lib/hibiki"]
 EXPOSE 7749
 STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD curl --fail --silent "${HIBIKI_SERVER_HEALTHCHECK_URL:-http://127.0.0.1:7749/healthz}" || exit 1
+    CMD ["hibiki-server", "health"]
 ENTRYPOINT ["/usr/local/bin/hibiki-server"]

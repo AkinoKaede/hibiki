@@ -1,5 +1,6 @@
 mod db;
 mod entities;
+mod health;
 mod operations;
 mod service;
 use anyhow::{Context, Result, bail};
@@ -45,6 +46,8 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Check the running relay's /healthz endpoint (exit 0 if healthy, 1 otherwise).
+    Health,
     Channel {
         #[command(subcommand)]
         command: ChannelCommand,
@@ -139,6 +142,11 @@ async fn main() -> Result<()> {
     }
     if let Some(allowed) = args.allow_client_channel_creation {
         config.allow_client_channel_creation = allowed;
+    }
+    if matches!(args.command, Some(Command::Health)) {
+        health::check(&config.listen).await?;
+        println!("ok");
+        return Ok(());
     }
     let database = if config.database.is_absolute() {
         config.database

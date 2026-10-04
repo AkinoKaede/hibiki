@@ -41,23 +41,23 @@ jobs:
           trap 'docker rm -f hibiki-test || true; docker volume rm hibiki-test || true' EXIT
           docker run -d --name hibiki-test -v hibiki-test:/var/lib/hibiki hibiki-server:test
           for _ in {1..30}; do
-            if docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz; then
+            if docker exec hibiki-test hibiki-server health; then
               break
             fi
             sleep 2
           done
-          docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz
+          docker exec hibiki-test hibiki-server health
           docker exec hibiki-test test -s /var/lib/hibiki/hibiki.sqlite3
           docker stop --time 15 hibiki-test
           test "$(docker inspect --format '{{.State.ExitCode}}' hibiki-test)" = 0
           docker start hibiki-test
           for _ in {1..30}; do
-            if docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz; then
+            if docker exec hibiki-test hibiki-server health; then
               break
             fi
             sleep 2
           done
-          docker exec hibiki-test curl --fail --silent http://127.0.0.1:7749/healthz
+          docker exec hibiki-test hibiki-server health
 
   publish:
     needs: smoke
