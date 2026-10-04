@@ -65,7 +65,9 @@ impl Connection {
             .max_frame_size(Some(MAX_WIRE));
         let (mut ws, _) = tokio::time::timeout(
             Duration::from_secs(10),
-            connect_async_tls_with_config(url, Some(config), false, connector),
+            // Assuan uses many small request/reply frames, including nested PIN
+            // inquiries. Nagle plus delayed ACKs can exhaust their deadline.
+            connect_async_tls_with_config(url, Some(config), true, connector),
         )
         .await??;
         let hello = tokio::time::timeout(Duration::from_secs(10), ws.next())

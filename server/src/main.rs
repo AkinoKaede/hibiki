@@ -2,6 +2,7 @@ mod db;
 mod entities;
 mod service;
 use anyhow::{Context, Result, bail};
+use axum::serve::ListenerExt;
 use clap::{Parser, Subcommand};
 use hibiki_lib::{
     channel::{hash_psk, make_psk},
@@ -201,6 +202,12 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
     eprintln!("hibiki-server listening on {}", listener.local_addr()?);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Relay frames are latency-sensitive, especially during nested PIN inquiries.
+    let listener = listener.tap_io(|stream| {
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::warn!(%error, "could not disable TCP Nagle algorithm");
+        }
+    });
     axum::serve(listener, service.router())
         .with_graceful_shutdown(async move {
             tokio::select! {
