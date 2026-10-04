@@ -12,7 +12,15 @@ jobs:
   smoke:
     # A new stable release emits both events; build it only once.
     if: github.event.action == 'released' || github.event.release.prerelease
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -22,9 +30,10 @@ jobs:
           context: .
           file: server/Dockerfile
           load: true
+          platforms: linux/${{ matrix.arch }}
           tags: hibiki-server:test
-          cache-from: type=gha,scope=server-amd64
-          cache-to: type=gha,mode=max,scope=server-amd64
+          cache-from: type=gha,scope=server-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=server-${{ matrix.arch }}
       - name: Test container health and persistent database
         shell: bash
         run: |
@@ -89,4 +98,6 @@ jobs:
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
-          cache-from: type=gha,scope=server-amd64
+          cache-from: |
+            type=gha,scope=server-amd64
+            type=gha,scope=server-arm64

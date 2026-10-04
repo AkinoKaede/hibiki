@@ -75,8 +75,9 @@ are written to `dist/`.
 
 There are three GitHub Actions workflows:
 
-- **test** runs Rust checks and GnuPG integration tests on Linux and macOS on
-  pushes, pull requests and manual dispatches. iOS CI is currently disabled.
+- **test** runs Rust checks and GnuPG integration tests on both amd64 (x86_64)
+  and arm64 (aarch64), on Linux and macOS, for pushes, pull requests and manual
+  dispatches. iOS CI is currently disabled.
 - **build** builds all four binary targets on pushes and pull requests, and
   uploads the archives as Actions artifacts. To prepare a release, start it from
   Actions → build → Run workflow, select the source branch/tag, enter a `tag`
@@ -86,7 +87,7 @@ There are three GitHub Actions workflows:
   commit; no existing release or tag is overwritten. Use a new version/tag for
   a new draft. No Docker image is built at this stage.
 - **docker** runs only after you publish the draft Release (or promote a
-  prerelease to a full release). It smoke-tests the container and publishes a
+  prerelease to a full release). It smoke-tests the container on native amd64 and arm64 Linux runners and publishes a
   multi-platform `linux/amd64,linux/arm64` image to
   `ghcr.io/OWNER/REPOSITORY/hibiki-server` (owner/repository are lowercase).
   Every image receives a version tag. Full releases update both `latest` and
