@@ -193,7 +193,8 @@ class Mobile:
 
 def main():
     run(['cargo', 'build', '--locked', '--workspace'])
-    run(['cargo', 'build', '--locked', '-p', 'hibiki-mobile', '--example', 'provider'])
+    # Compilation is not a protocol operation; cold CI builds need a separate budget.
+    run(['cargo', 'build', '--locked', '-p', 'hibiki-mobile', '--example', 'provider'], timeout=600)
     with tempfile.TemporaryDirectory(prefix='hi-mobile-', dir='/tmp') as temp:
         root = Path(temp)
         config = root/'server.toml'
