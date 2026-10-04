@@ -1,5 +1,5 @@
 # Build from the repository root: docker build -f server/Dockerfile .
-FROM rust:1.96-bookworm AS builder
+FROM rust:1.96-trixie AS builder
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY lib ./lib
@@ -9,7 +9,7 @@ COPY mobile ./mobile
 COPY server ./server
 RUN cargo build --locked --release -p hibiki-server
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
