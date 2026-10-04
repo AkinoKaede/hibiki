@@ -1,0 +1,1276 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "About": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关于"
+          }
+        }
+      }
+    },
+    "Allow insecure local relay (Debug)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许不加密的本地中继（调试）"
+          }
+        }
+      }
+    },
+    "Approve device": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "批准设备"
+          }
+        }
+      }
+    },
+    "Approved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已批准"
+          }
+        }
+      }
+    },
+    "Authentication": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "认证"
+          }
+        }
+      }
+    },
+    "Availability": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在线时间"
+          }
+        }
+      }
+    },
+    "Cancel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消"
+          }
+        }
+      }
+    },
+    "Card disconnected or request canceled.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "卡已断开或请求已取消。"
+          }
+        }
+      }
+    },
+    "Card reader unavailable. Use a physical device and check permissions.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读卡器不可用。请使用真机并检查权限。"
+          }
+        }
+      }
+    },
+    "Channel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "频道"
+          }
+        }
+      }
+    },
+    "Channel ID": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "频道 ID"
+          }
+        }
+      }
+    },
+    "Channel PSK": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "频道预共享密钥"
+          }
+        }
+      }
+    },
+    "Channel name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "频道名称"
+          }
+        }
+      }
+    },
+    "Channels": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "频道"
+          }
+        }
+      }
+    },
+    "Compare all 24 words and the request ID on the approving device.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请在审批设备上核对全部 24 个校验词及请求 ID。"
+          }
+        }
+      }
+    },
+    "Compare these words on an existing member device before approving.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "审批前，请在现有成员设备上核对这些校验词。"
+          }
+        }
+      }
+    },
+    "Connect only the security key you want to use.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请只连接你要使用的 安全密钥。"
+          }
+        }
+      }
+    },
+    "Connect to your relay": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接到中继"
+          }
+        }
+      }
+    },
+    "Connect your security key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请连接 安全密钥"
+          }
+        }
+      }
+    },
+    "Connect your OpenPGP security key by USB or Lightning, or tap it using NFC.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通过 USB 或 Lightning 连接 OpenPGP 安全密钥，或使用 NFC 轻触读卡。"
+          }
+        }
+      }
+    },
+    "Connecting": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接中"
+          }
+        }
+      }
+    },
+    "Connection": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接"
+          }
+        }
+      }
+    },
+    "Continue": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "继续"
+          }
+        }
+      }
+    },
+    "Copy PSK": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "复制预共享密钥"
+          }
+        }
+      }
+    },
+    "Create a channel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建频道"
+          }
+        }
+      }
+    },
+    "Create channel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建频道"
+          }
+        }
+      }
+    },
+    "Decryption": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "解密"
+          }
+        }
+      }
+    },
+    "Device name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备名称"
+          }
+        }
+      }
+    },
+    "Enter passwords and use your security key for GPG operations on your trusted computers.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入口令，或使用 安全密钥 为受信任电脑上的 GPG 操作提供服务。"
+          }
+        }
+      }
+    },
+    "Generate invitation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生成邀请"
+          }
+        }
+      }
+    },
+    "Get started": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开始使用"
+          }
+        }
+      }
+    },
+    "HIbiki connects while the app is open. Services are off until you enable them.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HIbiki 仅在应用打开时连接。各项服务默认关闭，由你主动启用。"
+          }
+        }
+      }
+    },
+    "HIbiki request": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HIbiki 请求"
+          }
+        }
+      }
+    },
+    "Hold your security key near the top of your iPhone until the operation finishes.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请将 安全密钥 靠近 iPhone 顶部，直到操作完成。"
+          }
+        }
+      }
+    },
+    "I compared all 24 words and the request ID": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我已核对全部 24 个校验词及请求 ID"
+          }
+        }
+      }
+    },
+    "Invalid card response.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "卡返回了无效响应。"
+          }
+        }
+      }
+    },
+    "Invitation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "邀请"
+          }
+        }
+      }
+    },
+    "Join a channel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加入频道"
+          }
+        }
+      }
+    },
+    "Join a trusted device’s channel, or create your own.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加入受信任设备的频道，或创建你自己的频道。"
+          }
+        }
+      }
+    },
+    "Join channel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加入频道"
+          }
+        }
+      }
+    },
+    "Joining device": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "申请设备"
+          }
+        }
+      }
+    },
+    "Keep HIbiki open to receive requests. Returning to the app reconnects without replaying interrupted operations.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保持 HIbiki 打开以接收请求。返回应用后会重新连接，已中断的操作不会自动重试。"
+          }
+        }
+      }
+    },
+    "Leave channel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出频道"
+          }
+        }
+      }
+    },
+    "Leave this channel?": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出该频道？"
+          }
+        }
+      }
+    },
+    "Member": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "成员"
+          }
+        }
+      }
+    },
+    "Members": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "成员"
+          }
+        }
+      }
+    },
+    "NFC: tap once to register public information. For signing or decryption, enter the PIN first, then tap the same security key again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "NFC：轻触一次以登记公开信息。之后签名或解密时，先输入 PIN，再轻触同一把 安全密钥。"
+          }
+        }
+      }
+    },
+    "Name": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "名称"
+          }
+        }
+      }
+    },
+    "No wired card": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未连接有线卡"
+          }
+        }
+      }
+    },
+    "No channels yet": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚无频道"
+          }
+        }
+      }
+    },
+    "No keys on this card": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此卡中没有密钥"
+          }
+        }
+      }
+    },
+    "No pending requests": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无待审批请求"
+          }
+        }
+      }
+    },
+    "Not an active member": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前不是成员"
+          }
+        }
+      }
+    },
+    "OK": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "好"
+          }
+        }
+      }
+    },
+    "Obtain the invitation and PSK separately from a trusted member. The invitation must use your configured relay.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请分别从受信任成员获取邀请和预共享密钥。邀请中的中继地址须与当前配置一致。"
+          }
+        }
+      }
+    },
+    "Offline": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "离线"
+          }
+        }
+      }
+    },
+    "Online": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在线"
+          }
+        }
+      }
+    },
+    "OpenPGP card": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenPGP 卡"
+          }
+        }
+      }
+    },
+    "OpenPGP keys": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenPGP 密钥"
+          }
+        }
+      }
+    },
+    "PIN or passphrase": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PIN 或口令"
+          }
+        }
+      }
+    },
+    "PINs are not saved. Private keys stay on the card or the requesting computer.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不保存 PIN。私钥留在卡中或发起请求的电脑上。"
+          }
+        }
+      }
+    },
+    "Password entry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "口令输入"
+          }
+        }
+      }
+    },
+    "Pending requests": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待审批请求"
+          }
+        }
+      }
+    },
+    "Pending requests will expire. Approved members retain access.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "待审批请求将失效，已批准成员仍保留访问权限。"
+          }
+        }
+      }
+    },
+    "Pre-shared key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "预共享密钥"
+          }
+        }
+      }
+    },
+    "Present one OpenPGP security key.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请只靠近一把 OpenPGP 安全密钥。"
+          }
+        }
+      }
+    },
+    "Private keys remain on your security key.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "私钥始终留在 安全密钥 中。"
+          }
+        }
+      }
+    },
+    "Protocol": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "协议"
+          }
+        }
+      }
+    },
+    "Provide services": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提供服务"
+          }
+        }
+      }
+    },
+    "Public-key verification words": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "公钥校验词"
+          }
+        }
+      }
+    },
+    "Register NFC security key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登记 NFC 安全密钥"
+          }
+        }
+      }
+    },
+    "Register wired security key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登记有线安全密钥"
+          }
+        }
+      }
+    },
+    "Register your security key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登记你的 安全密钥"
+          }
+        }
+      }
+    },
+    "Register your security key in the Security Keys tab.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请先在 安全密钥 页面登记你的卡。"
+          }
+        }
+      }
+    },
+    "Relay": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "中继"
+          }
+        }
+      }
+    },
+    "Request": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求"
+          }
+        }
+      }
+    },
+    "Request ID": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求 ID"
+          }
+        }
+      }
+    },
+    "Request to join": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "申请加入"
+          }
+        }
+      }
+    },
+    "Revoke": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "撤销"
+          }
+        }
+      }
+    },
+    "Revoke this device?": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "撤销此设备？"
+          }
+        }
+      }
+    },
+    "Rotate PSK": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "轮换预共享密钥"
+          }
+        }
+      }
+    },
+    "Rotate channel PSK?": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "轮换频道预共享密钥？"
+          }
+        }
+      }
+    },
+    "Save your PSK": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存预共享密钥"
+          }
+        }
+      }
+    },
+    "Selected card": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已选择的卡"
+          }
+        }
+      }
+    },
+    "Serial number": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "序列号"
+          }
+        }
+      }
+    },
+    "Settings": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置"
+          }
+        }
+      }
+    },
+    "Share invitation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "分享邀请"
+          }
+        }
+      }
+    },
+    "Signing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "签名"
+          }
+        }
+      }
+    },
+    "Status": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状态"
+          }
+        }
+      }
+    },
+    "Store this PSK safely. Share it separately from the invitation; HIbiki does not save it.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请妥善保存预共享密钥，并与邀请分开分享。HIbiki 不会保存此密钥。"
+          }
+        }
+      }
+    },
+    "The entries do not match.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "两次输入不一致。"
+          }
+        }
+      }
+    },
+    "These words identify a public device key. They are not a recovery phrase.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这些词用于标识设备公钥，不是恢复助记词。"
+          }
+        }
+      }
+    },
+    "This device": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本机"
+          }
+        }
+      }
+    },
+    "This identity will no longer be able to rejoin this channel.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此身份将无法重新加入该频道。"
+          }
+        }
+      }
+    },
+    "Wired connection detected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已检测到有线连接"
+          }
+        }
+      }
+    },
+    "Unable to complete": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未能完成"
+          }
+        }
+      }
+    },
+    "Verified requester": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已验证的请求方"
+          }
+        }
+      }
+    },
+    "Waiting for approval": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待审批"
+          }
+        }
+      }
+    },
+    "While app is open": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用打开时"
+          }
+        }
+      }
+    },
+    "Your keys stay with you.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "密钥，始终在你手中。"
+          }
+        }
+      }
+    },
+    "Security Keys": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全密钥"
+          }
+        }
+      }
+    },
+    "Confirmation required for each operation": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每次操作前询问"
+          }
+        }
+      }
+    },
+    "Insert your security key, then continue.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请插入你的安全密钥，然后继续。"
+          }
+        }
+      }
+    },
+    "Use your security key for this operation? Enter the PIN next, then tap the key.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用你的安全密钥完成本次操作？继续后先输入 PIN，再轻触安全密钥。"
+          }
+        }
+      }
+    },
+    "Wired reader reports a card": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有线读卡器检测到卡"
+          }
+        }
+      }
+    },
+    "Registered security keys": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已登记的安全密钥"
+          }
+        }
+      }
+    },
+    "No security keys registered": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未登记安全密钥"
+          }
+        }
+      }
+    },
+    "Register once to save public information. Private keys stay on your security key.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登记后保存公开信息，私钥始终留在安全密钥中。"
+          }
+        }
+      }
+    },
+    "One entry per security key. Wired and NFC connections share the same public information. Only the selected key provides card services.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每张卡只显示一条记录，有线连接 和 NFC 共用公开信息。只有当前选中的卡提供卡服务。"
+          }
+        }
+      }
+    },
+    "Security Key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全密钥"
+          }
+        }
+      }
+    },
+    "Security key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全密钥"
+          }
+        }
+      }
+    },
+    "Read using": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本次读取方式"
+          }
+        }
+      }
+    },
+    "NFC support": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "NFC 支持"
+          }
+        }
+      }
+    },
+    "Wired connection support": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有线连接支持"
+          }
+        }
+      }
+    },
+    "Turn this off if your key does not support the other connection. Registration reads only the current connection; identity is checked again during use.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "如果卡不支持另一种连接方式，请关闭此开关。登记只读取当前连接，实际使用时会再次核对卡身份。"
+          }
+        }
+      }
+    },
+    "Read and register": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取并登记"
+          }
+        }
+      }
+    },
+    "Insert the security key to read its public information. No PIN is required.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请插入安全密钥以读取公开信息，无需 PIN。"
+          }
+        }
+      }
+    },
+    "Tap your security key to read its public information. No PIN is required.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请轻触安全密钥以读取公开信息，无需 PIN。"
+          }
+        }
+      }
+    },
+    "Register security key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登记安全密钥"
+          }
+        }
+      }
+    },
+    "Supported connections": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "支持的连接方式"
+          }
+        }
+      }
+    },
+    "Registration read using": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登记读取方式"
+          }
+        }
+      }
+    },
+    "Use this security key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用这张安全密钥"
+          }
+        }
+      }
+    },
+    "Remove registration": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除登记"
+          }
+        }
+      }
+    },
+    "Remove registration?": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除登记？"
+          }
+        }
+      }
+    },
+    "Only removes this app’s public record. It does not erase keys from the security key.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "只移除本应用保存的公开记录，不会删除卡上的密钥。"
+          }
+        }
+      }
+    },
+    "Wired": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有线连接"
+          }
+        }
+      }
+    },
+    "Wired connections include USB and Lightning.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有线连接包括 USB 和 Lightning。"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

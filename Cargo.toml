@@ -1,5 +1,5 @@
 [workspace]
-members = ["lib", "server", "client"]
+members = ["lib", "server", "client", "core", "mobile"]
 resolver = "2"
 
 [workspace.package]
@@ -9,6 +9,7 @@ rust-version = "1.96"
 
 [workspace.dependencies]
 hibiki-lib = { path = "lib" }
+hibiki-core = { path = "core" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

@@ -162,11 +162,11 @@ def secret_rsa_packets(data):
         result.append({'n':n,'e':e,'d':mpi()})
     return result
 
-def make_card(device):
-    device.gpg('--batch','--pinentry-mode','loopback','--passphrase','','--quick-generate-key','Card Test <card@example.test>','rsa2048','sign','0')
+def make_card(device, algorithm="rsa2048"):
+    device.gpg('--batch','--pinentry-mode','loopback','--passphrase','','--quick-generate-key','Card Test <card@example.test>',algorithm,'sign','0')
     listing=device.gpg('--with-colons','--with-keygrip','--list-secret-keys').stdout.decode()
     fpr=next(l.split(':')[9] for l in listing.splitlines() if l.startswith('fpr:'))
-    device.gpg('--batch','--pinentry-mode','loopback','--passphrase','','--quick-add-key',fpr,'rsa2048','encr','0')
+    device.gpg('--batch','--pinentry-mode','loopback','--passphrase','','--quick-add-key',fpr,algorithm,'encr','0')
     listing=device.gpg('--with-colons','--with-keygrip','--list-secret-keys').stdout.decode().splitlines()
     fingerprints=[l.split(':')[9] for l in listing if l.startswith('fpr:')]
     grips=[l.split(':')[9] for l in listing if l.startswith('grp:')]

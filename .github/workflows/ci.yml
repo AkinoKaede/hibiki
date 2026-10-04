@@ -28,3 +28,26 @@ jobs:
       - run: cargo test --locked --workspace
       - run: cargo build --locked --workspace
       - run: python3 tests/integration.py
+      - run: python3 tests/mobile.py
+
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Swift bindings and universal XCFramework
+        run: ./ios/scripts/build-rust.sh Debug
+      - name: Check generated project
+        run: |
+          python3 ios/scripts/generate-project.py
+          git diff --exit-code -- ios/HIbiki.xcodeproj
+      - name: Build physical device target without signing
+        run: xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki -destination 'generic/platform=iOS' -derivedDataPath ios/build-device CODE_SIGNING_ALLOWED=NO build
+      - name: Run simulator bridge and UI tests
+        run: |
+          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for key,vs in d["devices"].items() if "iOS" in key for v in vs if v["name"].startswith("iPhone")))')
+          xcodebuild -project ios/HIbiki.xcodeproj -scheme HIbiki -destination "platform=iOS Simulator,id=$SIMULATOR_ID" -derivedDataPath ios/build CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES test

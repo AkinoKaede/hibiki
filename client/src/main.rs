@@ -4,7 +4,7 @@ use hibiki::{network::Connection, pairing, storage::App};
 use hibiki_lib::{
     channel::*,
     digest,
-    protocol::{Control, Reply, WireError},
+    protocol::{Control, Reply},
 };
 use std::{io::Write, path::PathBuf, time::Duration};
 
@@ -98,53 +98,7 @@ fn psk(file: Option<PathBuf>, generate: bool) -> Result<(String, bool)> {
         Ok((rpassword::prompt_password("Channel PSK: ")?, false))
     }
 }
-async fn refresh(app: &App, conn: &Connection, id: &str) -> Result<MembershipProof> {
-    let Reply::Proof(proof) = conn
-        .request(Control::GetChannel { channel: id.into() })
-        .await?
-    else {
-        bail!("invalid channel response");
-    };
-    if proof.genesis.body.id != id {
-        bail!("channel response identity mismatch");
-    }
-    app.merge(proof)
-}
-async fn append(
-    app: &App,
-    conn: &Connection,
-    id: &str,
-    action: MembershipAction,
-    verifier: Option<String>,
-) -> Result<()> {
-    for _ in 0..3 {
-        let proof = refresh(app, conn, id).await?;
-        let state = proof.verify()?;
-        state.member(&app.identity.device.id())?;
-        let event = MembershipEvent::create(&app.identity, &state, action.clone())?;
-        match conn
-            .request(Control::Append {
-                event,
-                verifier: verifier.clone(),
-            })
-            .await
-        {
-            Ok(Reply::Proof(proof)) => {
-                app.merge(proof)?;
-                return Ok(());
-            }
-            Err(e)
-                if e.downcast_ref::<WireError>()
-                    .is_some_and(|e| e.code == "conflict") =>
-            {
-                continue;
-            }
-            Err(e) => return Err(e),
-            _ => bail!("invalid append response"),
-        }
-    }
-    bail!("channel changed concurrently; retry the command")
-}
+use hibiki_core::management::{append, refresh};
 
 #[tokio::main]
 async fn main() -> Result<()> {

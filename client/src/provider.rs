@@ -16,9 +16,22 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-#[derive(Default, Clone)]
-pub struct LocalContext {
-    pub display: Option<String>,
+pub use hibiki_core::provider::LocalContext;
+pub struct NativeProvider(pub crate::storage::Config);
+impl hibiki_core::provider::Provider for NativeProvider {
+    fn enabled(&self, service: ServiceKind) -> bool {
+        self.0.service(service).enabled
+    }
+    fn open(
+        &self,
+        app: Arc<App>,
+        service: ServiceKind,
+        card_slot: Arc<Semaphore>,
+        stop: CancellationToken,
+        context: hibiki_core::provider::ProviderContext,
+    ) -> hibiki_core::provider::OpenFuture<'_> {
+        Box::pin(open(app, service, card_slot, stop, context.local))
+    }
 }
 
 pub async fn program(app: &App, service: ServiceKind) -> Result<PathBuf> {

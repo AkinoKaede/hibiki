@@ -13,3 +13,23 @@ identity.bin
 
 # macOS metadata
 .DS_Store
+
+# iOS generated bindings, Rust frameworks, and Xcode user state
+/ios/Generated/
+/ios/Frameworks/
+/ios/build*/
+**/xcuserdata/
+*.xcuserstate
+/ios/DerivedData/
+*.xcresult/
+*.xcarchive/
+*.ipa
+*.dSYM/
+
+# Local Apple signing configuration and credentials
+/ios/Local.xcconfig
+/ios/*.local.xcconfig
+*.p12
+*.p8
+*.mobileprovision
+*.provisionprofile

@@ -6,6 +6,19 @@ For example, laptop A can sign a commit using a card attached to desktop B, with
 
 Each device independently chooses whether to provide card access, password entry, both, or neither. Both services are **disabled by default**. Remote traffic is encrypted end to end through a WebSocket relay.
 
+## iOS app
+
+The SwiftUI app in [`ios/`](ios/README.md) supports iOS 18+, with bundle ID
+`com.akinokaede.hibiki`. It provides native password entry and OpenPGP security key
+access through wired and NFC, using the same Rust protocol and trust core
+as the desktop client. It also manages channel pairing and membership.
+
+The app is online while open. Services start disabled. NFC registration saves
+only public card information. Each private operation asks for confirmation unless
+a wired card is already connected (its identity is verified before using the PIN). PIN entry precedes the NFC
+tap used for signing/decryption. Canceling ends the current operation.
+See the [iOS build, setup, and hardware verification guide](ios/README.md).
+
 ## Requirements and build
 
 - macOS or Linux
@@ -230,6 +243,7 @@ cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo test --locked --workspace
 cargo build --locked --workspace
 python3 tests/integration.py
+python3 tests/mobile.py
 ```
 
 CI runs on Ubuntu 24.04 and macOS. Integration tests use temporary identities and GnuPG homes, controlled stdio Pinentry processes, and an OpenPGP Card emulator. Real GnuPG exercises card learning, RSA signing and decryption, Git signing, password races and retries, cancellation, revocation, disconnects, and process cleanup.

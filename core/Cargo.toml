@@ -1,24 +1,10 @@
 [package]
-name = "hibiki"
+name = "hibiki-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-default-run = "hibiki"
-
-[[bin]]
-name = "hibiki"
-path = "src/main.rs"
-
-[[bin]]
-name = "hibiki-scdaemon"
-path = "src/bin/scdaemon.rs"
-
-[[bin]]
-name = "hibiki-pinentry"
-path = "src/bin/pinentry.rs"
 
 [dependencies]
-hibiki-core.workspace = true
 hibiki-lib.workspace = true
 anyhow.workspace = true
 serde.workspace = true
@@ -27,13 +13,9 @@ tokio.workspace = true
 tokio-util.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
-clap.workspace = true
 tempfile.workspace = true
 fs2.workspace = true
 libc.workspace = true
-rpassword.workspace = true
 url.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-
 zeroize.workspace = true
