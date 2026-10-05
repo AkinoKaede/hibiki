@@ -195,7 +195,7 @@ final class CoreBridgeTests: XCTestCase {
         let second = try MobileClient(directory: directory.path, server: "wss://example.com/hibiki", identity: identity, skipTlsCertificateValidation: false)
         XCTAssertEqual(try first.device().id, try second.device().id)
         XCTAssertEqual(try first.device().words.split(separator: " ").count, 24)
-        XCTAssertNil(first.selectedCard())
+        XCTAssertTrue(first.registeredCards().isEmpty)
         XCTAssertFalse(first.requestIsPending(token: "expired"))
         XCTAssertThrowsError(try first.respond(token: "expired", data: Data("PIN".utf8), accepted: true))
     }

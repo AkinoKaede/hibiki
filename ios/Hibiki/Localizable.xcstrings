@@ -21,7 +21,7 @@
         }
       }
     },
-    "Approve device": {
+    "Approve Device": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -81,7 +81,7 @@
         }
       }
     },
-    "Channel actions": {
+    "Channel Actions": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -101,7 +101,7 @@
         }
       }
     },
-    "Channel name": {
+    "Channel Name": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -213,17 +213,24 @@
         }
       }
     },
-    "Create a channel": {
+    "Create a Channel": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "创建频道"
           }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "建立頻道"
+          }
         }
-      }
+      },
+      "extractionState": "manual"
     },
-    "Create channel": {
+    "Create Channel": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -253,7 +260,7 @@
         }
       }
     },
-    "Finish setup": {
+    "Finish Setup": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -263,7 +270,7 @@
         }
       }
     },
-    "Generate invitation": {
+    "Generate Invitation": {
       "extractionState": "stale",
       "localizations": {
         "zh-Hans": {
@@ -280,7 +287,7 @@
         }
       }
     },
-    "Get started": {
+    "Get Started": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -324,7 +331,7 @@
         }
       }
     },
-    "Invite device": {
+    "Invite Device": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -365,17 +372,24 @@
         }
       }
     },
-    "Join channel": {
+    "Join Channel": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "加入频道"
           }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加入頻道"
+          }
         }
-      }
+      },
+      "extractionState": "manual"
     },
-    "Joining device": {
+    "Joining Device": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -385,7 +399,7 @@
         }
       }
     },
-    "Leave channel": {
+    "Leave Channel": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -435,7 +449,7 @@
         }
       }
     },
-    "NFC support": {
+    "NFC Support": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -456,7 +470,7 @@
         }
       }
     },
-    "No channels yet": {
+    "No Channels Yet": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -466,7 +480,7 @@
         }
       }
     },
-    "No pending requests": {
+    "No Pending Requests": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -476,7 +490,7 @@
         }
       }
     },
-    "No security keys registered": {
+    "No Security Keys Registered": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -486,7 +500,7 @@
         }
       }
     },
-    "Not an active member": {
+    "Not an Active Member": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -526,7 +540,7 @@
         }
       }
     },
-    "OpenPGP card": {
+    "OpenPGP Card": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -536,7 +550,7 @@
         }
       }
     },
-    "OpenPGP keys": {
+    "OpenPGP Keys": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -546,7 +560,7 @@
         }
       }
     },
-    "Pending requests": {
+    "Pending Requests": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -566,7 +580,7 @@
         }
       }
     },
-    "PIN or passphrase": {
+    "PIN or Passphrase": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -576,7 +590,7 @@
         }
       }
     },
-    "Pre-shared key": {
+    "Pre-Shared Key": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -606,7 +620,7 @@
         }
       }
     },
-    "Provide services": {
+    "Provider Services": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -616,7 +630,7 @@
         }
       }
     },
-    "Public-key verification words": {
+    "Public-Key Verification Words": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -626,7 +640,7 @@
         }
       }
     },
-    "Read and register": {
+    "Read and Register": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -646,7 +660,7 @@
         }
       }
     },
-    "Register security key": {
+    "Register Security Key": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -677,7 +691,7 @@
         }
       }
     },
-    "Registered security keys": {
+    "Registered Security Keys": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -687,7 +701,7 @@
         }
       }
     },
-    "Reject request": {
+    "Reject Request": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -717,7 +731,7 @@
         }
       }
     },
-    "Remove registration": {
+    "Remove Registration": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -757,15 +771,22 @@
         }
       }
     },
-    "Request to join": {
+    "Request to Join": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "申请加入"
           }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "申請加入"
+          }
         }
-      }
+      },
+      "extractionState": "manual"
     },
     "Revoke": {
       "localizations": {
@@ -807,22 +828,12 @@
         }
       }
     },
-    "Save your PSK": {
+    "Save Your PSK": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "保存预共享密钥"
-          }
-        }
-      }
-    },
-    "Security key": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "安全密钥"
           }
         }
       }
@@ -847,7 +858,7 @@
         }
       }
     },
-    "Serial number": {
+    "Serial Number": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -867,7 +878,7 @@
         }
       }
     },
-    "Share invitation": {
+    "Share Invitation": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -913,7 +924,7 @@
         }
       }
     },
-    "Supported connections": {
+    "Supported Connections": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -934,7 +945,7 @@
         }
       }
     },
-    "This device": {
+    "This Device": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -955,7 +966,7 @@
         }
       }
     },
-    "Unable to complete": {
+    "Unable to Complete": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -985,7 +996,7 @@
         }
       }
     },
-    "USB connection detected": {
+    "USB Connection Detected": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1005,7 +1016,7 @@
         }
       }
     },
-    "USB connection support": {
+    "USB Connection Support": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1025,7 +1036,7 @@
         }
       }
     },
-    "Verified requester": {
+    "Verified Requester": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1035,7 +1046,7 @@
         }
       }
     },
-    "Waiting for approval": {
+    "Waiting for Approval": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1055,7 +1066,7 @@
         }
       }
     },
-    "Withdraw request": {
+    "Withdraw Request": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1115,7 +1126,7 @@
         }
       }
     },
-    "Connect to your server": {
+    "Connect to Your Server": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1315,7 +1326,7 @@
         }
       }
     },
-    "USB security key detected": {
+    "USB Security Key Detected": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1325,7 +1336,7 @@
         }
       }
     },
-    "No USB security key": {
+    "No USB Security Key": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1489,7 +1500,7 @@
       "comment": "The app name.",
       "isCommentAutoGenerated": true
     },
-    "Hibiki request": {
+    "Hibiki Request": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1529,12 +1540,12 @@
         }
       }
     },
-    "PINEntry": {
+    "Pinentry": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "PINEntry"
+            "value": "Pinentry"
           }
         }
       }
@@ -1559,7 +1570,7 @@
         }
       }
     },
-    "Security key reader": {
+    "Security Key Reader": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1569,7 +1580,7 @@
         }
       }
     },
-    "Security key information": {
+    "Security Key Information": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1579,7 +1590,7 @@
         }
       }
     },
-    "Refresh USB information": {
+    "Refresh USB Information": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1589,7 +1600,7 @@
         }
       }
     },
-    "Read NFC information": {
+    "Read NFC Information": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1639,7 +1650,7 @@
         }
       }
     },
-    "OpenPGP version": {
+    "OpenPGP Version": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1719,7 +1730,7 @@
         }
       }
     },
-    "Edit security key": {
+    "Edit Security Key": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -1779,7 +1790,7 @@
         }
       }
     },
-    "Card number": {
+    "Card Number": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -1796,7 +1807,7 @@
         }
       }
     },
-    "Status unavailable": {
+    "Status Unavailable": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -1847,7 +1858,7 @@
         }
       }
     },
-    "Connection setup": {
+    "Connection Setup": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -1898,7 +1909,7 @@
         }
       }
     },
-    "Timed out": {
+    "Timed Out": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -2000,7 +2011,7 @@
         }
       }
     },
-    "Copy device ID": {
+    "Copy Device ID": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -2017,7 +2028,7 @@
         }
       }
     },
-    "Revoke device": {
+    "Revoke Device": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -2034,7 +2045,7 @@
         }
       }
     },
-    "Device no longer available": {
+    "Device No Longer Available": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -2085,7 +2096,7 @@
         }
       }
     },
-    "Rename device": {
+    "Rename Device": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -2102,7 +2113,7 @@
         }
       }
     },
-    "Device name": {
+    "Device Name": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -2204,7 +2215,7 @@
         }
       }
     },
-    "Approval role": {
+    "Approval Role": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -2221,7 +2232,7 @@
         }
       }
     },
-    "Channel founder": {
+    "Channel Founder": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -2238,7 +2249,7 @@
         }
       }
     },
-    "Outside your approval branch": {
+    "Outside Your Approval Branch": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
@@ -2272,7 +2283,7 @@
         }
       }
     },
-    "Revoke entire approval subtree": {
+    "Revoke Entire Approval Subtree": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -2320,7 +2331,7 @@
         }
       }
     },
-    "Confirm revocation": {
+    "Confirm Revocation": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -2336,7 +2347,7 @@
         }
       }
     },
-    "Review revocation": {
+    "Review Revocation": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -2352,7 +2363,7 @@
         }
       }
     },
-    "Revoked by server": {
+    "Revoked by Server": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -2368,7 +2379,7 @@
         }
       }
     },
-    "Ancestor revocation available": {
+    "Ancestor Revocation Available": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
@@ -2399,6 +2410,74 @@
           }
         }
       }
+    },
+    "Unavailable on This Device": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在本机不可用"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在此裝置上無法使用"
+          }
+        }
+      },
+      "extractionState": "manual"
+    },
+    "Current RTT": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前往返延迟"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目前往返延遲"
+          }
+        }
+      },
+      "extractionState": "manual"
+    },
+    "Ping History": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ping历史"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ping歷史"
+          }
+        }
+      },
+      "extractionState": "manual"
+    },
+    "Reading public information does not register this security key. No PIN needed.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取公开信息不会注册此安全密钥。不需要PIN。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "讀取公開資訊不會註冊此安全金鑰。不需要PIN。"
+          }
+        }
+      },
+      "extractionState": "manual"
     }
   },
   "version": "1.1"

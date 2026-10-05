@@ -7,7 +7,8 @@ final class AppModel {
     var client: MobileClient?
     var device: DeviceInfo?
     var channels: [ChannelInfo] = []
-    var card: CardInfo?
+    private(set) var nfcAvailable: Bool
+    @ObservationIgnored private let readNFCCapability: () -> Bool
     var registeredCards: [RegisteredCard] = []
     var connection = "offline"
     var error: String?
@@ -34,7 +35,9 @@ final class AppModel {
     private let defaults: UserDefaults
     private let resetRelayStorage: () throws -> Void
 
-    init(defaults: UserDefaults = .standard, resetRelayStorage: @escaping () throws -> Void = SecureStorage.resetRelay) {
+    init(defaults: UserDefaults = .standard, resetRelayStorage: @escaping () throws -> Void = SecureStorage.resetRelay, nfcCapability: @escaping () -> Bool = { CardHardware.nfcReadingAvailable }) {
+        self.readNFCCapability = nfcCapability
+        self.nfcAvailable = nfcCapability()
         self.defaults = defaults
         self.resetRelayStorage = resetRelayStorage
         server = defaults.string(forKey: "server") ?? ""
@@ -90,11 +93,16 @@ final class AppModel {
     }
 
     var currentPrompt: PinPrompt? { prompts.first }
-    var selectedUSBSupported: Bool {
-        registeredCards.contains { $0.card.serial == card?.serial && $0.usbEnabled }
+    var usableCards: [RegisteredCard] {
+        registeredCards.filter { $0.usbEnabled || ($0.nfcEnabled && nfcAvailable) }
     }
-    var selectedUSBAvailable: Bool {
-        usbPresent && selectedUSBSupported
+    var usbSupported: Bool { registeredCards.contains { $0.usbEnabled } }
+    var usbAvailable: Bool { usbPresent && usbSupported }
+    var nfcSupported: Bool { nfcAvailable && registeredCards.contains { $0.nfcEnabled } }
+    func refreshHardwareCapabilities() {
+        nfcAvailable = readNFCCapability()
+        cardInspection.setNFCAvailable(nfcAvailable)
+        client?.setNfcAvailable(available: nfcAvailable)
     }
     var statusText: String {
         switch connection {
@@ -189,7 +197,6 @@ final class AppModel {
         channels = []
         rememberPairing(nil)
         allowChannelCreation = nil
-        card = nil
         registeredCards = []
         usbPresent = false
         pinEnabled = false
@@ -208,7 +215,7 @@ final class AppModel {
         let core = try MobileClient(directory: SecureStorage.directory().path, server: server, identity: identity, skipTlsCertificateValidation: skipTLSCertificateValidation)
         client = core
         device = try core.device()
-        card = core.selectedCard()
+        refreshHardwareCapabilities()
         registeredCards = core.registeredCards()
         initialized = true
         core.setServices(pinentry: pinEnabled, card: cardEnabled)
@@ -225,7 +232,8 @@ final class AppModel {
         // NFC and system sheets can make the scene inactive without backgrounding it.
         guard phase != .inactive else { return }
         foreground = phase == .active
-        if !foreground { cardInspection.setActive(false) }
+        if foreground { refreshHardwareCapabilities() }
+        else { cardInspection.setActive(false) }
         guard !disconnecting else { return }
         let previous = lifecycleTask
         lifecycleTask = Task {
@@ -268,7 +276,6 @@ final class AppModel {
     }
     func refresh() async {
         guard let client, foreground else { return }
-        card = client.selectedCard()
         registeredCards = client.registeredCards()
         do {
             let channels = try await client.channels()
@@ -317,13 +324,14 @@ final class AppModel {
         defer { busy = false }
         do {
             guard let client else { return false }
-            _ = try await client.registerCard(transport: transport, name: name, usbSupported: usbSupported, nfcSupported: nfcSupported)
-            card = client.selectedCard()
+            guard transport != .nfc || nfcAvailable else { throw HardwareError.unavailable }
+            _ = try await client.registerCard(transport: transport, name: name, usbSupported: usbSupported, nfcSupported: nfcAvailable && nfcSupported)
             registeredCards = client.registeredCards()
             return true
         } catch { show(error); return false }
     }
     func showCardInspection() {
+        refreshHardwareCapabilities()
         cardInspection.appear(usbPresent: usbPresent, active: foreground) { [weak self] transport in
             guard let core = self?.client else { throw CancellationError() }
             let cancellation = CardReadCancellation()
@@ -338,14 +346,7 @@ final class AppModel {
         busy = true
         defer { busy = false }
         try await client.updateCard(serial: serial, name: name, usbSupported: usbSupported, nfcSupported: nfcSupported)
-        card = client.selectedCard()
         registeredCards = client.registeredCards()
-    }
-    func selectCard(_ serial: String) async {
-        await perform {
-            try await self.client?.selectCard(serial: serial)
-            await self.refresh()
-        }
     }
     func removeCard(_ serial: String) async {
         await perform {
@@ -384,7 +385,7 @@ final class AppModel {
             prompts.removeAll { $0.token == token }
             nativeTasks.removeValue(forKey: token)?.cancel()
             Task { await hardware.cancel(token: token) }
-        case .cardChanged: self.card = core.selectedCard(); registeredCards = core.registeredCards()
+        case .cardChanged: registeredCards = core.registeredCards()
         case .cardClose(let id): Task { await hardware.close(id: id) }
         case .cardOpen(let token, let id, let transport):
             native(token: token, core: core) { try await self.hardware.open(id: id, token: token, transport: transport); return Data() }

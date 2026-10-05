@@ -22,16 +22,20 @@ struct HibikiApp: App {
         if CommandLine.arguments.contains("--ui-pin-fixture") {
             let model = AppModel(defaults: UserDefaults(suiteName: "hibiki-ui-pin-fixture")!)
             model.initialized = true
-            model.prompts = [PinPrompt(token: "ui-pin", session: "ui-session", request: 1, channel: "UI Test Channel", deviceName: "Work Mac", deviceId: String(repeating: "b", count: 64), kind: .pin, title: "Hibiki request", description: "Please enter the PIN for your security key.", label: "PIN", error: "", repeat: "", repeatError: "", ok: "OK", cancel: "", notOk: "", timeoutSeconds: 120)]
+            model.prompts = [PinPrompt(token: "ui-pin", session: "ui-session", request: 1, channel: "UI Test Channel", deviceName: "Work Mac", deviceId: String(repeating: "b", count: 64), kind: .pin, title: "Hibiki Request", description: "Please enter the PIN for your security key.", label: "PIN", error: "", repeat: "", repeatError: "", ok: "OK", cancel: "", notOk: "", timeoutSeconds: 120)]
             return model
         }
         if CommandLine.arguments.contains("--ui-members-fixture") {
-            let model = AppModel(defaults: UserDefaults(suiteName: "hibiki-ui-members-fixture")!)
+            let model = AppModel(defaults: UserDefaults(suiteName: "hibiki-ui-members-fixture")!, nfcCapability: { CommandLine.arguments.contains("--ui-nfc") })
+            let isOnline = CommandLine.arguments.contains("--ui-members-online")
+            if CommandLine.arguments.contains("--ui-cards-fixture") {
+                model.registeredCards = [RegisteredCard(card: CardInfo(serial: "D2760001240103040005000012340000", transport: .usb, keys: []), name: "Fixture Security Key", usbEnabled: true, nfcEnabled: true)]
+            }
             let words = (1...24).map { String(format: "word%02d", $0) }.joined(separator: " ")
-            let local = DeviceInfo(id: String(repeating: "a", count: 64), name: "Fixture iPhone", words: words, online: false, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
-            let remote = DeviceInfo(id: String(repeating: "b", count: 64), name: "Work Mac", words: words, online: false, approvedBy: String(repeating: "d", count: 64), approverName: "Approving Mac", canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
-            let child = DeviceInfo(id: String(repeating: "e", count: 64), name: "Approved laptop", words: words, online: false, approvedBy: local.id, approverName: local.name, canRevoke: true, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [String(repeating: "e", count: 64), String(repeating: "f", count: 64)])
-            let grandchild = DeviceInfo(id: String(repeating: "f", count: 64), name: "Approved tablet", words: words, online: false, approvedBy: child.id, approverName: child.name, canRevoke: true, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [String(repeating: "f", count: 64)])
+            let local = DeviceInfo(id: String(repeating: "a", count: 64), name: "Fixture iPhone", words: words, online: isOnline, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
+            let remote = DeviceInfo(id: String(repeating: "b", count: 64), name: "Work Mac", words: words, online: isOnline, approvedBy: String(repeating: "d", count: 64), approverName: "Approving Mac", canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
+            let child = DeviceInfo(id: String(repeating: "e", count: 64), name: "Approved laptop", words: words, online: isOnline, approvedBy: local.id, approverName: local.name, canRevoke: true, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [String(repeating: "e", count: 64), String(repeating: "f", count: 64)])
+            let grandchild = DeviceInfo(id: String(repeating: "f", count: 64), name: "Approved tablet", words: words, online: isOnline, approvedBy: child.id, approverName: child.name, canRevoke: true, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [String(repeating: "f", count: 64)])
             if CommandLine.arguments.contains("--ui-members-online") { model.connection = "online" }
             model.device = local
             model.channels = [ChannelInfo(id: String(repeating: "c", count: 64), name: "UI Test Channel", active: true, revision: 1, members: [local, remote, child, grandchild])]

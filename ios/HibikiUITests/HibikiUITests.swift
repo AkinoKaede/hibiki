@@ -2,6 +2,74 @@ import XCTest
 
 @MainActor
 final class HibikiUITests: XCTestCase {
+    func testJoinToolbarAndAlignedMemberStatuses() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online"]
+        app.launch()
+        XCTAssertTrue(app.tabBars.buttons["Channels"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Channels"].tap()
+        app.buttons["joinChannel"].tap()
+        XCTAssertTrue(app.navigationBars["Join Channel"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["requestToJoin"].isEnabled)
+        XCTAssertTrue(app.buttons["cancelJoinChannel"].isHittable)
+        app.buttons["cancelJoinChannel"].tap()
+        app.staticTexts["UI Test Channel"].tap()
+        let phone = app.staticTexts["Fixture iPhone"]
+        let mac = app.staticTexts["Work Mac"]
+        XCTAssertTrue(mac.waitForExistence(timeout: 5))
+        XCTAssertEqual(phone.frame.minX, mac.frame.minX, accuracy: 1)
+        XCTAssertTrue(app.staticTexts["This Device"].exists)
+        let list = XCTAttachment(screenshot: app.screenshot())
+        list.name = "Aligned device names and online status"
+        list.lifetime = .keepAlways
+        add(list)
+        app.buttons["channelActions"].tap()
+        app.buttons["inviteDevice"].tap()
+        XCTAssertTrue(app.buttons["cancelInviteDevice"].waitForExistence(timeout: 3))
+        app.buttons["cancelInviteDevice"].tap()
+        XCTAssertTrue(app.staticTexts["Work Mac"].waitForExistence(timeout: 3))
+        app.buttons["member-\(String(repeating: "b", count: 64))"].tap()
+        let status = app.cells.containing(.staticText, identifier: "Status").firstMatch
+        XCTAssertTrue(status.waitForExistence(timeout: 3))
+        XCTAssertLessThan(status.frame.height, 70)
+        XCTAssertTrue(app.staticTexts["Approved by"].exists)
+        XCTAssertTrue(app.buttons["memberPing"].isHittable)
+        let detail = XCTAttachment(screenshot: app.screenshot())
+        detail.name = "Compact online device details"
+        detail.lifetime = .keepAlways
+        add(detail)
+    }
+
+    func testNFCControlsFollowCapabilityAndEditUsesIconActions() {
+        for nfc in [false, true] {
+            let app = XCUIApplication()
+            app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-cards-fixture"] + (nfc ? ["--ui-nfc"] : [])
+            app.launch()
+            XCTAssertTrue(app.tabBars.buttons["Security Keys"].waitForExistence(timeout: 10))
+            app.tabBars.buttons["Security Keys"].tap()
+            XCTAssertEqual(app.segmentedControls["inspectionTransport"].exists, nfc)
+            app.buttons["registerSecurityKey"].tap()
+            XCTAssertTrue(app.buttons["registerUSB"].waitForExistence(timeout: 3))
+            XCTAssertEqual(app.buttons["registerNFC"].exists, nfc)
+            app.buttons["registerUSB"].tap()
+            XCTAssertEqual(app.switches["NFC Support"].exists, nfc)
+            app.navigationBars.buttons.firstMatch.tap()
+            app.staticTexts["Fixture Security Key"].tap()
+            XCTAssertFalse(app.staticTexts["Selected Security Key"].exists)
+            XCTAssertFalse(app.buttons["Use This Security Key"].exists)
+            app.buttons["editSecurityKey"].tap()
+            XCTAssertTrue(app.buttons["saveSecurityKey"].waitForExistence(timeout: 3))
+            XCTAssertEqual(app.switches["securityKeyNFC"].exists, nfc)
+            XCTAssertTrue(app.buttons["Cancel"].isHittable)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = nfc ? "Edit on NFC-capable device" : "Edit on USB-only device"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            app.buttons["Cancel"].tap()
+            app.terminate()
+        }
+    }
+
     func testPINShowsExplicitCancelBelowOKAndKeepsCloseButton() {
         let app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture"]
@@ -33,14 +101,14 @@ final class HibikiUITests: XCTestCase {
         let ping = app.buttons["memberPing"]
         XCTAssertTrue(ping.waitForExistence(timeout: 5))
         XCTAssertFalse(ping.isEnabled)
-        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Status unavailable")).firstMatch.exists)
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Status Unavailable")).firstMatch.exists)
         if !app.staticTexts[id].exists { app.swipeUp() }
         XCTAssertTrue(app.staticTexts[id].exists)
         app.swipeUp()
         if !app.staticTexts["word19 word20 word21 word22 word23 word24"].exists { app.swipeUp() }
         XCTAssertTrue(app.staticTexts["word19 word20 word21 word22 word23 word24"].exists)
-        XCTAssertFalse(app.buttons["Revoke device"].exists)
-        XCTAssertTrue(app.staticTexts["Outside your approval branch"].exists)
+        XCTAssertFalse(app.buttons["Revoke Device"].exists)
+        XCTAssertTrue(app.staticTexts["Outside Your Approval Branch"].exists)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Member details with complete identity"
         screenshot.lifetime = .keepAlways
@@ -59,18 +127,18 @@ final class HibikiUITests: XCTestCase {
         let member = app.buttons["member-\(childID)"]
         XCTAssertTrue(member.waitForExistence(timeout: 5))
         member.tap()
-        for _ in 0..<3 where !app.buttons["Revoke device"].isHittable { app.swipeUp() }
-        app.buttons["Revoke device"].tap()
-        XCTAssertTrue(app.navigationBars["Review revocation"].waitForExistence(timeout: 5))
+        for _ in 0..<3 where !app.buttons["Revoke Device"].isHittable { app.swipeUp() }
+        app.buttons["Revoke Device"].tap()
+        XCTAssertTrue(app.navigationBars["Review Revocation"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts[childID].exists)
         XCTAssertFalse(app.staticTexts[grandchildID].exists)
         app.buttons["Cancel"].tap()
-        app.buttons["Revoke entire approval subtree"].tap()
-        XCTAssertTrue(app.navigationBars["Review revocation"].waitForExistence(timeout: 5))
+        app.buttons["Revoke Entire Approval Subtree"].tap()
+        XCTAssertTrue(app.navigationBars["Review Revocation"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts[childID].exists)
         XCTAssertTrue(app.staticTexts[grandchildID].exists)
         app.buttons["Cancel"].tap()
-        XCTAssertTrue(app.buttons["Revoke device"].exists)
+        XCTAssertTrue(app.buttons["Revoke Device"].exists)
     }
     func testUnreachableRelayStaysOnSetupAfterRestart() {
         let app = XCUIApplication()
@@ -81,7 +149,7 @@ final class HibikiUITests: XCTestCase {
         relay.tap()
         relay.typeText("ws://127.0.0.1:1")
         app.buttons["getStarted"].tap()
-        let alert = app.alerts["Unable to complete"]
+        let alert = app.alerts["Unable to Complete"]
         XCTAssertTrue(alert.waitForExistence(timeout: 20))
         XCTAssertTrue(alert.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Could not connect to the server.")).firstMatch.exists)
         alert.buttons["OK"].tap()

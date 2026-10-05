@@ -1,11 +1,14 @@
 //! Public card registrations, committed atomically as one snapshot.
-use crate::{CardInfo, CardTransport, RegisteredCard};
+#[cfg(test)]
+use crate::CardTransport;
+use crate::{CardInfo, RegisteredCard};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Registry {
     pub cards: Vec<RegisteredCard>,
+    // Retained in the Postcard layout for existing cards.bin snapshots; never used.
     pub selected: Option<String>,
 }
 impl Registry {
@@ -26,7 +29,7 @@ impl Registry {
             },
             card,
         };
-        self.selected = Some(entry.card.serial.clone());
+        self.selected = None;
         if let Some(existing) = self
             .cards
             .iter_mut()
@@ -36,14 +39,6 @@ impl Registry {
         } else {
             self.cards.push(entry);
         }
-    }
-    pub fn select(&mut self, serial: &str) -> Result<()> {
-        self.cards
-            .iter()
-            .find(|c| c.card.serial == serial)
-            .context("card not registered")?;
-        self.selected = Some(serial.into());
-        Ok(())
     }
     pub fn update(&mut self, serial: &str, name: String, usb: bool, nfc: bool) -> Result<()> {
         let name = name.trim();
@@ -61,27 +56,7 @@ impl Registry {
     }
     pub fn remove(&mut self, serial: &str) {
         self.cards.retain(|c| c.card.serial != serial);
-        // Removing the current key never silently selects a different key.
-        if self.selected.as_deref() == Some(serial) {
-            self.selected = None;
-        }
-    }
-    pub fn active(&self) -> Option<&RegisteredCard> {
-        self.cards
-            .iter()
-            .find(|c| Some(&c.card.serial) == self.selected.as_ref())
-    }
-    pub fn provider_card(&self) -> Option<CardInfo> {
-        self.active().map(|c| {
-            let mut info = c.card.clone();
-            // With both modes enabled, disconnected USB falls back to an NFC confirmation.
-            info.transport = if c.nfc_enabled {
-                CardTransport::Nfc
-            } else {
-                CardTransport::Usb
-            };
-            info
-        })
+        self.selected = None;
     }
 }
 #[cfg(test)]
@@ -98,14 +73,14 @@ mod tests {
     fn merges_transports_preserves_other_cards_and_never_switches_on_remove() {
         let mut registry = Registry::default();
         registry.upsert(card("one", CardTransport::Usb), "First".into(), true, true);
-        assert!(registry.active().unwrap().nfc_enabled);
+        assert!(registry.cards[0].nfc_enabled);
         registry.upsert(
             card("two", CardTransport::Nfc),
             "Second".into(),
             false,
             true,
         );
-        assert!(!registry.active().unwrap().usb_enabled);
+        assert!(!registry.cards[1].usb_enabled);
         registry.upsert(
             card("one", CardTransport::Nfc),
             "Updated".into(),
@@ -113,11 +88,8 @@ mod tests {
             true,
         );
         assert_eq!(registry.cards.len(), 2);
-        registry.select("two").unwrap();
         registry.remove("two");
-        assert!(registry.active().is_none());
         assert_eq!(registry.cards.len(), 1);
-        assert!(registry.select("missing").is_err());
         let bytes = hibiki_lib::encode(&registry).unwrap();
         let reopened: Registry = hibiki_lib::decode(&bytes).unwrap();
         assert!(reopened.selected.is_none());
@@ -152,6 +124,9 @@ mod persistence_tests {
         };
         let mut registry = Registry::default();
         registry.upsert(card, "Security Key".into(), true, true);
+        // An old snapshot may contain a selected card. Loading retains all cards,
+        // but the next write clears that obsolete field without changing layout.
+        registry.selected = Some("one".into());
         atomic_write(
             &root.join("data/cards.bin"),
             &hibiki_lib::encode(&registry).unwrap(),
@@ -160,13 +135,18 @@ mod persistence_tests {
         drop(first);
         let registered = open();
         assert_eq!(registered.registered_cards().len(), 1);
-        assert_eq!(registered.selected_card().unwrap().serial, "one");
+        assert_eq!(registered.registered_cards()[0].card.serial, "one");
+        registered
+            .update_card("one".into(), "Renamed".into(), true, true)
+            .await
+            .unwrap();
+        let saved: Registry =
+            hibiki_lib::decode(&std::fs::read(root.join("data/cards.bin")).unwrap()).unwrap();
+        assert!(saved.selected.is_none());
         registered.remove_card("one".into()).await.unwrap();
         drop(registered);
         let reopened = open();
         assert!(reopened.registered_cards().is_empty());
-        assert!(reopened.selected_card().is_none());
-        assert!(reopened.select_card("one".into()).await.is_err());
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
     }

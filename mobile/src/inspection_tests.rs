@@ -1,13 +1,15 @@
 use super::*;
 
 fn client(root: &std::path::Path) -> Arc<MobileClient> {
-    MobileClient::new(
+    let core = MobileClient::new(
         root.join("mobile").to_string_lossy().into(),
         "wss://example.com/hibiki".into(),
         create_identity("inspection test".into()).unwrap(),
         false,
     )
-    .unwrap()
+    .unwrap();
+    core.set_nfc_available(true);
+    core
 }
 
 fn seed(client: &MobileClient) {
@@ -35,7 +37,32 @@ async fn next(client: &MobileClient) -> NativeEvent {
 }
 
 #[tokio::test]
-async fn edits_preserve_selection_public_data_and_persist_connection_changes() {
+async fn unavailable_nfc_cannot_open_native_reader_or_register_a_card() {
+    let root = tempfile::tempdir().unwrap();
+    let core = client(root.path());
+    seed(&core);
+    let before = encode(&core.registered_cards()).unwrap();
+    core.set_nfc_available(false);
+    assert!(
+        core.inspect_card(CardTransport::Nfc, CardReadCancellation::new())
+            .await
+            .is_err()
+    );
+    assert!(
+        core.register_card(CardTransport::Nfc, "new".into(), false, true)
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), core.next_event())
+            .await
+            .is_err()
+    );
+    assert_eq!(encode(&core.registered_cards()).unwrap(), before);
+}
+
+#[tokio::test]
+async fn edits_preserve_all_public_data_and_persist_connection_changes() {
     let root = tempfile::tempdir().unwrap();
     let core = client(root.path());
     seed(&core);
@@ -43,20 +70,20 @@ async fn edits_preserve_selection_public_data_and_persist_connection_changes() {
     core.update_card("first".into(), "  Renamed  ".into(), false, true)
         .await
         .unwrap();
-    assert_eq!(core.selected_card().unwrap().serial, "selected");
+    assert_eq!(core.registered_cards()[1].card.serial, "selected");
     assert_eq!(encode(&core.registered_cards()[0].card).unwrap(), original);
     assert_eq!(core.registered_cards()[0].name, "Renamed");
-    assert!(core.provider.usb_enabled.load(Ordering::Acquire));
+    assert!(core.registered_cards()[1].usb_enabled);
     core.update_card("selected".into(), "USB only".into(), true, false)
         .await
         .unwrap();
-    assert_eq!(core.selected_card().unwrap().transport, CardTransport::Usb);
+    assert!(!core.registered_cards()[1].nfc_enabled);
     core.update_card("selected".into(), "NFC only".into(), false, true)
         .await
         .unwrap();
-    assert!(!core.provider.usb_enabled.load(Ordering::Acquire));
-    assert_eq!(core.selected_card().unwrap().transport, CardTransport::Nfc);
-    let before = read_private(&core.selected_path()).unwrap();
+    assert!(!core.registered_cards()[1].usb_enabled);
+    assert!(core.registered_cards()[1].nfc_enabled);
+    let before = read_private(&core.registry_path()).unwrap();
     for (serial, name, usb, nfc) in [
         ("selected", " \n ", true, true),
         ("selected", "Invalid", false, false),
@@ -67,13 +94,13 @@ async fn edits_preserve_selection_public_data_and_persist_connection_changes() {
                 .await
                 .is_err()
         );
-        assert_eq!(read_private(&core.selected_path()).unwrap(), before);
+        assert_eq!(read_private(&core.registry_path()).unwrap(), before);
     }
     drop(core);
     let reopened = client(root.path());
     assert_eq!(reopened.registered_cards()[0].name, "Renamed");
-    assert_eq!(reopened.selected_card().unwrap().serial, "selected");
-    assert!(!reopened.provider.usb_enabled.load(Ordering::Acquire));
+    assert_eq!(reopened.registered_cards()[1].card.serial, "selected");
+    assert!(!reopened.registered_cards()[1].usb_enabled);
     assert_eq!(reopened.registered_cards()[1].name, "NFC only");
 }
 
@@ -92,11 +119,64 @@ fn application_data() -> Vec<u8> {
 }
 
 #[tokio::test]
+async fn usb_registration_without_nfc_preserves_existing_hidden_capability() {
+    for existing in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let core = client(root.path());
+        core.set_nfc_available(false);
+        if existing {
+            let mut registry = registry::Registry::default();
+            registry.upsert(
+                CardInfo {
+                    serial: "D2760001240103040005000012340000".into(),
+                    transport: CardTransport::Nfc,
+                    keys: vec![],
+                },
+                "Existing".into(),
+                true,
+                true,
+            );
+            core.save_registry(registry).unwrap();
+        }
+        let reader = core.clone();
+        let task = tokio::spawn(async move {
+            reader
+                .register_card(CardTransport::Usb, "Renamed".into(), true, false)
+                .await
+        });
+        loop {
+            match next(&core).await {
+                NativeEvent::CardOpen { token, .. } => {
+                    core.respond(token, vec![], true).unwrap();
+                }
+                NativeEvent::CardTransmit { token, command, .. } => {
+                    let response = match (command[1], command[3]) {
+                        (0xA4, _) => vec![0x90, 0],
+                        (0xCA, 0x6E) => application_data(),
+                        (0xCA, 0x65) => vec![0x6A, 0x88], // Optional cardholder name.
+                        _ => panic!("registration must only read public data"),
+                    };
+                    core.respond(token, response, true).unwrap();
+                }
+                NativeEvent::CardClose { .. } => break,
+                NativeEvent::Cancelled { .. } => {}
+                _ => panic!("unexpected registration event"),
+            }
+        }
+        task.await.unwrap().unwrap();
+        let cards = core.registered_cards();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].nfc_enabled, existing);
+        assert!(cards[0].usb_enabled);
+    }
+}
+
+#[tokio::test]
 async fn inspection_reads_both_interfaces_without_changing_registry_or_requesting_pin() {
     let root = tempfile::tempdir().unwrap();
     let core = client(root.path());
     seed(&core);
-    let before = read_private(&core.selected_path()).unwrap();
+    let before = read_private(&core.registry_path()).unwrap();
     for transport in [CardTransport::Usb, CardTransport::Nfc] {
         let reader = core.clone();
         let mode = transport.clone();
@@ -127,15 +207,15 @@ async fn inspection_reads_both_interfaces_without_changing_registry_or_requestin
                 }
                 NativeEvent::CardClose { .. } => break,
                 NativeEvent::Cancelled { .. } => {}
-                _ => panic!("inspection must not prompt for a PIN or change the selected card"),
+                _ => panic!("inspection must not prompt for a PIN or change registrations"),
             }
         }
         let info = read.await.unwrap().unwrap();
         assert_eq!(info.serial, "D2760001240103040005000012340000");
         assert_eq!(info.transport, transport);
         assert!(info.keys.is_empty());
-        assert_eq!(read_private(&core.selected_path()).unwrap(), before);
-        assert_eq!(core.selected_card().unwrap().serial, "selected");
+        assert_eq!(read_private(&core.registry_path()).unwrap(), before);
+        assert_eq!(core.registered_cards()[1].card.serial, "selected");
         assert_eq!(core.slots.available_permits(), 1);
     }
 }

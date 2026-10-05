@@ -175,7 +175,7 @@ actionlint .github/workflows/build.yml
 3. For member invitations, compare **all 24 public-key words and the request ID**
    on an existing member before approving. The words are public identity data,
    not a recovery phrase. Pending requests remain until approved or invalidated; they have no time limit.
-4. Enable PINEntry and/or OpenPGP Card. Both start disabled. On the
+4. Enable Pinentry and/or OpenPGP Card. Both start disabled. On the
    requesting computer, configure the Hibiki adapters as described in the
    [desktop usage guide](../USAGE.md#4-connect-the-requesting-devices-agent).
    The app can approve members, share invitations, rotate PSKs, revoke
@@ -196,22 +196,31 @@ The OpenPGP application must already contain your keys. Import its public OpenPG
 certificate on the requesting computer. The app does not create or import private
 keys, change PINs, reset the key, or expose remote raw APDU commands.
 
-The registration form shows only the other transport's support switch: **NFC
-support** when reading over a USB connection, or **USB connection support** when reading over NFC. It is
-on by default; turn it off for keys without that interface. This is a declared
-capability, not a claim that the other transport was physically tested.
+The app checks Core NFC availability at launch and whenever it returns to the
+foreground. Devices without NFC tag-reading support show USB controls only: NFC
+reading, registration and editing controls are hidden. Existing NFC settings stay
+saved when hidden; a new USB registration on such a device defaults to USB only.
+An NFC-only registration remains visible as unavailable on that device.
 
-The Security Keys list stores one named entry per OpenPGP card serial, with its
-supported transports and a checkmark on the selected key. Details show public
-keys, fingerprints, keygrips, creation dates and OpenPGP identity details. Registration
-transport history is not displayed or tracked separately. Re-registering the same
-serial updates its record. **Edit** changes the saved name and the independent
-**USB** and **NFC** support switches without reading the physical key. A nonempty
-name and at least one enabled connection are required; Save commits them together,
-and Cancel discards edits. You can explicitly select another card or remove a
-registration; removing the selected card does not automatically select another.
-Only the selected card participates in discovery, and registrations cannot change
-during a card session. Public records and the selection are saved atomically.
+On NFC-capable devices, the registration form shows the other transport's support
+switch: **NFC Support** when reading over USB, or **USB Connection Support** when
+reading over NFC. This is a declared key capability, not proof that the other
+transport was physically tested.
+
+The Security Keys list stores one named entry per OpenPGP card serial. All
+registrations with a transport available on this device participate when OpenPGP
+Card is enabled; there is no persistent selected key. Requests match the card
+serial or key identifier. A matching connected USB card takes precedence. When
+several cards match and USB cannot resolve the target, specify the card serial.
+Each operation retains its prepared card and transport for the session.
+
+Details show public keys, fingerprints, keygrips, creation dates and OpenPGP
+identity details. Re-registering a serial updates its record. The pencil button
+opens **Edit Security Key**: X discards changes, and the checkmark saves the name
+and transport settings together. A nonempty name and at least one configured
+transport are required. Registrations cannot change during a card session.
+Records are saved atomically, and older registrations are retained while their
+obsolete selected-card field is ignored.
 
 The reader at the top of Security Keys defaults to **USB**. Entering the page,
 inserting a USB key, or switching back to USB reads its public information once;
@@ -219,18 +228,17 @@ inserting a USB key, or switching back to USB reads its public information once;
 information** to open the system scanner. NFC results are labeled as snapshots,
 not a persistent connection. Switch back to USB at any time. Leaving the page,
 switching modes or backgrounding cancels an unfinished read. USB removal clears
-its displayed information. Reads never request a PIN, register a key or change
-the selected service key; a busy card reports contention instead of interrupting
+its displayed information. Reads never request a PIN or change registrations; a busy card reports contention instead of interrupting
 an operation.
 
 **USB (including Lightning):** connect the key, then open the **+** menu in Security Keys
 and choose **Register via USB**. Connect
 only one smart card recognized by the system. When USB support is enabled, the USB connection takes precedence even for a key registered over NFC;
 the card identity must still match. If USB is initially absent, you can insert the
-key while confirming the request or entering its PIN. The app checks USB again
-when you submit and chooses the connection after receiving the PIN. For keys
-supporting both interfaces, USB takes precedence if now connected; otherwise,
-tap the key using NFC. This also applies to keys originally registered over USB.
+key while confirming the request. Preparation binds the matching card and
+transport before requesting a PIN. Inserting USB after NFC preparation does not
+switch an operation already in progress. NFC fallback requires both a registered
+NFC-capable key and a device with Core NFC reading available.
 The app never switches interfaces after a card operation fails.
 When already connected, private operations proceed without
 an extra availability prompt. Otherwise, the app asks you to insert it and continue
@@ -328,7 +336,7 @@ Hardware release checklist (must run on an actual iPhone and YubiKey):
 
 - NFC entitlement and permission handling; USB detection and reader contention.
 - Inspect USB information on entry/insertion, cancel an NFC read and switch back
-  to USB, unplug during inspection, and confirm the selected registration is unchanged.
+  to USB, unplug during inspection, and confirm registrations are unchanged.
 - Edit names and USB/NFC support, relaunch to verify persistence, and confirm private
   operations only use enabled connections; reject saving with both switches off.
 - Register, learn public keys, sign/verify, encrypt/decrypt using the installed key
@@ -357,11 +365,17 @@ removes only that request and permits a later new application.
 Tap a row in a channel's Members list to view the device's full ID, online status,
 channel and all 24 verification words. Details follow the grouped peer-information
 layout of sing-box-for-apple's Tailscale views. Ping lives in this detail page and
-shows four encrypted round trips, connection setup time and measurement time.
-Stop or leave the page to cancel its separate session. Offline, revoked and self
+shows a live line chart of the most recent 30 encrypted round trips, current and
+average RTT, connection setup time and measurement time. Start/Stop is in the
+section header. Each round uses a separate diagnostic session, followed by a
+one-second pause. Timeouts leave gaps and are excluded from the average. Stop,
+leave the page or background the app to cancel; starting again clears history. Offline, revoked and self
 devices cannot be pinged. Revoke is a separate destructive confirmation identifying
 the full device ID; refreshed membership cannot redirect it to another member.
 Settings can rename this device without changing its identity or verification words.
+Verification words share a selectable six-word grouping across device, joining,
+approval and Settings screens. Channels has a top-right + to open Join Channel;
+X returns without withdrawing an existing request, and the checkmark submits.
 
 Leave a security-key registration name blank to use its public OpenPGP cardholder
 name (when present), with a serial-based fallback. This is cardholder data, not a

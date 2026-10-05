@@ -1,13 +1,14 @@
 import Foundation
 import Observation
 
-/// Read-only presentation state; never changes the registered or selected card.
+/// Read-only presentation state; never changes registered cards.
 @MainActor @Observable
 final class CardInspection {
     private(set) var transport: CardTransport = .usb
     private(set) var info: CardInfo?
     private(set) var isReading = false
     private(set) var error: String?
+    private var nfcAvailable = false
     private var visible = false
     private var active = true
     private var usbPresent = false
@@ -44,7 +45,13 @@ final class CardInspection {
         if present { refresh() }
     }
 
+    func setNFCAvailable(_ available: Bool) {
+        nfcAvailable = available
+        if !available, transport == .nfc { select(.usb) }
+    }
+
     func select(_ transport: CardTransport) {
+        guard transport != .nfc || nfcAvailable else { return }
         guard self.transport != transport else { return }
         cancel()
         info = nil
@@ -53,7 +60,7 @@ final class CardInspection {
     }
 
     func refresh() {
-        guard visible, active, transport == .nfc || usbPresent, let read else { return }
+        guard visible, active, (transport == .nfc ? nfcAvailable : usbPresent), let read else { return }
         let previous = task
         cancel()
         info = nil

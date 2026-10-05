@@ -28,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
         args.get(3)
             .is_some_and(|arg| arg == "--skip-tls-certificate-validation"),
     )?;
+    client.set_nfc_available(true); // Test harness emulates NFC hardware.
     let event_client = client.clone();
     tokio::spawn(async move {
         while let Some(event) = event_client.next_event().await {
@@ -70,6 +71,25 @@ async fn main() -> anyhow::Result<()> {
 async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
     let text = |name: &str| v[name].as_str().unwrap_or_default().to_string();
     match text("action").as_str() {
+        "nfc_capability" => {
+            client.set_nfc_available(v["available"].as_bool().unwrap_or(false));
+            emit(json!({"kind":"nfc-capability"}));
+        }
+        "update_card" => {
+            client
+                .update_card(
+                    text("serial"),
+                    "Fixture".into(),
+                    v["usb"].as_bool().unwrap_or(false),
+                    v["nfc"].as_bool().unwrap_or(false),
+                )
+                .await?;
+            emit(json!({"kind":"card-updated"}));
+        }
+        "remove_card" => {
+            client.remove_card(text("serial")).await?;
+            emit(json!({"kind":"card-removed"}));
+        }
         "ping" => {
             let report = client
                 .ping_device(

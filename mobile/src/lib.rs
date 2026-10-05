@@ -8,6 +8,7 @@ mod inspection_tests;
 mod keycodec;
 mod pinentry;
 mod provider;
+mod provider_cards;
 mod registry;
 mod types;
 pub use types::*;
@@ -146,16 +147,13 @@ impl MobileClient {
             .filter(|h| !h.connection().closed.is_cancelled())
             .context("relay is offline")
     }
-    fn selected_path(&self) -> PathBuf {
+    fn registry_path(&self) -> PathBuf {
         self.app.paths.data.join("cards.bin")
     }
-    fn save_registry(&self, registry: registry::Registry) -> Result<()> {
-        atomic_write(&self.selected_path(), &encode(&registry)?)?;
-        self.provider.usb_enabled.store(
-            registry.active().is_some_and(|c| c.usb_enabled),
-            Ordering::Release,
-        );
-        *self.provider.card.lock().unwrap() = registry.provider_card();
+    fn save_registry(&self, mut registry: registry::Registry) -> Result<()> {
+        registry.selected = None;
+        atomic_write(&self.registry_path(), &encode(&registry)?)?;
+        *self.provider.cards.lock().unwrap() = registry.cards.clone();
         *self.registry.lock().unwrap() = registry;
         Ok(())
     }
@@ -301,11 +299,7 @@ impl MobileClient {
                 registry::Registry::default()
             };
             let broker = Broker::new();
-            let provider = MobileProvider::new(broker.clone(), registry.provider_card());
-            provider.usb_enabled.store(
-                registry.active().is_some_and(|c| c.usb_enabled),
-                Ordering::Release,
-            );
+            let provider = MobileProvider::new(broker.clone(), registry.cards.clone());
             Ok(Arc::new(Self {
                 app,
                 skip_tls_certificate_validation,
@@ -396,10 +390,20 @@ impl MobileClient {
     pub fn usb_present(&self, present: bool) {
         self.provider.usb_present.store(present, Ordering::Release);
     }
-    pub fn selected_card(&self) -> Option<CardInfo> {
-        self.provider.card.lock().unwrap().clone()
+    /// Host capability, separate from each key's saved transport configuration.
+    pub fn set_nfc_available(&self, available: bool) {
+        let was_available = self
+            .provider
+            .nfc_available
+            .swap(available, Ordering::AcqRel);
+        if was_available
+            && !available
+            && let Some(hub) = self.hub.lock().unwrap().as_ref()
+        {
+            hub.stop_all();
+        }
     }
-    /// Read public information without registering or selecting a card.
+    /// Read public information without changing registrations.
     pub async fn inspect_card(
         &self,
         transport: CardTransport,
@@ -408,6 +412,11 @@ impl MobileClient {
         let result: Result<CardInfo> = async {
             if cancellation.stop.is_cancelled() {
                 return Err(broker::RequestCancelled.into());
+            }
+            if transport == CardTransport::Nfc
+                && !self.provider.nfc_available.load(Ordering::Acquire)
+            {
+                bail!("NFC reading is unavailable on this device");
             }
             let permit = self
                 .slots
@@ -448,6 +457,11 @@ impl MobileClient {
         nfc_supported: bool,
     ) -> MobileResult<CardInfo> {
         let result = async {
+            if transport == CardTransport::Nfc
+                && !self.provider.nfc_available.load(Ordering::Acquire)
+            {
+                bail!("NFC reading is unavailable on this device");
+            }
             if !usb_supported && !nfc_supported {
                 bail!("select at least one supported connection");
             }
@@ -468,6 +482,17 @@ impl MobileClient {
                 name
             };
             let mut registry = self.registry.lock().unwrap().clone();
+            // A hidden NFC switch is not an instruction to erase a saved key
+            // capability. New USB registrations default to NFC off on this host.
+            let nfc_supported = if self.provider.nfc_available.load(Ordering::Acquire) {
+                nfc_supported
+            } else {
+                registry
+                    .cards
+                    .iter()
+                    .find(|c| c.card.serial == info.serial)
+                    .is_some_and(|c| c.nfc_enabled)
+            };
             registry.upsert(info.clone(), name, usb_supported, nfc_supported);
             self.save_registry(registry)?;
             let _ = self
@@ -507,22 +532,6 @@ impl MobileClient {
         }
         .await;
         result.map_err(Into::into)
-    }
-    pub async fn select_card(&self, serial: String) -> MobileResult<()> {
-        let _permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| MobileError::Failed {
-                message: "card is in use".into(),
-            })?;
-        let mut registry = self.registry.lock().unwrap().clone();
-        registry.select(&serial).map_err(MobileError::from)?;
-        self.save_registry(registry).map_err(MobileError::from)?;
-        if let Ok(hub) = self.connected() {
-            let _ = announce(&hub).await;
-        }
-        Ok(())
     }
     pub async fn remove_card(&self, serial: String) -> MobileResult<()> {
         let _permit = self

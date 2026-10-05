@@ -305,6 +305,19 @@ struct CardState {
     preparation: Vec<Line>,
 }
 impl CardState {
+    fn observe_serial(&mut self, command: &str, result: &AssuanResult) {
+        // Inventory responses may contain several cards. Enumerating them must
+        // not silently bind the next private operation to the first one.
+        if !matches!(command, "SERIALNO" | "SWITCHCARD" | "LEARN" | "GETATTR") {
+            return;
+        }
+        if let Some(serial) = result.lines.iter().find_map(|line| {
+            line.strip_prefix(b"S SERIALNO ")
+                .and_then(|value| std::str::from_utf8(value).ok())
+        }) {
+            self.serial = serial.to_owned();
+        }
+    }
     fn remember(&mut self, line: &Line) -> Result<()> {
         let (cmd, args) = assuan::command(line)?;
         if cmd == "SETDATA" {
@@ -534,12 +547,7 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                     pool.query_from(&card_state.public_source, line.clone())
                         .await?
                 };
-                if let Some(serial) = result.lines.iter().find_map(|l| {
-                    l.strip_prefix(b"S SERIALNO ")
-                        .and_then(|v| std::str::from_utf8(v).ok())
-                }) {
-                    card_state.serial = serial.to_owned();
-                }
+                card_state.observe_serial(cmd, &result);
                 if result.success() {
                     card_state.remember(&line)?;
                 }
@@ -592,4 +600,30 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
     stop.cancel();
     reader_task.abort();
     outcome
+}
+
+#[cfg(test)]
+mod card_state_tests {
+    use super::*;
+    #[test]
+    fn enumeration_does_not_select_the_first_registered_card() {
+        let mut state = CardState::default();
+        let inventory = AssuanResult {
+            lines: vec![
+                "S SERIALNO first".into(),
+                "S SERIALNO second".into(),
+                "OK".into(),
+            ],
+        };
+        state.observe_serial("GETINFO", &inventory);
+        assert!(state.serial.is_empty());
+        state.observe_serial(
+            "SWITCHCARD",
+            &AssuanResult {
+                lines: vec!["S SERIALNO second".into(), "OK".into()],
+            },
+        );
+        state.observe_serial("GETINFO", &inventory);
+        assert_eq!(state.serial, "second");
+    }
 }

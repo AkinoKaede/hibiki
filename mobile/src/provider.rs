@@ -1,8 +1,9 @@
 use crate::{
     broker::Broker,
-    card::{self, CardSession},
+    card,
     pinentry::Pinentry,
-    types::{CardInfo, CardTransport, NativeEvent, PinPrompt, PromptKind},
+    provider_cards::{CardSetSession, matches_target, usable},
+    types::{CardInfo, CardTransport, NativeEvent, PinPrompt, PromptKind, RegisteredCard},
 };
 use anyhow::{Context, Result, bail};
 use hibiki_core::{
@@ -15,8 +16,9 @@ use hibiki_lib::{
     protocol::{ServiceKind, SessionInput, SessionOutput},
 };
 use std::{
+    collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -27,23 +29,23 @@ use zeroize::Zeroizing;
 
 pub struct MobileProvider {
     pub broker: Arc<Broker>,
-    pub card: Arc<Mutex<Option<CardInfo>>>,
+    pub cards: Arc<Mutex<Vec<RegisteredCard>>>,
     pub card_enabled: AtomicBool,
     pub pin_enabled: AtomicBool,
     pub usb_present: Arc<AtomicBool>,
-    pub usb_enabled: Arc<AtomicBool>,
-    prepared_transport: Arc<Mutex<Option<CardTransport>>>,
+    pub nfc_available: Arc<AtomicBool>,
+    sessions: Mutex<HashMap<String, Weak<Mutex<Option<CardInfo>>>>>,
 }
 impl MobileProvider {
-    pub fn new(broker: Arc<Broker>, card: Option<CardInfo>) -> Arc<Self> {
+    pub fn new(broker: Arc<Broker>, cards: Vec<RegisteredCard>) -> Arc<Self> {
         Arc::new(Self {
             broker,
-            card: Arc::new(Mutex::new(card)),
+            cards: Arc::new(Mutex::new(cards)),
             card_enabled: AtomicBool::new(false),
             pin_enabled: AtomicBool::new(false),
             usb_present: Arc::new(AtomicBool::new(false)),
-            usb_enabled: Arc::new(AtomicBool::new(true)),
-            prepared_transport: Arc::new(Mutex::new(None)),
+            nfc_available: Arc::new(AtomicBool::new(false)),
+            sessions: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -82,23 +84,34 @@ impl Provider for MobileProvider {
         target: hibiki_lib::protocol::CardTarget,
         context: ProviderContext,
     ) -> Result<Box<dyn hibiki_core::provider::Preparation>> {
-        let card = self.card.clone();
+        let cards = self.cards.clone();
         let broker = self.broker.clone();
-        let usb_enabled = self.usb_enabled.clone();
+        let nfc_available = self.nfc_available.clone();
         let usb_present = self.usb_present.clone();
-        let prepared_transport = self.prepared_transport.clone();
+        let prepared = self
+            .sessions
+            .lock()
+            .unwrap()
+            .get(&context.session)
+            .and_then(Weak::upgrade)
+            .context("card session is closed")?;
         Ok(Box::new(MobilePreparation(Box::pin(async move {
             let stop = CancellationToken::new();
             target.validate()?;
-            *prepared_transport.lock().unwrap() = None;
-            let registered = card
-                .lock()
-                .unwrap()
-                .clone()
-                .filter(|info| matches_target(info, &target));
-            let nfc = registered
-                .as_ref()
-                .is_some_and(|info| info.transport != CardTransport::Usb);
+            *prepared.lock().unwrap() = None;
+            let candidates: Vec<_> = usable(
+                &cards.lock().unwrap(),
+                nfc_available.load(Ordering::Acquire),
+            )
+            .into_iter()
+            .filter(|c| matches_target(&c.card, &target))
+            .collect();
+            if candidates.is_empty() {
+                bail!("no registered card matches this device's available transports");
+            }
+            let registered = (candidates.len() == 1).then(|| &candidates[0]);
+            let nfc =
+                registered.is_some_and(|c| c.nfc_enabled) && nfc_available.load(Ordering::Acquire);
             let state = app.proof(&context.channel)?.verify()?;
             let device = state.member(&context.peer)?;
             let prompt_stop = stop.child_token();
@@ -123,7 +136,7 @@ impl Provider for MobileProvider {
                                 target
                                     .serial
                                     .as_deref()
-                                    .or_else(|| registered.as_ref().map(|c| c.serial.as_str())),
+                                    .or_else(|| registered.map(|c| c.card.serial.as_str())),
                                 None,
                             ),
                             label: String::new(),
@@ -142,44 +155,84 @@ impl Provider for MobileProvider {
             };
             let mut prompt = Box::pin(make_prompt());
             let mut acknowledged = false;
+            let mut prompt_started = false;
             loop {
                 if stop.is_cancelled() {
                     bail!("card preparation canceled");
                 }
-                if usb_enabled.load(Ordering::Acquire) && usb_present.load(Ordering::Acquire) {
-                    let broker = broker.clone();
-                    let token = stop.child_token();
-                    if let Ok(Ok(info)) = tokio::task::spawn_blocking(move || {
-                        card::inspect(broker, token, CardTransport::Usb)
-                    })
-                    .await
-                        && matches_target(&info, &target)
-                    {
-                        *prepared_transport.lock().unwrap() = Some(CardTransport::Usb);
-                        return Ok(info.serial);
-                    }
+                if nfc && !nfc_available.load(Ordering::Acquire) {
+                    bail!("NFC reading is unavailable on this device");
                 }
                 if acknowledged && nfc {
-                    *prepared_transport.lock().unwrap() = Some(CardTransport::Nfc);
-                    return Ok(registered.as_ref().unwrap().serial.clone());
+                    let mut info = registered.unwrap().card.clone();
+                    info.transport = CardTransport::Nfc;
+                    let serial = info.serial.clone();
+                    *prepared.lock().unwrap() = Some(info);
+                    return Ok(serial);
                 }
-                tokio::select! {
-                    _=stop.cancelled()=>bail!("card preparation canceled"),
-                    result=&mut prompt, if !acknowledged=>{
-                        if let Err(error) = result {
-                            // The UI distinguishes leaving this device from explicitly
-                            // canceling the operation, even before a card is inserted.
-                            if error.is::<crate::broker::OperationCancelled>() {
-                                return Err(hibiki_core::provider::PreparationRejected.into());
-                            }
-                            if error.is::<crate::broker::RequestCancelled>() {
-                                return Err(hibiki_core::provider::PreparationDeclined.into());
-                            }
-                            return Err(error);
+                // Once shown, keep polling the prompt while USB detection is in flight.
+                // A ready card must not overtake an already submitted cancellation.
+                prompt_started |= !usb_present.load(Ordering::Acquire);
+                let probe = async {
+                    if candidates.iter().any(|c| c.usb_enabled)
+                        && usb_present.load(Ordering::Acquire)
+                    {
+                        let broker = broker.clone();
+                        let token = stop.child_token();
+                        let _probe_guard = CancelOnDrop(token.clone());
+                        if let Ok(Ok(info)) = tokio::task::spawn_blocking(move || {
+                            card::inspect(broker, token, CardTransport::Usb)
+                        })
+                        .await
+                            && matches_target(&info, &target)
+                            && candidates.iter().any(|c| {
+                                c.usb_enabled
+                                    && c.card.serial.eq_ignore_ascii_case(&info.serial)
+                                    && c.card.keys.iter().all(|key| {
+                                        info.keys.iter().any(|actual| {
+                                            actual.slot == key.slot
+                                                && actual.keygrip == key.keygrip
+                                                && actual.fingerprint == key.fingerprint
+                                        })
+                                    })
+                            })
+                        {
+                            let serial = info.serial.clone();
+                            *prepared.lock().unwrap() = Some(info);
+                            return Some(serial);
                         }
-                        if nfc { acknowledged = true; } else { prompt = Box::pin(make_prompt()); }
-                    },
-                    _=tokio::time::sleep(Duration::from_millis(300))=>{},
+                    }
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    None
+                };
+                tokio::pin!(probe);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _=stop.cancelled()=>bail!("card preparation canceled"),
+                        result=&mut prompt, if !acknowledged && prompt_started && candidates.len() == 1=>{
+                            if let Err(error) = result {
+                                // The UI distinguishes leaving this device from explicitly
+                                // canceling the operation, even before a card is inserted.
+                                if error.is::<crate::broker::OperationCancelled>() {
+                                    return Err(hibiki_core::provider::PreparationRejected.into());
+                                }
+                                if error.is::<crate::broker::RequestCancelled>() {
+                                    return Err(hibiki_core::provider::PreparationDeclined.into());
+                                }
+                                return Err(error);
+                            }
+                            if nfc { acknowledged = true; break; } else { prompt = Box::pin(make_prompt()); }
+                        },
+                        serial=&mut probe=>{
+                            if let Some(serial) = serial { return Ok(serial); }
+                            prompt_started = true;
+                            if candidates.len() > 1 {
+                                bail!("specify a card serial number when multiple cards match");
+                            }
+                            break;
+                        },
+                    }
                 }
             }
         }))))
@@ -201,12 +254,17 @@ impl Provider for MobileProvider {
             } else {
                 None
             };
-            let registry = self.card.clone();
-            let mut card = registry.lock().unwrap().clone().map(CardSession::new);
+            let registry = self.cards.clone();
+            let mut card_set = CardSetSession::new();
             let broker = self.broker.clone();
             let usb_present = self.usb_present.clone();
-            let usb_enabled = self.usb_enabled.clone();
-            let prepared_transport = self.prepared_transport.clone();
+            let nfc_available = self.nfc_available.clone();
+            let prepared = Arc::new(Mutex::new(None));
+            if kind == ServiceKind::Scdaemon {
+                let mut sessions = self.sessions.lock().unwrap();
+                sessions.retain(|_, value| value.strong_count() > 0);
+                sessions.insert(context.session.clone(), Arc::downgrade(&prepared));
+            }
             let (tx, mut inputs) = mpsc::channel(16);
             let (outputs, rx) = mpsc::channel(32);
             let done = CancellationToken::new();
@@ -234,32 +292,26 @@ impl Provider for MobileProvider {
                             )
                         } else {
                             let work = async {
-                                if kind == ServiceKind::Scdaemon && card.is_none() {
-                                    card = registry.lock().unwrap().clone().map(CardSession::new);
-                                }
-                                if let Some(card) =
-                                    card.as_mut().filter(|_| kind == ServiceKind::Scdaemon)
-                                {
+                                if kind == ServiceKind::Scdaemon {
                                     let (cmd, args) = assuan::command(&line)?;
                                     if matches!(cmd, "PKSIGN" | "PKDECRYPT") {
+                                        card_set.prepare_execution(
+                                            prepared.lock().unwrap().clone(),
+                                            &registry.lock().unwrap(),
+                                            nfc_available.load(Ordering::Acquire),
+                                        )?;
+                                        let card = &mut card_set.card;
                                         let key = card.private_key(cmd, args)?;
-                                        let mut info = card.info.clone();
-                                        let connected_usb = usb_enabled.load(Ordering::Acquire)
-                                            && usb_present.load(Ordering::Acquire);
-                                        if !connected_usb
-                                            && card.info.transport == CardTransport::Usb
+                                        let info = card.info.clone();
+                                        if info.transport == CardTransport::Usb
+                                            && !usb_present.load(Ordering::Acquire)
                                         {
                                             bail!("USB card must be connected");
                                         }
                                         let data = card.take_data();
-                                        info.transport = prepared_transport
-                                            .lock()
-                                            .unwrap()
-                                            .clone()
-                                            .context("card preparation required")?;
                                         let description = {
                                             let broker = broker.clone();
-                                            let stop = command_stop.child_token();
+                                            let stop = command_stop.clone();
                                             let info = info.clone();
                                             let key = key.clone();
                                             let signing = cmd == "PKSIGN";
@@ -298,10 +350,16 @@ impl Provider for MobileProvider {
                                         })
                                         .await?
                                     } else {
-                                        card.command(&line)
+                                        if matches!(cmd, "RESET" | "RESTART") {
+                                            *prepared.lock().unwrap() = None;
+                                        }
+                                        let cards = usable(
+                                            &registry.lock().unwrap(),
+                                            nfc_available.load(Ordering::Acquire),
+                                        );
+                                        card_set.bind_if_unbound(prepared.lock().unwrap().clone());
+                                        card_set.command(&cards, &line)
                                     }
-                                } else if kind == ServiceKind::Scdaemon {
-                                    Ok(AssuanResult::error(108, "card not present"))
                                 } else {
                                     pinentry
                                         .command(
@@ -322,6 +380,9 @@ impl Provider for MobileProvider {
                             .await
                             {
                                 Ok(Ok(result)) => result,
+                                Ok(Err(_)) if command_stop.is_cancelled() => {
+                                    card::operation_error(&crate::broker::RequestCancelled.into())
+                                }
                                 Ok(Err(error)) => card::operation_error(&error),
                                 Err(_) => {
                                     command_stop.cancel();
@@ -394,42 +455,15 @@ impl Drop for CancelOnDrop {
     }
 }
 
-fn matches_target(info: &CardInfo, target: &hibiki_lib::protocol::CardTarget) -> bool {
-    if target
-        .serial
-        .as_ref()
-        .is_some_and(|s| !s.eq_ignore_ascii_case(&info.serial))
-    {
-        return false;
-    }
-    target.key.as_ref().is_none_or(|key| {
-        CardSession::new(info.clone())
-            .command(format!("READKEY {key}").as_bytes())
-            .is_ok_and(|r| r.success())
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::CardTransport;
     #[test]
-    fn registered_cards_advertise_only_when_service_enabled() {
-        let provider = MobileProvider::new(
-            Broker::new(),
-            Some(CardInfo {
-                serial: "test".into(),
-                transport: CardTransport::Nfc,
-                keys: vec![],
-            }),
-        );
+    fn services_start_disabled() {
+        let provider = MobileProvider::new(Broker::new(), vec![]);
         assert!(!provider.enabled(ServiceKind::Scdaemon));
+        assert!(!provider.nfc_available.load(Ordering::Acquire));
         provider.card_enabled.store(true, Ordering::Release);
-
-        assert!(provider.enabled(ServiceKind::Scdaemon));
-        provider.card.lock().unwrap().as_mut().unwrap().transport = CardTransport::Usb;
-        assert!(provider.enabled(ServiceKind::Scdaemon));
-        provider.usb_present.store(true, Ordering::Release);
         assert!(provider.enabled(ServiceKind::Scdaemon));
     }
     #[tokio::test]
@@ -444,3 +478,7 @@ mod tests {
         assert!(read_pin(&mut rx, 8).await.is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "cancellation_tests.rs"]
+mod cancellation_tests;

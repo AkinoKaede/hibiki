@@ -6,19 +6,21 @@ struct CardInspectionView: View {
 
     var body: some View {
         Section {
-            Picker("Read using", selection: Binding(get: { inspection.transport }, set: { inspection.select($0) })) {
-                Text("USB").tag(CardTransport.usb)
-                Text("NFC").tag(CardTransport.nfc)
-            }.pickerStyle(.segmented).accessibilityIdentifier("inspectionTransport")
+            if model.nfcAvailable {
+                Picker("Read using", selection: Binding(get: { inspection.transport }, set: { inspection.select($0) })) {
+                    Text("USB").tag(CardTransport.usb)
+                    Text("NFC").tag(CardTransport.nfc)
+                }.pickerStyle(.segmented).accessibilityIdentifier("inspectionTransport")
+            }
             if inspection.transport == .usb {
-                Label(model.usbPresent ? "USB security key detected" : "No USB security key", systemImage: "cable.connector")
+                Label(model.usbPresent ? "USB Security Key Detected" : "No USB Security Key", systemImage: "cable.connector")
                 Text("USB and Lightning connectors are supported.").font(.caption).foregroundStyle(.secondary)
             } else {
                 Label("Tap to read public information using NFC.", systemImage: "wave.3.right")
             }
             Button { inspection.refresh() } label: {
                 HStack {
-                    Text(inspection.transport == .usb ? "Refresh USB information" : "Read NFC information")
+                    Text(inspection.transport == .usb ? "Refresh USB Information" : "Read NFC Information")
                     Spacer()
                     if inspection.isReading { ProgressView() }
                 }
@@ -26,8 +28,8 @@ struct CardInspectionView: View {
             .disabled(model.busy || inspection.isReading || (inspection.transport == .usb && !model.usbPresent))
             .accessibilityIdentifier("readSecurityKeyInfo")
             if let error = inspection.error { Text(verbatim: error).foregroundStyle(.red) }
-        } header: { Text("Security key reader") } footer: {
-            Text("Reading public information does not register or select this security key. No PIN needed.")
+        } header: { Text("Security Key Reader") } footer: {
+            Text("Reading public information does not register this security key. No PIN needed.")
         }
         if let info = inspection.info {
             Section {
@@ -35,12 +37,12 @@ struct CardInspectionView: View {
                     LabeledContent("Name", value: entry.name)
                 }
                 CardIdentityFields(info: info)
-            } header: { Text("Security key information") } footer: {
+            } header: { Text("Security Key Information") } footer: {
                 if inspection.transport == .nfc {
                     Text("NFC snapshot from the last read. The key is not continuously connected.")
                 }
             }
-            Section("OpenPGP keys") { CardPublicKeyRows(keys: info.keys) }
+            Section("OpenPGP Keys") { CardPublicKeyRows(keys: info.keys) }
         }
     }
 }
@@ -52,9 +54,9 @@ struct CardIdentityFields: View {
             Text(verbatim: info.serial).font(.caption.monospaced()).textSelection(.enabled)
         }
         if let identity = OpenPGPIdentity(aid: info.serial) {
-            LabeledContent("Card number", value: identity.manufacturer + " " + identity.serial)
-            LabeledContent("Serial number", value: identity.serial)
-            LabeledContent("OpenPGP version", value: identity.version)
+            LabeledContent("Card Number", value: identity.manufacturer + " " + identity.serial)
+            LabeledContent("Serial Number", value: identity.serial)
+            LabeledContent("OpenPGP Version", value: identity.version)
             LabeledContent("Manufacturer ID", value: identity.manufacturer)
         }
     }
@@ -111,10 +113,10 @@ struct EditRegisteredCardView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Security key") {
+                Section("Security Key") {
                     TextField("Name", text: $name).accessibilityIdentifier("securityKeyName")
                     Toggle("USB", isOn: $usbSupported).accessibilityIdentifier("securityKeyUSB")
-                    Toggle("NFC", isOn: $nfcSupported).accessibilityIdentifier("securityKeyNFC")
+                    if model.nfcAvailable { Toggle("NFC", isOn: $nfcSupported).accessibilityIdentifier("securityKeyNFC") }
                 }.disabled(saving)
                 Section {
                     if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -128,13 +130,13 @@ struct EditRegisteredCardView: View {
                     Text("Choose the connections this key supports. Saving does not read or change the physical key.")
                 }
             }
-            .navigationTitle("Edit security key")
+            .navigationTitle("Edit Security Key")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }.disabled(saving)
+                    Button { dismiss() } label: { Label("Cancel", systemImage: "xmark").labelStyle(.iconOnly) }.disabled(saving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
+                    Button {
                         saving = true
                         error = nil
                         Task {
@@ -148,7 +150,8 @@ struct EditRegisteredCardView: View {
                                 } else { self.error = error.localizedDescription }
                             }
                         }
-                    }.disabled(!valid || saving || model.busy).accessibilityIdentifier("saveSecurityKey")
+                    } label: { Label("Save", systemImage: "checkmark").labelStyle(.iconOnly) }
+                    .disabled(!valid || saving || model.busy).accessibilityIdentifier("saveSecurityKey")
                 }
             }
             .interactiveDismissDisabled(saving)

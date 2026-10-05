@@ -448,6 +448,42 @@ def main():
             mobile.card.info = card
             print('PASS: changed physical card rejected before PIN verification', flush=True)
 
+            # Two registrations may contain the same key. Enumerating their
+            # public data must not bind execution to the first card in the list.
+            a.kill_agent()
+            mobile.send(action='stop'); mobile.wait('stopped')
+            mobile.send(action='start'); mobile.wait('started')
+            second_card = dict(card, serial='D2760001240103040005000088880000')
+            mobile.card = Card(second_card)
+            mobile.send(action='register', present=True); mobile.wait('registered')
+            with Assuan(a, 'scdaemon') as scd:
+                inventory = scd.command(b'GETINFO card_list')
+                assert b'S SERIALNO ' + card['serial'].encode() in inventory, inventory
+                assert b'S SERIALNO ' + second_card['serial'].encode() in inventory, inventory
+                assert scd.command(b'SWITCHCARD ' + second_card['serial'].encode())[-1] == b'OK'
+                assert scd.command(b'SETDATA ' + b'01' * 32)[-1] == b'OK'
+                result = scd.command(b'PKSIGN --hash=sha256 OPENPGP.1', lambda _: [b'D 123456', b'END'])
+                assert result[-1] == b'OK', result
+            a.kill_agent()
+            mobile.send(action='stop'); mobile.wait('stopped')
+            mobile.send(action='update_card', serial=second_card['serial'], usb=False, nfc=True); mobile.wait('card-updated')
+            mobile.send(action='nfc_capability', available=False); mobile.wait('nfc-capability')
+            mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+            mobile.send(action='start'); mobile.wait('started')
+            first_event = len(mobile.operation_events)
+            with Assuan(a, 'scdaemon') as scd:
+                inventory = scd.command(b'GETINFO card_list')
+                assert b'S SERIALNO ' + card['serial'].encode() in inventory, inventory
+                assert b'S SERIALNO ' + second_card['serial'].encode() not in inventory, inventory
+            assert ('open', 'Nfc') not in mobile.operation_events[first_event:]
+            a.kill_agent()
+            mobile.send(action='stop'); mobile.wait('stopped')
+            mobile.send(action='remove_card', serial=second_card['serial']); mobile.wait('card-removed')
+            mobile.send(action='nfc_capability', available=True); mobile.wait('nfc-capability')
+            mobile.card = Card(card)
+            mobile.send(action='start'); mobile.wait('started')
+            print('PASS: multiple mobile registrations route by serial; unavailable NFC cards are excluded', flush=True)
+
             for signing, decryption in [('rsa3072', 'rsa3072'), ('rsa4096', 'rsa4096'), ('ed25519', 'cv25519'), ('nistp256', 'nistp256'), ('nistp384', 'nistp384'), ('nistp521', 'nistp521')]:
                 generator = Device(root, signing, url); devices.append(generator)
                 efpr, epub, ecard = make_card(generator, signing) if signing.startswith("rsa") else make_ecc_card(generator, signing, decryption)
