@@ -361,6 +361,25 @@ fn verified_card(
     Ok(Some(card))
 }
 
+pub enum PrivateResult {
+    Complete {
+        result: AssuanResult,
+        cache_pin: Option<Zeroizing<Vec<u8>>>,
+    },
+    // No VERIFY or private APDU has run. The reader is dropped before prompting.
+    NeedFreshPin(Zeroizing<Vec<u8>>),
+}
+
+pub fn bad_pin(error: &anyhow::Error) -> bool {
+    use openpgp_card::{Error, ocard::StatusBytes};
+    matches!(
+        error.downcast_ref::<Error>(),
+        Some(Error::CardStatus(
+            StatusBytes::PasswordNotChecked(_) | StatusBytes::AuthenticationMethodBlocked
+        ))
+    )
+}
+
 #[allow(clippy::too_many_arguments)] // One immutable, bounded card operation across the blocking boundary.
 pub fn private_operation(
     broker: Arc<Broker>,
@@ -372,7 +391,8 @@ pub fn private_operation(
     mut input: Zeroizing<Vec<u8>>,
     mut pin: Zeroizing<Vec<u8>>,
     nfc_available: bool,
-) -> Result<AssuanResult> {
+    cached_pin: bool,
+) -> Result<PrivateResult> {
     // USB is probed now, even if the last UI presence notification was stale.
     // Keep the verified connection through VERIFY and signing/decryption.
     let mut card = match verified_card(
@@ -388,6 +408,15 @@ pub fn private_operation(
         None => return Err(crate::broker::CardNotPresent.into()),
     };
     let mut tx = card.transaction()?;
+    let cacheable = !(signing
+        && key.slot == 1
+        && tx
+            .application_related_data()?
+            .pw_status_bytes()?
+            .pw1_cds_valid_once());
+    if cached_pin && !cacheable {
+        return Ok(PrivateResult::NeedFreshPin(input));
+    }
     // gpg-agent sends a fixed-size NUL-padded inquiry buffer, not just a terminator.
     if let Some(end) = pin.iter().position(|b| *b == 0) {
         if pin[end..].iter().any(|b| *b != 0) {
@@ -398,6 +427,7 @@ pub fn private_operation(
     if pin.is_empty() || pin.contains(&0) || pin.len() > 127 {
         bail!("invalid PIN length");
     }
+    let cache_pin = cacheable.then(|| pin.clone());
     if tx.extended_capabilities()?.kdf_do() {
         let kdf = tx.kdf_do()?;
         if kdf.kdf_algo() != 0 {
@@ -491,7 +521,7 @@ pub fn private_operation(
     if !signing {
         result.lines.insert(0, "S PADDING 0".into());
     }
-    Ok(result)
+    Ok(PrivateResult::Complete { result, cache_pin })
 }
 pub fn operation_error(error: &anyhow::Error) -> AssuanResult {
     use openpgp_card::{Error, ocard::StatusBytes};

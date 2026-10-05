@@ -6,6 +6,7 @@ mod curves;
 #[cfg(test)]
 mod inspection_tests;
 mod keycodec;
+mod pin_cache;
 mod pinentry;
 mod provider;
 mod provider_cards;
@@ -469,6 +470,9 @@ impl MobileClient {
     pub fn set_services(&self, pinentry: bool, card: bool) {
         let old_pin = self.provider.pin_enabled.swap(pinentry, Ordering::AcqRel);
         let old_card = self.provider.card_enabled.swap(card, Ordering::AcqRel);
+        if old_card && !card {
+            self.provider.pin_cache.clear_all();
+        }
         if ((old_pin && !pinentry) || (old_card && !card))
             && let Some(hub) = self.hub.lock().unwrap().as_ref()
         {

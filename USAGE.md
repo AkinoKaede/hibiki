@@ -492,6 +492,14 @@ backend; explicit RESET or card removal can require PIN entry again. Card polici
 requiring verification for every signature remain in effect. Hibiki adds no
 plaintext PIN cache.
 
+The iOS card provider also negotiates PINCACHE with the requesting agent. It keeps
+only wrapping keys in memory while the agent stores encrypted PINs. USB/NFC
+reconnections and background/foreground transitions preserve reuse; app restart,
+Scdaemon disable, explicit RESET and PIN failures invalidate it as appropriate.
+No disk or Keychain cache is created. GnuPG's ordinary password TTL options do not
+control this special card PIN cache. Card identity checks, VERIFY and touch/PIN
+policies still apply on every private operation.
+
 CLI ID arguments accept unique hexadecimal prefixes of at least **6 characters**:
 channel selectors (including `use` and `--channel`), approval/rejection request IDs,
 revoked device IDs, Ping targets and server channel deletion. Exact channel names

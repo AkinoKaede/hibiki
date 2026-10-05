@@ -242,8 +242,9 @@ the in-memory record; cancellation, errors and mismatches preserve the old recor
 The read has its own cancellation handle, so completing the old CONFIRM does not
 cancel it. Existing Pinentry queuing and system sheet presentation are unchanged.
 
-For signing or decryption, the chosen iOS provider requests the PIN. After the PIN
-reply arrives (from any input device), it probes USB again regardless of the last
+For signing or decryption, the chosen iOS provider obtains the PIN from the
+requesting computer’s agent cache or requests input from any Pinentry device.
+Once the PIN is available, it probes USB again regardless of the last
 presence notification. A matching USB card is used immediately. If absent or a
 different card is connected, Core NFC scans for the target. This also works for a
 USB-discovered target with no registration. The target identity remains fixed:
@@ -252,6 +253,23 @@ the NFC card near the phone until the operation ends. A wrong NFC card fails.
 Reader errors and cancellation stop the operation; they do not trigger fallback.
 Once PIN verification starts, no interface switching or private-operation retry
 occurs. After changing keys on an NFC card, read it again in Status.
+
+Card PIN caching uses GnuPG's `PINCACHE_GET`/`PINCACHE_PUT` protocol. The requesting
+computer's agent holds an encrypted PIN; iOS holds only wrapping keys and validity
+metadata in the card-service instance's memory. No PIN cache is written to disk or
+Keychain. Wrapping keys survive background/foreground transitions, reconnections,
+USB removal and separate NFC scans, but not app termination or client recreation.
+Public queries and `RESTART` preserve them. `RESET` clears entries for the requesting
+device/channel; disabling Scdaemon clears all mobile entries. Bad PIN or PIN blocked
+clears that card's entries without retrying VERIFY. Ordinary password TTL settings
+do not control GnuPG's special card PIN cache.
+
+Cache entries are isolated by provider, channel, requester, card, key and PIN use.
+Every hit still checks the physical identity and verifies the PIN on the same
+connection used for the private operation. A signing card configured to require
+PIN entry every time does not use a signing cache. If this policy changes after a
+PIN was cached, the reader closes before asking for fresh input; NFC may require
+another scan. Touch requirements remain enforced by the card.
 
 The current NFC record describes a public snapshot, not proof that a physical
 key is currently in range. Live mutable fields such as retry counters are not

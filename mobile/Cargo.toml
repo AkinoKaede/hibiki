@@ -27,6 +27,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 zeroize.workspace = true
 hex.workspace = true
+getrandom.workspace = true
+chacha20poly1305 = "0.10.1"
 sha2.workspace = true
 uniffi = { version = "0.32.2", features = ["tokio"] }
 openpgp-card = "0.7.0"

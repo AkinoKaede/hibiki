@@ -28,6 +28,9 @@ class Card:
         self.info = info
         self.verified = False
         self.tries = 3
+        self.password = b'123456'
+        self.force_pin = False
+        self.blocked = False
         self.commands = []
         self.pending = b''
         self.command_data = b''
@@ -62,7 +65,7 @@ class Card:
                 key = self.info['keys'][min(i, len(self.info['keys'])-1)]
                 attr = bytes([1])+int(key['n'], 16).bit_length().to_bytes(2, 'big')+bytes.fromhex('002000') if 'n' in key else bytes([key['algo_id']])+bytes.fromhex(key['oid'])
                 algorithms += tlv('%02X' % (0xC1+i), attr)
-            status = tlv('C4', bytes([1, 127, 127, 127, self.tries, 3, 3]))
+            status = tlv('C4', bytes([0 if self.force_pin else 1, 127, 127, 127, self.tries, 3, 3]))
             prints = tlv('C5', b''.join(bytes.fromhex(k['fingerprint']) for k in self.info['keys']) + b'\0'*20)
             times = tlv('CD', b'\0'*12)
             return aid + historical + tlv('73', caps + algorithms + status + prints + times) + b'\x90\x00'
@@ -88,10 +91,12 @@ class Card:
             self.pending = result[200:]
             return result[:200] + bytes([0x61, min(255, len(self.pending))])
         if ins == 0x20:
-            if data != b'123456':
+            if self.blocked: return b'\x69\x83'
+            if data != self.password:
                 self.tries -= 1
                 return bytes([0x63, 0xC0 | self.tries])
             self.verified = True
+            self.tries = 3
             return b'\x90\x00'
         if ins == 0x2A:
             if not self.verified:
@@ -201,6 +206,8 @@ class Mobile:
                         else:
                             self.send(action='reply', token=token, data=self.password.encode().hex(), accepted=not self.cancel)
                     threading.Timer(self.delay, reply).start()
+                elif kind == 'close':
+                    self.operation_events.append(('close', None))
                 elif kind == 'cancelled':
                     self.card_prompts.discard(event['token'])
                     if event['token'] in self.prompts:
@@ -233,6 +240,113 @@ class Mobile:
         if self.failure: print("Emulator failure:", self.failure, flush=True)
         for stream in (self.p.stdin, self.p.stdout, self.p.stderr):
             stream.close()
+
+
+def pin_cache_scenarios(a, mobile, fpr, card, encrypted):
+    """Real agent caches opaque values; every hit still verifies the physical card."""
+    def sign(prompts):
+        start = len(mobile.operation_events)
+        before = sum(c[0] == 0x20 for c in mobile.card.commands)
+        a.gpg('--local-user', fpr, '--detach-sign', data=b'PIN cache regression')
+        events = mobile.operation_events[start:]
+        assert events.count(('prompt', 'Pin')) == prompts, events
+        assert sum(c[0] == 0x20 for c in mobile.card.commands) == before + 1
+        return events
+
+    def agent(command):
+        run(['gpg-connect-agent', '--homedir', a.native, 'SCD '+command, '/bye'], env=a.env)
+
+    a.kill_agent()
+    sign(1)
+    sign(0)
+    a.gpg('--card-status')
+    agent('RESTART')
+    sign(0)
+    # Independent NFC connections and transport changes retain wrapping keys.
+    mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+    assert ('open', 'Nfc') in sign(0)
+    assert ('open', 'Nfc') in sign(0)
+    mobile.send(action='stop'); mobile.wait('stopped')
+    mobile.send(action='start'); mobile.wait('started')
+    assert ('open', 'Nfc') in sign(0)
+    mobile.send(action='usb_presence', present=True); mobile.wait('usb-presence')
+    assert ('open', 'Nfc') not in sign(0)
+    # Wrong hardware never sees a PIN, even with a valid agent cache hit.
+    wrong = Card(dict(card, serial='D2760001240103040005000099990000'))
+    mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+    # The newly inserted wrong USB card arrives after the last presence report.
+    mobile.usb_present = True
+    mobile.usb_card = wrong
+    assert ('open', 'Nfc') in sign(0)
+    assert not any(c[0] == 0x20 for c in wrong.commands)
+    mobile.usb_card = None
+    mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+    correct_card = mobile.card
+    mobile.card = wrong
+    a.gpg('--local-user', fpr, '--detach-sign', data=b'wrong NFC cache hit', ok=False)
+    assert not any(c[0] == 0x20 for c in wrong.commands)
+    mobile.card = correct_card
+    sign(0)
+    mobile.send(action='usb_presence', present=True); mobile.wait('usb-presence')
+    start = len(mobile.operation_events)
+    assert a.gpg('--decrypt', data=encrypted).stdout == b'mobile decryption'
+    assert a.gpg('--decrypt', data=encrypted).stdout == b'mobile decryption'
+    assert mobile.operation_events[start:].count(('prompt', 'Pin')) == 1
+    # RESET invalidates both signing and decryption; ordinary RESTART does not.
+    agent('RESET')
+    sign(1)
+    start = len(mobile.operation_events)
+    assert a.gpg('--decrypt', data=encrypted).stdout == b'mobile decryption'
+    assert mobile.operation_events[start:].count(('prompt', 'Pin')) == 1
+    # A changed PIN gets exactly one failed VERIFY, then a fresh user prompt.
+    mobile.card.password = b'654321'
+    before = sum(c[0] == 0x20 for c in mobile.card.commands)
+    failed = a.gpg('--local-user', fpr, '--detach-sign', data=b'old cached PIN', ok=False)
+    assert b'Bad PIN' in failed.stderr, failed.stderr
+    assert sum(c[0] == 0x20 for c in mobile.card.commands) == before + 1
+    mobile.password = '654321'
+    sign(1)
+    sign(0)
+    mobile.card.blocked = True
+    before = sum(c[0] == 0x20 for c in mobile.card.commands)
+    failed = a.gpg('--local-user', fpr, '--detach-sign', data=b'blocked card', ok=False)
+    assert b'blocked' in failed.stderr.lower(), failed.stderr
+    assert sum(c[0] == 0x20 for c in mobile.card.commands) == before + 1
+    mobile.card.blocked = False
+    sign(1)
+    # Policy changes must discard a hit before VERIFY and close NFC before input.
+    mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+    mobile.card.force_pin = True
+    events = sign(1)
+    first_nfc = events.index(('open', 'Nfc'))
+    assert events.index(('close', None), first_nfc) < events.index(('prompt', 'Pin')), events
+    sign(1)
+    mobile.card.force_pin = False
+    sign(1)
+    sign(0)
+    mobile.send(action='services', pin=True, card=False); mobile.wait('services')
+    mobile.send(action='services', pin=True, card=True); mobile.wait('services')
+    sign(1)
+    # Misses, corrupted data and an unsupported cache inquiry fall back to NEEDPIN.
+    mobile.send(action='usb_presence', present=True); mobile.wait('usb-presence')
+    for reply in ([b'END'], [b'D invalid-hex', b'END'], [b'CAN']):
+        inquiries = []
+        def answer(line):
+            inquiries.append(line.split()[1])
+            return reply if line.startswith(b'INQUIRE PINCACHE_GET ') else [b'D 654321', b'END']
+        with Assuan(a, 'scdaemon') as scd:
+            assert scd.command(b'SERIALNO')[-1] == b'OK'
+            scd.command(b'SETDATA '+b'01'*32)
+            result = scd.command(b'PKSIGN --hash=sha256 OPENPGP.1', answer)
+            assert result[-1] == b'OK', result[-1]
+            assert inquiries == [b'PINCACHE_GET', b'NEEDPIN'], inquiries
+            put = next(l for l in result if l.startswith(b'S PINCACHE_PUT '))
+            assert len(put.split()[-1]) == 338 and b'654321' not in bytes.fromhex(put.split()[-1].decode())
+    mobile.card.password = b'123456'; mobile.password = '123456'
+    agent('RESET')
+    a.kill_agent()
+    sign(1)
+    print('PASS: mobile PINCACHE through real agent: USB/NFC, background stop/start, RESTART/RESET, Bad PIN, policy changes and unsupported/malformed cache replies', flush=True)
 
 
 def main():
@@ -299,6 +413,8 @@ def main():
             encrypted = a.gpg('--trust-model', 'always', '--recipient', fpr, '--encrypt', data=b'mobile decryption').stdout
             assert a.gpg('--decrypt', data=encrypted).stdout == b'mobile decryption'
             print('PASS: mobile OpenPGP backend via real relay/GnuPG, RSA signature and decryption, split APDU responses', flush=True)
+
+            pin_cache_scenarios(a, mobile, fpr, card, encrypted)
 
             mobile.send(action='stop');mobile.wait('stopped')
             def pending_mobile_operation():

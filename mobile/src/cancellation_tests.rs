@@ -57,6 +57,67 @@ fn fixture() -> (
     };
     (root, client, context, card)
 }
+
+#[tokio::test]
+async fn wrapping_keys_survive_background_stop_but_not_client_recreation_or_disable() {
+    let (_root, client, context, card) = fixture();
+    let scope = Scope::new(
+        &client.app.identity.device.id(),
+        &context,
+        &card,
+        &card.keys[0],
+    );
+    let mut blob = Vec::new();
+    client
+        .provider
+        .pin_cache
+        .publish(
+            client.provider.pin_cache.begin(scope.clone()),
+            b"123456",
+            |line| {
+                blob = line.rsplit(|b| *b == b' ').next().unwrap().to_vec();
+                Ok(())
+            },
+        )
+        .unwrap();
+    client.stop().await;
+    assert!(
+        client
+            .provider
+            .pin_cache
+            .decrypt(&client.provider.pin_cache.begin(scope.clone()), &blob)
+            .is_some()
+    );
+    let replacement = MobileClient::new(
+        client
+            .app
+            .paths
+            .data
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into(),
+        client.app.config.server.clone(),
+        hibiki_lib::encode(client.app.identity.as_ref()).unwrap(),
+        false,
+    )
+    .unwrap();
+    assert!(
+        !replacement
+            .provider
+            .pin_cache
+            .contains(&replacement.provider.pin_cache.begin(scope.clone()))
+    );
+    client.set_services(true, false);
+    client.set_services(true, true);
+    assert!(
+        client
+            .provider
+            .pin_cache
+            .decrypt(&client.provider.pin_cache.begin(scope), &blob)
+            .is_none()
+    );
+}
 async fn next(client: &MobileClient) -> NativeEvent {
     tokio::time::timeout(Duration::from_secs(2), client.broker.next())
         .await
@@ -165,7 +226,12 @@ async fn preparation_cancel_interrupts_pending_usb_probe() {
 
 #[tokio::test]
 async fn private_operation_stops_on_native_cancellation_or_fault_without_fallback() {
-    for transport in [CardTransport::Nfc, CardTransport::Usb] {
+    for (transport, cached) in [
+        (CardTransport::Nfc, false),
+        (CardTransport::Nfc, true),
+        (CardTransport::Usb, false),
+        (CardTransport::Usb, true),
+    ] {
         for (transmit, canceled) in [(false, false), (false, true), (true, false), (true, true)] {
             let (_root, client, context, mut card) = fixture();
             card.transport = transport.clone();
@@ -181,6 +247,27 @@ async fn private_operation_stops_on_native_cancellation_or_fault_without_fallbac
                 )
                 .await
                 .unwrap();
+            let scope = Scope::new(
+                &client.app.identity.device.id(),
+                &context,
+                &card,
+                &card.keys[0],
+            );
+            let mut response = "D 123456".to_owned();
+            if cached {
+                client
+                    .provider
+                    .pin_cache
+                    .publish(client.provider.pin_cache.begin(scope), b"123456", |line| {
+                        response = format!(
+                            "D {}",
+                            std::str::from_utf8(line.rsplit(|b| *b == b' ').next().unwrap())
+                                .unwrap()
+                        );
+                        Ok(())
+                    })
+                    .unwrap();
+            }
             // Bind the same prepared card that the acquisition controller would supply.
             client.provider.sessions.lock().unwrap()[&context.session]
                 .upgrade()
@@ -193,13 +280,18 @@ async fn private_operation_stops_on_native_cancellation_or_fault_without_fallbac
             ep.command("PKSIGN --hash=sha256 OPENPGP.1".into())
                 .await
                 .unwrap();
-            assert!(ep.next().await.unwrap().starts_with(b"INQUIRE NEEDPIN"));
+            let inquiry = ep.next().await.unwrap();
+            assert!(inquiry.starts_with(if cached {
+                b"INQUIRE PINCACHE_GET"
+            } else {
+                b"INQUIRE NEEDPIN"
+            }));
             assert!(
                 tokio::time::timeout(Duration::from_millis(20), client.next_event())
                     .await
                     .is_err()
             );
-            ep.answer("D 123456".into()).await.unwrap();
+            ep.answer(response.as_str().into()).await.unwrap();
             ep.answer("END".into()).await.unwrap();
             let NativeEvent::CardOpen {
                 mut token,

@@ -1,6 +1,7 @@
 use crate::{
     broker::Broker,
     card,
+    pin_cache::{PinCache, Scope},
     pinentry::Pinentry,
     provider_cards::{CardSetSession, matches_target},
     types::{CardInfo, CardTransport, NativeEvent, PinPrompt, PromptKind},
@@ -37,6 +38,7 @@ struct SessionCards {
 
 pub struct MobileProvider {
     pub broker: Arc<Broker>,
+    pub pin_cache: Arc<PinCache>,
     pub nfc_card: Arc<Mutex<Option<CardInfo>>>,
     pub card_enabled: AtomicBool,
     pub pin_enabled: AtomicBool,
@@ -63,6 +65,7 @@ impl MobileProvider {
     pub fn new(broker: Arc<Broker>) -> Arc<Self> {
         Arc::new(Self {
             broker,
+            pin_cache: Arc::new(PinCache::default()),
             nfc_card: Arc::new(Mutex::new(None)),
             card_enabled: AtomicBool::new(true),
             pin_enabled: AtomicBool::new(true),
@@ -246,6 +249,7 @@ impl Provider for MobileProvider {
             let nfc_card = self.nfc_card.clone();
             let mut card_set = CardSetSession::new();
             let broker = self.broker.clone();
+            let pin_cache = self.pin_cache.clone();
             let usb_present = self.usb_present.clone();
             let nfc_available = self.nfc_available.clone();
             let prepared = Arc::new(Mutex::new(SessionCards {
@@ -304,38 +308,30 @@ impl Provider for MobileProvider {
                                         let key = card.private_key(cmd, args)?;
                                         let info = card.info.clone();
                                         let data = card.take_data();
-                                        let description = card::pin_description(&info);
-                                        let description = description
-                                            .replace('%', "%25")
-                                            .replace('\r', "%0D")
-                                            .replace('\n', "%0A");
-                                        send(
-                                            &outputs,
-                                            request,
-                                            format!("INQUIRE NEEDPIN ||{description}")
-                                                .as_str()
-                                                .into(),
-                                        )
-                                        .await?;
-                                        let pin = read_pin(&mut inputs, request).await?;
-                                        let broker = broker.clone();
-                                        let stop = command_stop.clone();
                                         let signing = cmd == "PKSIGN";
                                         let hash = args
                                             .split_ascii_whitespace()
                                             .find_map(|a| a.strip_prefix("--hash="))
                                             .unwrap_or("sha1")
                                             .to_owned();
-                                        let nfc = nfc_available.load(Ordering::Acquire);
-                                        let hardware_permit = _permit.clone();
-                                        tokio::task::spawn_blocking(move || {
-                                            let _hardware_permit = hardware_permit;
-                                            card::private_operation(
-                                                broker, stop, info, key, signing, hash, data, pin,
-                                                nfc,
-                                            )
-                                        })
-                                        .await?
+                                        private_with_cache(
+                                            &pin_cache,
+                                            &app.identity.device.id(),
+                                            &context,
+                                            &outputs,
+                                            &mut inputs,
+                                            request,
+                                            broker.clone(),
+                                            command_stop.clone(),
+                                            info,
+                                            key,
+                                            signing,
+                                            hash,
+                                            data,
+                                            nfc_available.load(Ordering::Acquire),
+                                            _permit.clone(),
+                                        )
+                                        .await
                                     } else if cmd == "SERIALNO" {
                                         let card = {
                                             let card = nfc_card.lock().unwrap();
@@ -370,6 +366,11 @@ impl Provider for MobileProvider {
                                             )),
                                         }
                                     } else {
+                                        if cmd == "RESET" {
+                                            for status in pin_cache.clear_context(&context) {
+                                                send(&outputs, request, status).await?;
+                                            }
+                                        }
                                         if matches!(cmd, "RESET" | "RESTART") {
                                             *prepared.lock().unwrap() = SessionCards {
                                                 stop: cancel.clone(),
@@ -573,11 +574,146 @@ async fn send(outputs: &mpsc::Sender<SessionOutput>, request: u64, line: Line) -
     outputs.send(SessionOutput::Line { request, line }).await?;
     Ok(())
 }
+#[allow(clippy::too_many_arguments)] // One bounded private command and its Assuan channel.
+async fn private_with_cache(
+    cache: &Arc<PinCache>,
+    provider: &str,
+    context: &ProviderContext,
+    outputs: &mpsc::Sender<SessionOutput>,
+    inputs: &mut mpsc::Receiver<SessionInput>,
+    request: u64,
+    broker: Arc<Broker>,
+    stop: CancellationToken,
+    info: CardInfo,
+    key: crate::types::CardKey,
+    signing: bool,
+    hash: String,
+    mut data: Zeroizing<Vec<u8>>,
+    nfc: bool,
+    permit: Option<Arc<OwnedSemaphorePermit>>,
+) -> Result<AssuanResult> {
+    let scope = Scope::new(provider, context, &info, &key);
+    let mut ticket = cache.begin(scope.clone());
+    let mut cached = None;
+    if cache.contains(&ticket) {
+        send(
+            outputs,
+            request,
+            format!("INQUIRE PINCACHE_GET {}", scope.id).as_str().into(),
+        )
+        .await?;
+        // GnuPG uses CAN for an unsupported cache inquiry. This is distinct
+        // from cancellation of the operation/session, which still wins below.
+        if let Some(value) = read_inquiry(inputs, request, 512).await? {
+            cached = cache.decrypt(&ticket, &value);
+        }
+    }
+    loop {
+        if stop.is_cancelled() {
+            return Err(crate::broker::RequestCancelled.into());
+        }
+        let using_cache = cached.is_some();
+        let pin = if let Some(pin) = cached.take() {
+            pin
+        } else {
+            let description = card::pin_description(&info)
+                .replace('%', "%25")
+                .replace('\r', "%0D")
+                .replace('\n', "%0A");
+            send(
+                outputs,
+                request,
+                format!("INQUIRE NEEDPIN ||{description}").as_str().into(),
+            )
+            .await?;
+            read_pin(inputs, request).await?
+        };
+        if stop.is_cancelled() {
+            return Err(crate::broker::RequestCancelled.into());
+        }
+        let work_broker = broker.clone();
+        let work_stop = stop.clone();
+        let work_info = info.clone();
+        let work_key = key.clone();
+        let work_hash = hash.clone();
+        let work_permit = permit.clone();
+        let work_cache = cache.clone();
+        let work_scope = scope.clone();
+        let (outcome, invalidations) = tokio::task::spawn_blocking(move || {
+            let _permit = work_permit;
+            let outcome = card::private_operation(
+                work_broker,
+                work_stop,
+                work_info,
+                work_key,
+                signing,
+                work_hash,
+                data,
+                pin,
+                nfc,
+                using_cache,
+            );
+            // Invalidate even if timeout/cancellation has dropped the async waiter.
+            let invalidations = if outcome.as_ref().err().is_some_and(card::bad_pin) {
+                work_cache.clear_card(&work_scope)
+            } else {
+                Vec::new()
+            };
+            (outcome, invalidations)
+        })
+        .await?;
+        if stop.is_cancelled() {
+            return Err(crate::broker::RequestCancelled.into());
+        }
+        for status in invalidations {
+            send(outputs, request, status).await?;
+        }
+        match outcome {
+            Ok(card::PrivateResult::NeedFreshPin(input)) => {
+                for status in cache.clear_entry(&scope) {
+                    send(outputs, request, status).await?;
+                }
+                ticket = cache.begin(scope.clone());
+                data = input;
+                // The blocking task has dropped its reader. Prompt before reopening.
+            }
+            Ok(card::PrivateResult::Complete { result, cache_pin }) => {
+                if let Some(pin) = cache_pin {
+                    // Cache failures must never turn a completed private operation
+                    // into an error (and thereby invite a duplicate signature).
+                    let _ = cache.publish(ticket, &pin, |line| {
+                        if stop.is_cancelled() {
+                            return Err(crate::broker::RequestCancelled.into());
+                        }
+                        outputs.try_send(SessionOutput::Line { request, line })?;
+                        Ok(())
+                    });
+                } else {
+                    for status in cache.clear_entry(&scope) {
+                        send(outputs, request, status).await?;
+                    }
+                }
+                return Ok(result);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 async fn read_pin(
     inputs: &mut mpsc::Receiver<SessionInput>,
     request: u64,
 ) -> Result<Zeroizing<Vec<u8>>> {
-    let mut bytes = Zeroizing::new(Vec::with_capacity(128));
+    read_inquiry(inputs, request, 128)
+        .await?
+        .ok_or_else(|| crate::broker::RequestCancelled.into())
+}
+async fn read_inquiry(
+    inputs: &mut mpsc::Receiver<SessionInput>,
+    request: u64,
+    limit: usize,
+) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    let mut bytes = Zeroizing::new(Vec::with_capacity(limit));
     let mut lines = 0;
     loop {
         let Some(SessionInput::InquiryReply { request: id, line }) = inputs.recv().await else {
@@ -591,16 +727,16 @@ async fn read_pin(
             bail!("PIN inquiry limit");
         }
         if &*line == b"END" {
-            return Ok(bytes);
+            return Ok(Some(bytes));
         }
         if &*line == b"CAN" {
-            return Err(crate::broker::RequestCancelled.into());
+            return Ok(None);
         }
         let assuan::Response::Data(raw) = assuan::parse_response(&line)? else {
             bail!("invalid PIN inquiry response")
         };
-        let decoded = assuan::unescape(raw)?;
-        if bytes.len() + decoded.len() > 128 {
+        let decoded = Zeroizing::new(assuan::unescape(raw)?);
+        if bytes.len() + decoded.len() > limit {
             bail!("PIN length limit");
         }
         bytes.extend_from_slice(&decoded);
@@ -641,6 +777,48 @@ mod tests {
         .await
         .unwrap();
         assert!(read_pin(&mut rx, 8).await.is_err());
+    }
+    #[tokio::test]
+    async fn inquiry_limits_and_cache_can_are_distinct_from_pin_cancel() {
+        for (limit, size, valid) in [
+            (128, 128, true),
+            (128, 129, false),
+            (512, 512, true),
+            (512, 513, false),
+        ] {
+            let (tx, mut rx) = mpsc::channel(16);
+            for line in assuan::data_lines(&vec![b'x'; size])
+                .into_iter()
+                .chain(["END".into()])
+            {
+                tx.send(SessionInput::InquiryReply { request: 1, line })
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(read_inquiry(&mut rx, 1, limit).await.is_ok(), valid);
+        }
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(SessionInput::InquiryReply {
+            request: 1,
+            line: "CAN".into(),
+        })
+        .await
+        .unwrap();
+        assert!(read_inquiry(&mut rx, 1, 512).await.unwrap().is_none());
+        tx.send(SessionInput::InquiryReply {
+            request: 1,
+            line: "CAN".into(),
+        })
+        .await
+        .unwrap();
+        assert!(
+            read_pin(&mut rx, 1)
+                .await
+                .unwrap_err()
+                .is::<crate::broker::RequestCancelled>()
+        );
+        drop(tx);
+        assert!(read_inquiry(&mut rx, 1, 512).await.is_err());
     }
 }
 

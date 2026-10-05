@@ -19,6 +19,15 @@ Opening a scdaemon session and ordinary public discovery no longer create insert
 
 iOS Members now opens device details with complete identity, words, status, Ping and an explicit revocation confirmation. Settings can rename this device. Security-key registration uses the cardholder name by default when available; a complete AID remains the identity used for card matching. USB cards no longer require registration. NFC registration only reads NFC and edits the name; connection switches are removed. Existing NFC-enabled entries migrate to `nfc-cards.bin`, while USB-only entries and the obsolete stored selection are discarded. Selected NFC cards skip additional consent. After PIN entry, iOS checks actual USB first, then scans NFC if the target is absent, including for unregistered USB-discovered cards. Wrong cards never receive a PIN. Reader faults, cancellation and Bad PIN never trigger an operation retry.
 
+The iOS card provider now supports GnuPG PINCACHE without a wire protocol or storage
+migration. The requesting agent holds encrypted PINs; mobile wrapping keys stay
+in memory across background/foreground transitions and USB/NFC reconnects, and
+are lost on app/client restart. RESET, disabling the card service and PIN errors
+invalidate the relevant entries; RESTART and public discovery preserve them.
+Per-signature PIN entry policies still apply. Neither PINs nor wrapping keys are
+persisted to disk or Keychain, and ordinary password TTL options do not govern
+GnuPG's special PINCACHE entries.
+
 ## Reproducible performance check
 
 Run `python3 tests/performance.py` after building. It uses isolated software cards and a TCP delay proxy, adding half of the configured RTT on each requester-link direction. Each established public query must emit exactly one request and one result message; five queries are the stable CI gate. Timings include process scheduling and emulator work and are reports, not portable pass thresholds. Cold means a fresh adapter/candidate session with already running daemons, not a cold OS cache.
