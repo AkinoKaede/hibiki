@@ -22,7 +22,7 @@ provide card access and password input over end-to-end encrypted sessions.
 | [`core/`](core/) (`hibiki-core`) | Shared desktop/mobile transport, trust storage, channel management, peer sessions, and operation lifecycle |
 | [`client/`](client/) (`hibiki`) | Desktop CLI and daemon, local IPC, diagnostics, and native scdaemon/Pinentry providers |
 | `hibiki-scdaemon` / `hibiki-pinentry` | Stdio adapters started by the requesting machine's `gpg-agent`; connect to the local daemon |
-| [`server/`](server/) (`hibiki-server`) | Device authentication, channel admission, SQLite persistence, operation metadata, and encrypted WebSocket relay |
+| [`server/`](server/) (`hibiki-server`) | Device authentication, channel admission, SQLite persistence, operation metadata, and encrypted WebSocket forwarding |
 | [`mobile/`](mobile/) (`hibiki-mobile`) | UniFFI bridge, mobile password requests, OpenPGP card operations, and public card registry |
 | [`ios/`](ios/README.md) | SwiftUI interface, Keychain storage, CryptoTokenKit wired access, and Core NFC access |
 
@@ -64,7 +64,7 @@ verifies the target identity before sending the PIN. See the
 ## Channels and admission
 
 A channel is the membership and service-sharing boundary. Channel creation is
-reserved for the relay administrator by default. The administrator issues a
+reserved for the server administrator by default. The administrator issues a
 single-use initialization invitation containing its own random key; the first device claims
 the channel without existing-member approval. Later devices use member invitations,
 consume an independent invitation key, and wait for an active member to approve their identity.
@@ -80,7 +80,7 @@ See [channel administration](USAGE.md#channel-administration) for commands.
 
 ## Session behavior and limits
 
-**Card access.** Each adapter owns a persistent pool of scdaemon candidates. Enabled backends start even without a card. Opening a session and ordinary public discovery do not start insertion prompts. On iOS, `SERIALNO` probes USB first, then reports the user’s volatile NFC selection, or returns card-not-present. `SERIALNO --demand` probes for the requested USB card, uses a matching NFC selection, or asks for confirmation if that specific card is registered for NFC. It never prompts for an unknown or USB-only absent target. `PKSIGN`/`PKDECRYPT` starts physical preparation for the selected target. Each public discovery queries every candidate once. An offline or disabled device ends its participation in that round immediately; native errors are preserved while other online devices can still succeed. A targeted `KEYINFO` searches every device even if `SERIALNO` previously found an unrelated card. No-card results return to gpg-agent, which generates the numbered insertion `CONFIRM` from its shadow key. A new confirmation starts another discovery. Background reconnection permits later requests without holding the current query open. Local startup never waits for a relay request. Metadata sources and private executors are separate: a registered iOS public key does not dismiss desktop insertion prompts.
+**Card access.** Each adapter owns a persistent pool of scdaemon candidates. Enabled backends start even without a card. Opening a session and ordinary public discovery do not start insertion prompts. On iOS, `SERIALNO` probes USB first, then reports the user’s volatile NFC selection, or returns card-not-present. `SERIALNO --demand` probes for the requested USB card, uses a matching NFC selection, or asks for confirmation if that specific card is registered for NFC. It never prompts for an unknown or USB-only absent target. `PKSIGN`/`PKDECRYPT` starts physical preparation for the selected target. Each public discovery queries every candidate once. An offline or disabled device ends its participation in that round immediately; native errors are preserved while other online devices can still succeed. A targeted `KEYINFO` searches every device even if `SERIALNO` previously found an unrelated card. No-card results return to gpg-agent, which generates the numbered insertion `CONFIRM` from its shadow key. A new confirmation starts another discovery. Background reconnection permits later requests without holding the current query open. Local startup never waits for a server request. Metadata sources and private executors are separate: a registered iOS public key does not dismiss desktop insertion prompts.
 
 Desktop readiness requires the actual target card/key. Insertion prompts require a known target serial number; a target without one is probed silently until it can be identified. Insertion prompts use native Pinentry `CONFIRM` independently of the exported password service. Public metadata queries pause card probing without closing or recreating an unanswered insertion prompt. Confirming without the matching card repeats the prompt; desktop Pinentry Cancel cancels the entire operation; RESET/RESTART or a new adapter session permits another attempt. On iOS, × is the only cancel control and cancels the entire operation regardless of USB presence. Public queries and target refinement cannot resurrect a rejected operation. The iOS Status page and Pinentry `CONFIRM` sheet share one optional NFC selection. It defaults to none, is not persisted, and skips additional NFC consent for that target without replacing physical verification. Selecting a card inside gpg-agent’s insertion confirmation lets its next ordinary `SERIALNO` discover that card. PIN entry cannot change the selection. On iOS, USB discovery supplies live public metadata without registration. Selected NFC cards and demand-confirmed NFC targets proceed to PIN entry without another confirmation. Once the PIN reply arrives, the chosen provider probes USB regardless of cached presence, then opens NFC only if USB has no matching card and the device supports NFC. This fallback does not require registration for a USB-discovered target. Serial, slot, keygrip and fingerprint are checked before PIN VERIFY on the same connection used for the private operation. Reader errors, cancellation and Bad PIN are terminal; no fallback occurs after verification starts.
 
@@ -95,17 +95,17 @@ The native agent or card validates the password. A retry starts a new race; Hibi
 - In `--multi-server` mode, `GETINFO socket_name` advertises the adapter's local socket, with a separate daemon session for each connection. The socket uses mode 0600 in a private 0700 runtime directory; the primary pipe owns its lifetime and closes all secondary sessions on exit. Plain stdio mode still returns no socket. Native provider sockets are never forwarded, and each card provider retains its exclusive session limit.
 - Card discovery, public-key reading, signing, and decryption are supported. PIN changes, key writing, key generation, and raw APDU commands are rejected on both ends.
 - Each active command has a 120-second default timeout, configurable from 1 to 3600 seconds. Idle time does not consume the next command's deadline.
-- Caller exit, timeout, revocation, or channel deletion cancels pending work and closes affected backends. Offline password providers can join a waiting input operation before its original deadline; the first success cancels every other queued copy. Relay reconnection preserves live callers and uses new encrypted sessions.
+- Caller exit, timeout, revocation, or channel deletion cancels pending work and closes affected backends. Offline password providers can join a waiting input operation before its original deadline; the first success cancels every other queued copy. Server reconnection preserves live callers and uses new encrypted sessions.
 - An execution claim is durable: if execution started and its result was lost, Hibiki reports failure/unknown result and never automatically repeats the private command. Reselection requires an explicit new card selection or reset.
-- The relay persists operation IDs, deadlines, targets, and execution states, not PINs, plaintext command data, or results. Queue limits are 128 operations per caller or target and 4096 in total. Pending work survives a relay restart only when the live caller resumes it; restarting the caller daemon does not restore vanished calls.
-- Local providers start immediately, even before the first relay connection. Local discovery, password answers, and selected-card commands never wait for relay operation registration or completion; remote candidates prepare concurrently. Offline local access uses the saved channel membership proof; received revocations and channel deletion still cancel affected sessions.
-- Relay operation metadata and durable execution claims apply to remote candidates. Local card commands run once on the bound native session; a lost private-operation response is never automatically replayed.
+- The server persists operation IDs, deadlines, targets, and execution states, not PINs, plaintext command data, or results. Queue limits are 128 operations per caller or target and 4096 in total. Pending work survives a server restart only when the live caller resumes it; restarting the caller daemon does not restore vanished calls.
+- Local providers start immediately, even before the first server connection. Local discovery, password answers, and selected-card commands never wait for server operation registration or completion; remote candidates prepare concurrently. Offline local access uses the saved channel membership proof; received revocations and channel deletion still cancel affected sessions.
+- Server operation metadata and durable execution claims apply to remote candidates. Local card commands run once on the bound native session; a lost private-operation response is never automatically replayed.
 
 ## Trust and storage
 
 Devices authenticate with Ed25519 identities and establish `Noise_XX_25519_ChaChaPoly_BLAKE2s` sessions bound to the protocol, channel, device identities, and session ID. Signed membership histories and saved checkpoints detect rollback, identity substitution, and conflicting histories. Service discovery is encrypted too.
 
-The relay can see membership, routing, timing, and ciphertext sizes, but cannot read Assuan traffic. It queues operation metadata for offline devices while the original caller is still waiting. Approved channel members can use enabled services and approve additional members.
+The server can see membership, routing, timing, and ciphertext sizes, but cannot read Assuan traffic. It queues operation metadata for offline devices while the original caller is still waiting. Approved channel members can use enabled services and approve additional members.
 
 Card private keys stay on the card; software private keys stay on the requesting device. PINs and passphrases pass through the input device and requester, and card PINs also reach the selected card provider. Hibiki clears secret buffers after use, does not cache passwords or enable Pinentry's external password cache, and keeps protocol bodies and secrets out of logs. Native agent caching still applies.
 
@@ -117,7 +117,7 @@ Card private keys stay on the card; software private keys stay on the requesting
 
 Private files use mode `0600` and directories use `0700`. Back up identity and trust records together.
 
-The protocol identifier is **`hibiki/3`** and the WebSocket path is **`/hibiki`**. It includes relay policy discovery and pending-request rejection, withdrawal and status queries. Network messages use Protocol Buffers. Relay and clients may use different application releases while supporting the same baseline and negotiating extensions; unpublished Postcard network formats are not supported. See [the compatibility contract](PROTOCOL.md).
+The protocol identifier is **`hibiki/3`** and the WebSocket path is **`/hibiki`**. It includes server policy discovery and pending-request rejection, withdrawal and status queries. Network messages use Protocol Buffers. Server and clients may use different application releases while supporting the same baseline and negotiating extensions; unpublished Postcard network formats are not supported. See [the compatibility contract](PROTOCOL.md).
 
 ## Protocol v2 and measurements
 
@@ -125,25 +125,26 @@ The WebSocket path remains `/hibiki`. Noise setup is followed by `OpenService` /
 
 The provider persists completion before returning the final result. The caller completes its end registration asynchronously and idempotently after receiving that result. Operation status monitoring has an independent task and cannot block Assuan reads or writes. Channel snapshots combine membership and online peers; online/offline notifications trigger discovery, and reconnect resynchronizes state.
 
-The relay uses shared authority locks per channel for routing and ordinary control
+The server uses shared authority locks per channel for routing and ordinary control
 requests. Membership changes take exclusive authority in that channel; unrelated
 channels continue processing. Operation transitions are serialized per operation
 ID, with a separate admission lock enforcing queue limits across channels.
-Subscription checks and relay enqueue are atomic with executor registration and
-disconnect. Membership and administrator access checks still run on every relay.
+Subscription checks and enqueueing forwarded frames are atomic with executor
+registration and disconnect. Membership and administrator access checks still
+run on every forwarded frame.
 
 Each authenticated connection reads and writes independently of its request
 workers. Independent controls can reply out of order and are matched by request
-ID; callers must await a response before sending work that depends on it. Relay
+ID; callers must await a response before sending work that depends on it. `Relay`
 frames retain arrival order within each channel/peer/session, including empty
 close frames. A connection permits at most 128 in-flight workers and 8 MiB of
 retained inbound wire bytes, in addition to bounded output queues. Overload closes
 the connection; disconnect cancels and drains workers before unregistering its
 executor. Heartbeats and the 45-second receive deadline continue during slow work.
 
-A matching authenticated outer Relay frame with empty data cancels an existing peer/channel/session, including a handshake interrupted before encrypted Close is available. Empty frames cannot open a session; routing and membership checks still apply. This also releases a backend opened concurrently with caller cancellation.
+A matching authenticated outer `Relay` frame with empty data cancels an existing peer/channel/session, including a handshake interrupted before encrypted Close is available. Empty frames cannot open a session; routing and membership checks still apply. This also releases a backend opened concurrently with caller cancellation.
 
-Ping uses its own Noise-authenticated `PingOpen`/`PingOpened` session and random matching Ping/Pong nonces, never a provider slot. CLI, TUI and iOS report setup separately from RTT, with 1–20 samples and a five-second deadline per sample. It measures the encrypted path through the relay, not ICMP or a direct network route.
+Ping uses its own Noise-authenticated `PingOpen`/`PingOpened` session and random matching Ping/Pong nonces, never a provider slot. CLI, TUI and iOS report setup separately from RTT, with 1–20 samples and a five-second deadline per sample. It measures the encrypted path through the server, not ICMP or a direct network route.
 
 Trace metrics contain only message kinds/counts; session and adapter summaries contain elapsed durations. They never contain Assuan bodies, PINs, invitation keys or private input. `tests/performance.py` adds 0/50/100/200 ms RTT to an isolated simulated-card setup. Its stable gate is five ordinary queries = five request messages + five result messages; timings are diagnostic rather than machine-dependent pass criteria.
 
@@ -155,7 +156,7 @@ Approval records form a directed chain from the channel founder. An active membe
 can revoke its direct or indirect descendants immediately. After **30 days since
 its current admission**, it may also revoke its own approver or another ancestor.
 Leaving and joining again restarts that waiting period. Other branches and
-self-revocation remain disallowed; use Leave for self-removal. The relay checks
+self-revocation remain disallowed; use Leave for self-removal. The server checks
 its own clock as well as the signed event; backdated admissions cannot accelerate
 the waiting period.
 
@@ -183,7 +184,7 @@ hibiki-server channel revoke NAME DEVICE_ID
 hibiki-server channel revoke NAME DEVICE_ID --subtree
 ```
 
-This is a persistent relay access revocation, independent of member-signed history.
+This is a persistent server access revocation, independent of member-signed history.
 It blocks routing, announcements, admission and management mutations, cancels
 related queued operations atomically, and disconnects affected executors within
 the one-second administration watcher interval. Other members see “Revoked by

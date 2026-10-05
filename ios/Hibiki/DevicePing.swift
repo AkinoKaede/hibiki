@@ -147,7 +147,7 @@ struct DevicePingSection: View {
                 .accessibilityIdentifier("memberPing")
             }.textCase(nil)
         } footer: {
-            Text("Measures encrypted round trips to this device through the relay. Connection setup is measured separately. No card or PIN is requested.")
+            Text("Measures encrypted round trips to this device through the server. Connection setup is measured separately. No card or PIN is requested.")
         }
     }
 }

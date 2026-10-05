@@ -1913,19 +1913,19 @@
         }
       }
     },
-    "Measures encrypted round trips to this device through the relay. Connection setup is measured separately. No card or PIN is requested.": {
+    "Measures encrypted round trips to this device through the server. Connection setup is measured separately. No card or PIN is requested.": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "测量经中继到此设备的加密往返延迟。连接建立耗时单独显示，不需要卡片或PIN。"
+            "value": "测量经服务器到此设备的加密往返延迟。连接建立耗时单独显示，不需要卡片或PIN。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "測量經中繼到此裝置的加密往返延遲。連線建立时间分開顯示，不需要卡片或PIN。"
+            "value": "測量經伺服器到此裝置的加密往返延遲。連線建立時間分開顯示，不需要卡片或PIN。"
           }
         }
       }

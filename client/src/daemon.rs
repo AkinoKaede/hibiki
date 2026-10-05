@@ -155,7 +155,7 @@ async fn run_until_shutdown(
         let (connection, mut events) = match opened {
             Ok(v) => v,
             Err(_) => {
-                eprintln!("{WARNING}relay unavailable; reconnecting{WARNING:#}");
+                eprintln!("{WARNING}server unavailable; reconnecting{WARNING:#}");
                 tokio::select! {_=&mut shutdown=>break,_=tokio::time::sleep(Duration::from_secs(delay))=>{}}
                 delay = (delay * 2).min(30);
                 continue;

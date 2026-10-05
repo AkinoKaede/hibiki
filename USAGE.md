@@ -2,7 +2,7 @@
 
 [Overview](README.md) · [Architecture](ARCHITECTURE.md) · [iOS guide](ios/README.md)
 
-This guide covers desktop installation, relay deployment, device pairing, GPG
+This guide covers desktop installation, server deployment, device pairing, GPG
 integration, and channel administration. For native iPhone setup and card access,
 see the [iOS guide](ios/README.md).
 
@@ -14,7 +14,7 @@ see the [iOS guide](ios/README.md).
 - [Sign and decrypt](#sign-and-decrypt)
 - [Diagnose setup and connection issues](#diagnose-setup-and-connection-issues)
 - [Channel administration](#channel-administration)
-- [Docker relay](#docker-relay)
+- [Docker server](#docker-server)
 - [Linux user service](#linux-user-service)
 - [Build and publish releases](#build-and-publish-releases)
 
@@ -26,7 +26,7 @@ Desktop clients require:
 - GnuPG 2.4 or 2.5
 - Native scdaemon on devices providing card access; native Pinentry on devices providing input
 
-Building from source also requires Rust 1.96 or later. A relay-only host does not
+Building from source also requires Rust 1.96 or later. A server-only host does not
 need GnuPG, scdaemon, or Pinentry. From the repository root:
 
 ```sh
@@ -37,7 +37,7 @@ export PATH="$PWD/target/release:$PATH"
 | Program | Purpose |
 | --- | --- |
 | `hibiki` | Device setup, channel management, and the local daemon |
-| `hibiki-server` | Authentication, channel membership, and encrypted traffic relay |
+| `hibiki-server` | Authentication, channel membership, and encrypted traffic forwarding |
 | `hibiki-scdaemon` | Stdio adapter used by the requesting device's agent |
 | `hibiki-pinentry` | Stdio adapter used by the requesting device's agent |
 
@@ -70,8 +70,8 @@ install -m 755 bin/hibiki bin/hibiki-scdaemon bin/hibiki-pinentry "$HOME/.local/
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-For a standalone relay, install `bin/hibiki-server` from the server archive to
-your preferred executable directory and follow [relay setup](#1-run-a-relay).
+For a standalone server, install `bin/hibiki-server` from the server archive to
+your preferred executable directory and follow [server setup](#1-run-a-server).
 
 To build the same archives locally (Python 3.11+ and Rust required):
 
@@ -88,9 +88,9 @@ files are written to `dist/`.
 
 ## Setup
 
-### 1. Run a relay
+### 1. Run a server
 
-Install the [server configuration](examples/server.toml) and prepare the system data directory for the account that will run the relay. These commands use your current account:
+Install the [server configuration](examples/server.toml) and prepare the system data directory for the account that will run the server. These commands use your current account:
 
 ```sh
 sudo install -d -m 0755 /etc/hibiki
@@ -101,7 +101,7 @@ hibiki-server
 
 The server runs in the foreground and listens on `127.0.0.1:7749` by default. It serves WebSocket traffic at `/hibiki` and a health endpoint at `/healthz`. For remote use, expose it through a TLS endpoint and use a `wss://` URL. Channel admission relies on TLS to protect the one-use invitation key.
 
-The relay searches for configuration in this order:
+The server searches for configuration in this order:
 
 1. An explicit `--config` or `HIBIKI_SERVER_CONFIG` path (CLI takes precedence).
 2. `/etc/hibiki/server.toml`.
@@ -109,23 +109,23 @@ The relay searches for configuration in this order:
 
 It loads the first existing file without merging configurations, or uses built-in defaults if neither default file exists. An explicitly selected missing file, or an unreadable or invalid configuration, is an error; it does not fall through to another configuration. CLI flags override environment variables, which override the configuration. The server does not require `HOME` or search client XDG directories.
 
-The database defaults to `/var/lib/hibiki/hibiki.sqlite3` regardless of which configuration file is selected. For a local-prefix deployment, install the configuration at `/usr/local/etc/hibiki/server.toml` and explicitly set `database = "/usr/local/var/lib/hibiki/hibiki.sqlite3"` if the data should also live under `/usr/local`. Prepare that data directory for the relay's account using the same ownership and mode as above.
+The database defaults to `/var/lib/hibiki/hibiki.sqlite3` regardless of which configuration file is selected. For a local-prefix deployment, install the configuration at `/usr/local/etc/hibiki/server.toml` and explicitly set `database = "/usr/local/var/lib/hibiki/hibiki.sqlite3"` if the data should also live under `/usr/local`. Prepare that data directory for the server's account using the same ownership and mode as above.
 
-For a dedicated service account, assign the data directory to that account instead; the directory must have mode `0700` and database files use `0600`. Administrator commands use the same configuration search order as the relay.
+For a dedicated service account, assign the data directory to that account instead; the directory must have mode `0700` and database files use `0600`. Administrator commands use the same configuration search order as the server.
 
 For an unprivileged local deployment, copy the example into `deploy/server.toml`, change `database` to `"data/hibiki.sqlite3"`, and run `hibiki-server --config deploy/server.toml`. Use the same `--config` for administrator commands. Relative database overrides resolve against the configuration file's directory, or the current working directory if no configuration is loaded. Missing data directories are created with mode `0700`.
 
-The following steps use `wss://hibiki.example.com/hibiki`; replace it with your relay URL. For local development, use `ws://127.0.0.1:7749/hibiki` and add `--allow-insecure` to each `hibiki init` command.
+The following steps use `wss://hibiki.example.com/hibiki`; replace it with your server URL. For local development, use `ws://127.0.0.1:7749/hibiki` and add `--allow-insecure` to each `hibiki init` command.
 
 ### 2. Pair devices in a channel
 
-Channel creation is reserved for the server administrator by default. On the relay host, create a channel (the relay can keep running):
+Channel creation is reserved for the server administrator by default. On the server host, create a channel (the server can keep running):
 
 ```sh
 hibiki-server channel create personal --server wss://hibiki.example.com/hibiki
 ```
 
-Keep the single-use initialization invitation. It includes its own secret key, expires after 24 hours, and must be shared only with the intended recipient. For Docker, run the same command with `docker exec` and `--config /etc/hibiki/server.toml` as described in [Docker relay](#docker-relay).
+Keep the single-use initialization invitation. It includes its own secret key, expires after 24 hours, and must be shared only with the intended recipient. For Docker, run the same command with `docker exec` and `--config /etc/hibiki/server.toml` as described in [Docker server](#docker-server).
 
 On the first device (`--name` is optional and defaults to the system hostname), claim the channel and produce a member invitation:
 
@@ -257,15 +257,15 @@ hibiki status
 hibiki doctor
 ```
 
-`status` queries the live local daemon even before its first relay connection. It
-shows relay connectivity, active provider switches, the selected channel and
+`status` queries the live local daemon even before its first server connection. It
+shows server connectivity, active provider switches, the selected channel and
 configuration changes that require a restart. `doctor` additionally checks enabled
-native executables and authenticates with the relay to report channel-creation
+native executables and authenticates with the server to report channel-creation
 policy. Both exit nonzero when a checked component needs attention. Native checks
 do not test physical card access or GUI/TTY availability. For custom configuration,
 CLI commands and adapters both honor `HIBIKI_CONFIG`; CLI `--config` takes precedence.
 
-Local adapters and enabled local providers start without waiting for the relay,
+Local adapters and enabled local providers start without waiting for the server,
 including at daemon startup. Local input and card operations use the saved channel
 membership proof and can complete while offline. Remote candidates prepare in
 parallel and can join before the command deadline. Commands that need a remote
@@ -286,7 +286,7 @@ Any active member can reject one pending request; only its applicant can withdra
 
 `hibiki channel leave NAME` withdraws all of this device's pending requests for the channel and leaves if it is already a member, including if approval happened just before cancellation. No request ID is needed. It also clears the default channel when applicable; repeating it after leaving is harmless.
 
-Each invitation has an independent 256-bit key. The relay keeps only its hash and atomically consumes it when accepting one valid request. Retrying the identical request is safe; rejection and withdrawal do not restore a consumed key. Ordinary, subtree and administrator revocation permit fresh admission after new approval. Administrator-revoked devices remain blocked until approval commits. Generating another invitation does not invalidate existing unused invitations.
+Each invitation has an independent 256-bit key. The server keeps only its hash and atomically consumes it when accepting one valid request. Retrying the identical request is safe; rejection and withdrawal do not restore a consumed key. Ordinary, subtree and administrator revocation permit fresh admission after new approval. Administrator-revoked devices remain blocked until approval commits. Generating another invitation does not invalidate existing unused invitations.
 
 Channel creation is reserved for the server administrator by default (`allow_client_channel_creation = false`):
 
@@ -296,11 +296,11 @@ hibiki-server channel list
 hibiki-server channel delete personal
 ```
 
-Server-side creation prints a single-use `hibiki-invite-v2:...` initialization invitation containing its one-use key. The first device claims it with `hibiki channel join`; later devices use ordinary invitations. A running relay checks for administrator deletions every second and closes affected sessions. Recreating a channel name produces a new channel ID.
+Server-side creation prints a single-use `hibiki-invite-v2:...` initialization invitation containing its one-use key. The first device claims it with `hibiki channel join`; later devices use ordinary invitations. A running server checks for administrator deletions every second and closes affected sessions. Recreating a channel name produces a new channel ID.
 
-## Docker relay
+## Docker server
 
-Build and start a relay from the repository root:
+Build and start a server from the repository root:
 
 ```sh
 docker compose -f server/compose.yml up -d --build
@@ -324,7 +324,7 @@ docker run -d --name hibiki-server --restart unless-stopped \
 ```
 
 Mount a customized copy of `server/server.toml` read-only at
-`/etc/hibiki/server.toml` to change relay policy. Preserve the container listen
+`/etc/hibiki/server.toml` to change server policy. Preserve the container listen
 address and persistent database path unless intentionally changing the deployment.
 CLI flags override environment variables, which override the TOML configuration:
 
@@ -345,7 +345,7 @@ and exits 0 for an HTTP success response or 1 for failure (including a 2-second
 timeout). It does not open or create the database. CLI and environment listen
 overrides also apply to the probe. If changing the listen port, also change the
 published port; the health check follows the configuration automatically.
-The relay handles SIGTERM and SIGINT for graceful shutdown.
+The server handles SIGTERM and SIGINT for graceful shutdown.
 
 Administrator commands can run against the same database:
 
@@ -438,7 +438,7 @@ quit. Narrow terminals switch between list and detail; IDs are complete in detai
 and confirmations. Approval requires checking the full request ID and all 24 words.
 Destructive actions default to Cancel and always identify the affected record.
 
-Management remains usable without a daemon. When the relay is unreachable, cached
+Management remains usable without a daemon. When the server is unreachable, cached
 information is timestamped and online mutations are disabled; local settings and
 the default channel can still be changed. Refresh and reconnect are asynchronous.
 Settings show saved and running values. External edits require reloading before
@@ -476,7 +476,7 @@ characters are escaped. `NO_COLOR` and redirected output are supported.
 
 Desktop card-insertion dialogs belong to the scdaemon service even when password
 sharing is disabled. Confirming without the matching card repeats the dialog.
-With the relay unavailable, local discovery, insertion prompts, sign/decrypt,
+With the server unavailable, local discovery, insertion prompts, sign/decrypt,
 password entry and reset remain available using saved channel membership.
 
 Continuous desktop USB signing keeps native scdaemon alive and preserves the
@@ -498,7 +498,7 @@ Approval records form a directed chain from the channel founder. An active membe
 can revoke its direct or indirect descendants immediately. After **30 days since
 its current admission**, it may also revoke its own approver or another ancestor.
 Leaving and joining again restarts that waiting period. Other branches and
-self-revocation remain disallowed; use Leave for self-removal. The relay checks
+self-revocation remain disallowed; use Leave for self-removal. The server checks
 its own clock as well as the signed event; backdated admissions cannot accelerate
 the waiting period.
 
@@ -526,7 +526,7 @@ hibiki-server channel revoke NAME DEVICE_ID
 hibiki-server channel revoke NAME DEVICE_ID --subtree
 ```
 
-This is a persistent relay access revocation, independent of member-signed history.
+This is a persistent server access revocation, independent of member-signed history.
 It blocks routing, announcements, admission and management mutations, cancels
 related queued operations atomically, and disconnects affected executors within
 the one-second administration watcher interval. Other members see “Revoked by

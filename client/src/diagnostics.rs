@@ -92,13 +92,13 @@ pub async fn inspect(app: &App, doctor: bool) -> Result<()> {
         app.identity.device.name
     );
     println!("{HEADING}configuration:{HEADING:#} {:?}", app.config_file);
-    println!("{HEADING}relay:{HEADING:#} {:?}", app.config.server);
+    println!("{HEADING}server:{HEADING:#} {:?}", app.config.server);
     println!("{HEADING}IPC:{HEADING:#} {:?}", app.paths.ipc_socket());
     let mut failures = 0;
     match daemon_status(app).await {
         Ok(status) => {
             println!(
-                "{HEADING}daemon:{HEADING:#} {SUCCESS}running{SUCCESS:#}; relay: {}",
+                "{HEADING}daemon:{HEADING:#} {SUCCESS}running{SUCCESS:#}; server: {}",
                 if status.relay_connected {
                     format!("{SUCCESS}connected{SUCCESS:#}")
                 } else {
@@ -187,15 +187,15 @@ pub async fn inspect(app: &App, doctor: bool) -> Result<()> {
         match relay {
             Ok(Ok(allowed)) => {
                 println!(
-                    "relay authentication: {SUCCESS}OK{SUCCESS:#}; client channel creation: {allowed}"
+                    "server authentication: {SUCCESS}OK{SUCCESS:#}; client channel creation: {allowed}"
                 )
             }
             Ok(Err(error)) => {
-                println!("{ERROR}FAIL:{ERROR:#} relay authentication: {error:#}");
+                println!("{ERROR}FAIL:{ERROR:#} server authentication: {error:#}");
                 failures += 1;
             }
             Err(_) => {
-                println!("{ERROR}FAIL:{ERROR:#} relay authentication timed out");
+                println!("{ERROR}FAIL:{ERROR:#} server authentication timed out");
                 failures += 1;
             }
         }
@@ -220,7 +220,7 @@ pub async fn inspect_format(app: &App, doctor: bool, json: bool) -> Result<()> {
         issues.push("daemon is not running".to_owned());
     }
     if !snapshot.daemon_relay_connected {
-        issues.push("daemon relay is not connected".to_owned());
+        issues.push("daemon is not connected to the server".to_owned());
     }
     if let Some(mut active) = snapshot.running_config.clone() {
         active.default_channel = app.config.default_channel.clone();
@@ -256,8 +256,8 @@ pub async fn inspect_format(app: &App, doctor: bool, json: bool) -> Result<()> {
         .await
         {
             Ok(Ok(allowed)) => relay_policy = Some(allowed),
-            Ok(Err(error)) => issues.push(format!("relay authentication: {error:#}")),
-            Err(_) => issues.push("relay authentication timed out".into()),
+            Ok(Err(error)) => issues.push(format!("server authentication: {error:#}")),
+            Err(_) => issues.push("server authentication timed out".into()),
         }
     }
     println!(

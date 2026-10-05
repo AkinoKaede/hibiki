@@ -120,13 +120,13 @@ impl Manager {
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let mut snapshot = local_snapshot(&self.app).await?;
         if self.connection.closed.is_cancelled() {
-            bail!("relay disconnected");
+            bail!("server disconnected");
         }
         let Reply::Policy {
             allow_client_channel_creation,
         } = self.connection.request(Control::Policy).await?
         else {
-            bail!("invalid relay policy")
+            bail!("invalid server policy")
         };
         snapshot.relay_connected = true;
         snapshot.allow_channel_creation = allow_client_channel_creation;

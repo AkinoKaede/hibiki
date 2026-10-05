@@ -41,7 +41,7 @@ enum Commands {
         name: String,
     },
     Daemon,
-    /// Measure encrypted round trips to another device through the relay.
+    /// Measure encrypted round trips to another device through the server.
     Ping {
         device_id: String,
         #[arg(long)]
@@ -54,12 +54,12 @@ enum Commands {
 
     /// Interactive device, channel, request and service management.
     Tui,
-    /// Show live daemon, relay and selected-channel status.
+    /// Show live daemon, server and selected-channel status.
     Status {
         #[arg(long)]
         json: bool,
     },
-    /// Diagnose daemon, relay authentication and enabled native providers.
+    /// Diagnose daemon, server authentication and enabled native providers.
     Doctor {
         #[arg(long)]
         json: bool,
@@ -69,7 +69,7 @@ enum Commands {
 }
 #[derive(Subcommand)]
 enum DeviceCommand {
-    /// Measure encrypted round trips to another device through the relay.
+    /// Measure encrypted round trips to another device through the server.
     Ping {
         device_id: String,
         #[arg(long)]

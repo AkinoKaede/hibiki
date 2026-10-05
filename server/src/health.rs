@@ -40,7 +40,7 @@ pub async fn check(listen: &str) -> Result<()> {
     })
     .await
     .context("health check timed out after 2 seconds")?
-    .with_context(|| format!("relay health check failed at http://{target}/healthz"))
+    .with_context(|| format!("server health check failed at http://{target}/healthz"))
 }
 
 #[cfg(test)]

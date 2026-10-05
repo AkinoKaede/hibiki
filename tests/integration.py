@@ -433,7 +433,7 @@ def test_all():
             a.gpg('--import',data=public)
             a.services();b.services(scdaemon=True,pinentry=True);c.services(pinentry=True)
             for d in devices: d.start()
-            assert b'daemon: running; relay: connected' in a.cli('status').stdout
+            assert b'daemon: running; server: connected' in a.cli('status').stdout
             assert b'client channel creation: false' in a.cli('doctor').stdout
             assert b'hibiki use NAME' in a.cli('setup').stderr
             print('PASS: fresh Hibiki pairing, server-only creation and independent services',flush=True)
@@ -939,9 +939,9 @@ def test_all():
             a.stop(); a.services(timeout=1)
             a.log = a.log_path.open('w')
             a.daemon = subprocess.Popen([str(CLIENT), 'daemon'], env=a.env, stdout=a.log, stderr=a.log)
-            wait_for(lambda: 'relay unavailable' in a.log_path.read_text())
+            wait_for(lambda: 'server unavailable' in a.log_path.read_text())
             status = a.cli('status', ok=False)
-            assert b'daemon: running; relay: reconnecting' in status.stdout
+            assert b'daemon: running; server: reconnecting' in status.stdout
             adapter = subprocess.Popen([str(BIN/'hibiki-pinentry')], env=a.env,
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:

@@ -174,7 +174,7 @@ actionlint .github/workflows/build.yml
    connections. **Get started** saves only a successfully authenticated server
    URL, including the detected protocol. Each probe has a 15-second limit (up to
    30 seconds for both protocols); failed setup keeps the address editable.
-2. Create a channel, paste a `hibiki-invite-v2:` invitation, scan it with the camera, or choose a QR image from Photos. Each invitation includes an independent one-use key and expires after 24 hours. Review the channel and relay before submitting. Sharing a channel generates a fresh invitation and offers its QR, text and image; no PSK is needed.
+2. Create a channel, paste a `hibiki-invite-v2:` invitation, scan it with the camera, or choose a QR image from Photos. Each invitation includes an independent one-use key and expires after 24 hours. Review the channel and server before submitting. Sharing a channel generates a fresh invitation and offers its QR, text and image; no PSK is needed.
 3. For member invitations, compare **all 24 public-key words and the request ID**
    on an existing member before approving. The words are public identity data,
    not a recovery phrase. Pending requests remain until approved or invalidated; they have no time limit.
@@ -348,7 +348,7 @@ Hardware release checklist (must run on an actual iPhone and YubiKey):
 
 ## Server policy and pending requests
 
-The app uses the Protobuf `hibiki/3` baseline. Upgrade the relay and desktop components together when moving from v2; identities, channels and members survive the migration. Server and client application
+The app uses the Protobuf `hibiki/3` baseline. Upgrade the server and desktop components together when moving from v2; identities, channels and members survive the migration. Server and client application
 versions may differ under the [compatibility contract](../PROTOCOL.md).
 The Channels screen shows Create only when the connected server permits client channel
 creation. Otherwise, obtain an initialization invitation from the administrator.
@@ -403,7 +403,7 @@ Approval records form a directed chain from the channel founder. An active membe
 can revoke its direct or indirect descendants immediately. After **30 days since
 its current admission**, it may also revoke its own approver or another ancestor.
 Leaving and joining again restarts that waiting period. Other branches and
-self-revocation remain disallowed; use Leave for self-removal. The relay checks
+self-revocation remain disallowed; use Leave for self-removal. The server checks
 its own clock as well as the signed event; backdated admissions cannot accelerate
 the waiting period.
 
@@ -431,7 +431,7 @@ hibiki-server channel revoke NAME DEVICE_ID
 hibiki-server channel revoke NAME DEVICE_ID --subtree
 ```
 
-This is a persistent relay access revocation, independent of member-signed history.
+This is a persistent server access revocation, independent of member-signed history.
 It blocks routing, announcements, admission and management mutations, cancels
 related queued operations atomically, and disconnects affected executors within
 the one-second administration watcher interval. Other members see “Revoked by
@@ -447,7 +447,7 @@ The joining device displays a `hibiki-verify-v1:` QR binding its public identity
 
 The opt-in UI test `testPhysicalNFCAndPinentryPresentationOrder` opens a real NFC
 public-information read and injects a synthetic Pinentry confirmation one second
-later. It uses a temporary client without a relay or saved account. There is no
+later. It uses a temporary client without a server or saved account. There is no
 custom sheet-priority logic. Run with `TEST_RUNNER_HIBIKI_PHYSICAL_NFC_TEST=1` on
 an NFC-capable iPhone; keep the key away for the first five seconds, then tap it
 or cancel the scanner. Screenshots capture the native scanner and the subsequent

@@ -315,7 +315,7 @@ impl Ui {
             FormKind::Init => (
                 "Initialize Hibiki",
                 vec![
-                    Field::new("Relay URL", "wss://", false),
+                    Field::new("Server URL", "wss://", false),
                     Field::new("Device name", "", false),
                     Field::new("Allow insecure ws (true/false)", "false", false),
                 ],
@@ -502,7 +502,7 @@ impl Ui {
             self.message = if online {
                 "Select an item to manage it."
             } else {
-                "Relay offline. Online changes are disabled; local settings remain editable."
+                "Server offline. Reconnect to manage membership; local settings remain editable."
             }
             .into();
         } else {
@@ -857,7 +857,7 @@ impl Ui {
             .as_ref()
             .map(|s| {
                 format!(
-                    "{} · relay {} · daemon {} · snapshot {}",
+                    "{} · server {} · daemon {} · snapshot {}",
                     safe(&s.local_device.name),
                     if s.relay_connected {
                         "online"
@@ -904,7 +904,7 @@ impl Ui {
         );
         let content = cols[1];
         let rows = self.rows();
-        let overview=self.snapshot.as_ref().map(|s|format!("{}\n\nRelay: {}\nDaemon: {}\nChannels: {}\nPending requests: {}\nDefault channel: {}\nChannel creation: {}\n\nPress a for actions. Settings edits do not restart the daemon.",presentation::device_details(&s.local_device),safe(&s.config.server),if s.daemon_running{"Running"}else{"Not running"},s.channels.len(),s.channels.iter().map(|c|c.pending.len()).sum::<usize>(),s.config.default_channel.as_deref().unwrap_or("Not selected"),if s.allow_channel_creation{"Allowed"}else{"Requires an administrator invitation"})).unwrap_or_else(||"No identity. Complete the initialization form.".into());
+        let overview=self.snapshot.as_ref().map(|s|format!("{}\n\nServer: {}\nLocal daemon: {}\nChannels: {}\nPending requests: {}\nDefault channel: {}\nChannel creation: {}\n\nPress a for actions. Restart the daemon to apply service settings.",presentation::device_details(&s.local_device),safe(&s.config.server),if s.daemon_running{"Running"}else{"Not running"},s.channels.len(),s.channels.iter().map(|c|c.pending.len()).sum::<usize>(),s.config.default_channel.as_deref().unwrap_or("Not selected"),if s.allow_channel_creation{"Allowed"}else{"Requires an administrator invitation"})).unwrap_or_else(||"No identity. Complete the initialization form.".into());
         let settings=self.snapshot.as_ref().map(|s| {
             let describe=|c:&Config|format!("Scdaemon: {}\n  Program: {}\nPinentry: {}\n  Program: {}\nTimeout: {} seconds",if c.scdaemon.enabled{"Enabled"}else{"Disabled"},c.scdaemon.program.as_ref().map(|p|safe(&p.display().to_string())).unwrap_or_else(||"Auto-discover".into()),if c.pinentry.enabled{"Enabled"}else{"Disabled"},c.pinentry.program.as_ref().map(|p|safe(&p.display().to_string())).unwrap_or_else(||"Auto-discover".into()),c.operation_timeout_seconds);
             let restart=s.running_config.as_ref().is_some_and(|c|c.scdaemon!=s.config.scdaemon||c.pinentry!=s.config.pinentry||c.operation_timeout_seconds!=s.config.operation_timeout_seconds);
@@ -1016,7 +1016,7 @@ impl Ui {
                     } else { f.render_widget(Paragraph::new(safe(text)).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(block),rect); }
                 },
                 Modal::Result{text,scroll}=>f.render_widget(Paragraph::new(text.as_str()).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(Block::default().borders(Borders::ALL).title("Result · ↑↓ scroll · Esc close")),rect),
-                Modal::Help=>f.render_widget(Paragraph::new("1–5: page   Tab: focus   ↑↓ / j k: navigate\nEnter: details   a: actions   i: invite (Channels)   /: filter   r: refresh\nEsc: close/cancel   q / Ctrl-C: quit\n\nManagement uses a separate relay connection.\nOffline data is marked cached; online changes are disabled.\nService settings require a daemon restart; the TUI never restarts it.\nSecrets are not saved unless you explicitly export them.\nApproval always requires full identity comparison.\n\nPress Esc to close.").wrap(Wrap{trim:false}).block(Block::default().borders(Borders::ALL).title("Help")),rect),
+                Modal::Help=>f.render_widget(Paragraph::new("1–5: page   Tab: focus   ↑↓ / j k: navigate\nEnter: details   a: actions   i: invite (Channels)   /: filter   r: refresh\nEsc: close/cancel   q / Ctrl-C: quit\n\nManagement connects to the server independently of the local daemon.\nOffline data is cached. Reconnect to manage membership; local settings remain editable.\nService settings require a daemon restart; the TUI never restarts it.\nSecrets are not saved unless you explicitly export them.\nApproval always requires full identity comparison.\n\nPress Esc to close.").wrap(Wrap{trim:false}).block(Block::default().borders(Borders::ALL).title("Help")),rect),
             }
         }
     }
@@ -1195,7 +1195,7 @@ async fn worker(
                     }
                 } else {
                     Err(anyhow::anyhow!(
-                        "relay offline; reconnect before changing membership"
+                        "server offline; reconnect before changing membership"
                     ))
                 }
             }
@@ -1243,7 +1243,7 @@ async fn worker(
                     }
                     let _ = updates
                         .send(Update::Offline(
-                            "Relay offline; showing cached data. Retrying…".into(),
+                            "Server offline; showing cached data. Retrying…".into(),
                         ))
                         .await;
                     continue;

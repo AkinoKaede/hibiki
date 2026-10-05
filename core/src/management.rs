@@ -225,7 +225,7 @@ pub async fn join(app: &App, conn: &Connection, text: &str) -> Result<AdmissionR
     let invitation = OneTimeInvitation::import(text)?;
     let meta = &invitation.metadata;
     if meta.server != app.config.server {
-        bail!("invitation relay differs from configured relay");
+        bail!("invitation server differs from configured server");
     }
     if meta.genesis_hash.is_none() {
         let genesis =

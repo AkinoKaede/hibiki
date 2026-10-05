@@ -2,7 +2,7 @@
 
 `hibiki/3` uses Protocol Buffers over binary WebSocket messages
 at `/hibiki`. One WebSocket message contains one `Envelope`, without an extra
-length prefix. The relay routes Noise packets as opaque bytes. The Noise XX
+length prefix. The server routes Noise packets as opaque bytes. The Noise XX
 handshake and its Postcard-encoded prologue remain unchanged; authenticated
 transport plaintext contains a Protobuf `Fragment`, whose reassembled payload is
 one Protobuf `PrivateMessage`.
@@ -22,7 +22,7 @@ The `hibiki.v3` package is split by function in `lib/proto`:
 `hibiki_lib::wire::{encode, encode_secret, decode}` converts business types to
 Protobuf. Cargo generates Rust types with `prost-build` and bundled host `protoc`;
 no system Protobuf installation is needed, including for iOS cross-compilation.
-The desktop, relay and iOS Rust framework share this codec.
+The desktop, server and iOS Rust framework share this codec.
 
 `hibiki_lib::{encode, encode_secret, decode}` remains the separate Postcard codec
 for local IPC, identities, trust files, database blobs, invitations, signing inputs
@@ -72,13 +72,13 @@ Existing baseline fields, variants and byte fixtures remain unchanged.
 
 `RegisterInvitation` authenticates a current member and records the invitation metadata, issuer's admission ID, key hash and expiry. `ResolveInvitation` validates the presented key and returns the pinned channel proof plus the applicant's current administrator-revocation revision. `Join` binds the invitation ID, device, current trust checkpoint, previous admission and access revision into the applicant's signature. `Claim` uses a one-use initialization invitation for a reserved empty channel. `Create` and `Append` have no PSK arguments.
 
-The relay serializes invitation consumption, pending admission, approval, withdrawal and revocation through SQLite transactions. Exact retries of the same signed request are idempotent; a different request cannot reuse the key. Approval verifies that the issuer's admission is still effective and that no newer revocation occurred. Administrator denial is removed only in the same transaction as a valid signed readmission. Invitation expiry is checked before consumption, not while approving an already pending request.
+The server serializes invitation consumption, pending admission, approval, withdrawal and revocation through SQLite transactions. Exact retries of the same signed request are idempotent; a different request cannot reuse the key. Approval verifies that the issuer's admission is still effective and that no newer revocation occurred. Administrator denial is removed only in the same transaction as a valid signed readmission. Invitation expiry is checked before consumption, not while approving an already pending request.
 
-Invitation strings use `hibiki-invite-v2:` and contain a secret key. Verification strings use `hibiki-verify-v1:` and bind the relay URL, channel, genesis hash, complete request hash and device ID. They are not interchangeable. `access_revoked` is an explicit control error code; clients display cached membership as inactive while allowing the narrowly scoped reapplication flow.
+Invitation strings use `hibiki-invite-v2:` and contain a secret key. Verification strings use `hibiki-verify-v1:` and bind the server URL, channel, genesis hash, complete request hash and device ID. They are not interchangeable. `access_revoked` is an explicit control error code; clients display cached membership as inactive while allowing the narrowly scoped reapplication flow.
 
 ## Capability negotiation
 
-Relay setup uses `Hello.capabilities` for the server declaration and
+Server setup uses `Hello.capabilities` for the server declaration and
 `Authenticate.capabilities` for the client declaration. Both lists are sorted and
 deduplicated before signing the Postcard tuple
 `(version, nonce, device_id, server_capabilities, client_capabilities)` under
@@ -88,11 +88,11 @@ intersection; the client checks it against the intersection it computed.
 Declarations are limited to 64 entries of 1–128 ASCII letters, digits or `._/-`.
 A missing list means empty and supports all baseline operations.
 
-Peer setup negotiates independently of the relay. After Noise authenticates both
+Peer setup negotiates independently of the server. After Noise authenticates both
 pinned keys, the initiator offers capabilities in `OpenService` or `PingOpen`.
 `ServiceOpened` or `PingOpened` returns the intersection with the responder's
 supported capabilities. The initiator rejects unoffered selections. Lists are
-protected inside the Noise session; relay capabilities do not authorize a peer
+protected inside the Noise session; server capabilities do not authorize a peer
 extension. This adds no round trip to service or Ping setup.
 
 ## Bounds and private data

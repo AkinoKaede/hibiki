@@ -21,7 +21,7 @@ const CONFIG_PATHS: [&str; 2] = [
 #[derive(Parser)]
 #[command(
     version,
-    about = "Hibiki relay for end-to-end encrypted GPG operations"
+    about = "Hibiki server for end-to-end encrypted GPG operations"
 )]
 struct Args {
     /// Configuration file (otherwise search /etc/hibiki, then /usr/local/etc/hibiki).
@@ -45,7 +45,7 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Check the running relay's /healthz endpoint (exit 0 if healthy, 1 otherwise).
+    /// Check the running server's /healthz endpoint (exit 0 if healthy, 1 otherwise).
     Health,
     Channel {
         #[command(subcommand)]
@@ -68,7 +68,7 @@ enum ChannelCommand {
     },
     /// Permanently delete channel records and stop routing (local administrator only).
     Delete { name: String },
-    /// Revoke relay access to any device, independently of member approval authority.
+    /// Revoke server access to any device, independently of member approval authority.
     Revoke {
         name: String,
         device_id: String,
@@ -260,7 +260,7 @@ async fn main() -> Result<()> {
                 _ = tokio::signal::ctrl_c() => {},
                 _ = terminate.recv() => {},
             }
-            tracing::info!("relay shutting down");
+            tracing::info!("server shutting down");
         })
         .await?;
     Ok(())

@@ -778,7 +778,7 @@ struct PinView: View {
 private func pairingError(_ error: Error) -> String {
     guard case let MobileError.Failed(message) = error else { return error.localizedDescription }
     switch message {
-    case "invitation relay differs from configured relay":
+    case "invitation server differs from configured server":
         return String(localized: "The invitation server does not match your configured server.")
     case "invitation expired; obtain a new invitation":
         return String(localized: "This invitation has expired. Ask a member for a new invitation.")

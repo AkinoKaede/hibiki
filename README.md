@@ -19,12 +19,12 @@ successful response wins and the other prompts close.
 - **Independent device roles:** provide card access, password entry, both, or
   neither. Both services are enabled by default.
 - **Encrypted peer sessions:** devices authenticate with Ed25519 identities and
-  exchange Assuan traffic over Noise sessions through a WebSocket relay.
+  exchange Assuan traffic over Noise sessions through a WebSocket server.
 - **Native iOS support:** the SwiftUI app supports iOS 18+ with wired and NFC
   OpenPGP card access, password entry, and channel management while open.
 
 Card private keys stay on the card; software private keys stay on the requesting
-device. The relay sees routing metadata but cannot read Assuan traffic. PINs pass
+device. The server sees routing metadata but cannot read Assuan traffic. PINs pass
 through the input device and requester, and card PINs also reach the selected card
 provider. See the [trust model](ARCHITECTURE.md#trust-and-storage).
 
@@ -32,30 +32,30 @@ provider. See the [trust model](ARCHITECTURE.md#trust-and-storage).
 
 | Guide | What it covers |
 | --- | --- |
-| [Usage](USAGE.md) | Installation, relay deployment, pairing, provider settings, GPG/Git signing, diagnostics, and administration |
+| [Usage](USAGE.md) | Installation, server deployment, pairing, provider settings, GPG/Git signing, diagnostics, and administration |
 | [Upgrade notes](UPGRADING.md) | Protocol v2 rollout, invitations, card prompts, management, and validation |
 | [Architecture](ARCHITECTURE.md) | Components, request flow, channel admission, session behavior, limits, and trust/storage |
 | [iOS](ios/README.md) | App build and setup, USB/NFC security keys, lifecycle, tests, and App Store Connect uploads |
 | [Example client configuration](examples/client.toml) | Desktop provider and timeout settings |
-| [Example server configuration](examples/server.toml) | Relay listen address, storage, and channel-creation policy |
+| [Example server configuration](examples/server.toml) | Server listen address, storage, and channel-creation policy |
 
 ## Get started
 
 Desktop clients run on macOS and Linux with GnuPG 2.4 or 2.5. Building from source
 requires Rust 1.96+. Card providers need native scdaemon; password providers need
-native Pinentry. Relay-only hosts do not need GnuPG.
+native Pinentry. Server-only hosts do not need GnuPG.
 
 1. [Install release binaries](USAGE.md#install-release-packages) or
    [build from source](USAGE.md#requirements-and-build).
-2. [Run a relay](USAGE.md#1-run-a-relay), exposed through TLS for remote use.
+2. [Run a server](USAGE.md#1-run-a-server), exposed through TLS for remote use.
 3. [Pair each device in a channel](USAGE.md#2-pair-devices-in-a-channel).
 4. [Enable the providers you need and start each daemon](USAGE.md#3-enable-the-services-each-device-will-provide).
 5. [Configure the requesting machine's GPG adapters](USAGE.md#4-connect-the-requesting-devices-agent)
    and [sign or decrypt](USAGE.md#sign-and-decrypt).
 
-Relay and clients use the Protobuf `hibiki/3` baseline; application release
+Server and clients use the Protobuf `hibiki/3` baseline; application release
 versions may differ within its [compatibility contract](PROTOCOL.md). The desktop
-daemon starts local providers immediately, including while the relay is offline;
+daemon starts local providers immediately, including while the server is offline;
 remote providers join the race independently. Card access
 supports discovery, public-key reading, signing, and decryption; PIN changes,
 key writing/generation, and raw APDU commands are rejected.

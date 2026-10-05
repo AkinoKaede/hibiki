@@ -132,7 +132,7 @@ pub async fn check_relay(
             ),
         )
         .await
-        .context("relay connection timed out")??;
+        .context("server connection timed out")??;
         connection.close();
         Ok(())
     }
@@ -173,7 +173,7 @@ impl MobileClient {
             .unwrap()
             .clone()
             .filter(|h| !h.connection().closed.is_cancelled())
-            .context("relay is offline")
+            .context("server is offline")
     }
     async fn read_recorded_card(
         &self,
@@ -716,7 +716,7 @@ impl MobileClient {
             return Err(anyhow::anyhow!("invitation expired; obtain a new invitation").into());
         }
         if value.metadata.server != self.app.config.server {
-            return Err(anyhow::anyhow!("invitation relay differs from configured relay").into());
+            return Err(anyhow::anyhow!("invitation server differs from configured server").into());
         }
         Ok(InvitationPreview {
             server: value.metadata.server.clone(),
@@ -769,7 +769,7 @@ impl MobileClient {
                 .request(Control::Policy)
                 .await?
             else {
-                bail!("invalid relay policy response");
+                bail!("invalid server policy response");
             };
             Ok(allow_client_channel_creation)
         }

@@ -98,7 +98,7 @@ def check_config_conflict(device):
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 160, 0, 0))
     process = subprocess.Popen([str(CLIENT), 'tui'], env=dict(device.env, TERM='xterm-256color'), stdin=slave, stdout=slave, stderr=slave)
     try:
-        output = read_until(master, b'Relay offline', b'')
+        output = read_until(master, b'Server offline', b'')
         os.write(master, b'5a')
         output = read_until(master, b'Edit local service settings', output)
         os.write(master, b'\r')
@@ -136,7 +136,7 @@ def check_invitation(root):
             founder.cli('channel', 'create', 'PTY invitations')
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 35, 120, 0, 0))
             process = subprocess.Popen([str(CLIENT), 'tui'], env=dict(founder.env, TERM='xterm-256color'), stdin=slave, stdout=slave, stderr=slave)
-            output = read_until(master, b'relay online', b'')
+            output = read_until(master, b'server online', b'')
             os.write(master, b'2i')
             output = read_until(master, b'One-use invitation', output)
             os.write(master, b'v')
@@ -181,7 +181,7 @@ def check_waiting_verification(device):
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 70, 120, 0, 0))
     process = subprocess.Popen([str(CLIENT), 'tui'], env=dict(device.env, TERM='xterm-256color'), stdin=slave, stdout=slave, stderr=slave)
     try:
-        output = read_until(master, b'relay online', b'')
+        output = read_until(master, b'server online', b'')
         os.write(master, b'4a')
         output = read_until(master, b'Show verification QR / text', output)
         os.write(master, b'\r')
