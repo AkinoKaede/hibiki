@@ -66,6 +66,17 @@ async fn local_connection(
 }
 
 pub async fn run(app: App) -> Result<()> {
+    run_until_shutdown(app, tokio::signal::ctrl_c()).await
+}
+
+async fn run_until_shutdown(
+    app: App,
+    shutdown: impl std::future::Future<Output = std::io::Result<()>>,
+) -> Result<()> {
+    // Reuse one listener throughout the lifecycle. Recreating ctrl_c() in each
+    // select drops its signal receiver when another event wins, losing SIGINTs
+    // delivered between that receiver's cancellation and its replacement.
+    tokio::pin!(shutdown);
     crate::provider::preflight(&app).await?;
     use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
     ensure_runtime(&app.paths)?;
@@ -138,20 +149,24 @@ pub async fn run(app: App) -> Result<()> {
     });
     loop {
         let opened = tokio::select! {
-            _=tokio::signal::ctrl_c()=>break,
+            _=&mut shutdown=>break,
             result=Connection::open(&app.config.server,app.config.allow_insecure,&app.identity)=>result,
         };
         let (connection, mut events) = match opened {
             Ok(v) => v,
             Err(_) => {
                 eprintln!("{WARNING}relay unavailable; reconnecting{WARNING:#}");
-                tokio::select! {_=tokio::signal::ctrl_c()=>break,_=tokio::time::sleep(Duration::from_secs(delay))=>{}}
+                tokio::select! {_=&mut shutdown=>break,_=tokio::time::sleep(Duration::from_secs(delay))=>{}}
                 delay = (delay * 2).min(30);
                 continue;
             }
         };
         hub.reconnect(connection.clone());
-        if announce(&hub).await.is_err() {
+        let announced = tokio::select! {
+            _=&mut shutdown=>{connection.close();break;},
+            result=announce(&hub)=>result,
+        };
+        if announced.is_err() {
             connection.close();
             continue;
         }
@@ -162,7 +177,7 @@ pub async fn run(app: App) -> Result<()> {
         let mut jobs = tokio::task::JoinSet::new();
         let interrupted = loop {
             tokio::select! {
-                _=tokio::signal::ctrl_c()=>break true,
+                _=&mut shutdown=>break true,
                 _=connection.closed.cancelled()=>break false,
                 _=refresh.tick()=>{let h=hub.clone();jobs.spawn(async move {let _=announce(&h).await;});},
                 Some(_)=jobs.join_next(),if !jobs.is_empty()=>{},
@@ -210,6 +225,125 @@ mod tests {
         paths::AppPaths,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn shutdown_with_relay_activity(answer_announce: bool) {
+        use futures_util::{SinkExt, StreamExt};
+        use hibiki_lib::wire;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let dir = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let app = App {
+            config: crate::storage::Config {
+                server: format!("ws://{}{WS_PATH}", listener.local_addr().unwrap()),
+                allow_insecure: true,
+                ..Default::default()
+            },
+            config_file: dir.path().join("client.toml"),
+            paths: AppPaths::resolve(&Default::default(), dir.path(), dir.path(), unsafe {
+                libc::geteuid()
+            }),
+            identity: Arc::new(Identity::generate("shutdown-test".into()).unwrap()),
+        };
+        let socket = app.paths.ipc_socket();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let relay = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Binary(
+                wire::encode(&Envelope::Hello {
+                    version: VERSION.into(),
+                    nonce: hibiki_lib::random_id(),
+                    capabilities: wire::supported_capabilities(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            let Message::Binary(raw) = ws.next().await.unwrap().unwrap() else {
+                panic!()
+            };
+            assert!(matches!(
+                wire::decode::<Envelope>(&raw).unwrap(),
+                Envelope::Authenticate { .. }
+            ));
+            ws.send(Message::Binary(
+                wire::encode(&Envelope::Authenticated {
+                    capabilities: wire::supported_capabilities(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            let mut ready = Some(ready);
+            let mut announced = false;
+            let mut messages = 0;
+            let mut tick = tokio::time::interval(Duration::from_millis(1));
+            loop {
+                tokio::select! {
+                    incoming = ws.next() => match incoming {
+                        Some(Ok(Message::Binary(raw))) => {
+                            let Envelope::Request { id, command: Control::Announce { .. } } =
+                                wire::decode(&raw).unwrap() else { panic!() };
+                            if answer_announce {
+                                ws.send(Message::Binary(wire::encode(&Envelope::Response {
+                                    id, result: Ok(Reply::Ok),
+                                }).unwrap().into())).await.unwrap();
+                                announced = true;
+                            } else if let Some(ready) = ready.take() {
+                                ready.send(()).unwrap();
+                            }
+                        }
+                        None | Some(Err(_)) | Some(Ok(Message::Close(_))) => break,
+                        _ => {}
+                    },
+                    _ = tick.tick(), if announced => {
+                        if ws.send(Message::Binary(wire::encode(&Envelope::PeerOnline {
+                            peer: "busy-peer".into(),
+                        }).unwrap().into())).await.is_err() { break; }
+                        messages += 1;
+                        if messages == 32 {
+                            ready.take().unwrap().send(()).unwrap();
+                        }
+                    }
+                }
+            }
+        });
+        let stop = tokio_util::sync::CancellationToken::new();
+        let shutdown = stop.clone();
+        let daemon = tokio::spawn(run_until_shutdown(app, async move {
+            shutdown.cancelled().await;
+            Ok(())
+        }));
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(socket.exists());
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(1), daemon)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!socket.exists(), "daemon did not clean up its listener");
+        tokio::time::timeout(Duration::from_secs(3), relay)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_initial_announce_without_waiting_for_request_timeout() {
+        shutdown_with_relay_activity(false).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_remains_ready_while_relay_events_keep_arriving() {
+        shutdown_with_relay_activity(true).await;
+    }
 
     #[tokio::test(start_paused = true)]
     async fn offline_status_and_local_requests_do_not_wait_for_relay() {
