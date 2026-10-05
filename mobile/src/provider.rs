@@ -34,6 +34,7 @@ pub struct MobileProvider {
     pub pin_enabled: AtomicBool,
     pub usb_present: Arc<AtomicBool>,
     pub nfc_available: Arc<AtomicBool>,
+    pub selected_nfc: Arc<Mutex<Option<String>>>,
     sessions: Mutex<HashMap<String, Weak<Mutex<Option<CardInfo>>>>>,
 }
 impl MobileProvider {
@@ -45,6 +46,7 @@ impl MobileProvider {
             pin_enabled: AtomicBool::new(true),
             usb_present: Arc::new(AtomicBool::new(false)),
             nfc_available: Arc::new(AtomicBool::new(false)),
+            selected_nfc: Arc::new(Mutex::new(None)),
             sessions: Mutex::new(HashMap::new()),
         })
     }
@@ -112,46 +114,15 @@ impl Provider for MobileProvider {
             let registered = (candidates.len() == 1).then(|| &candidates[0]);
             let nfc =
                 registered.is_some_and(|c| c.nfc_enabled) && nfc_available.load(Ordering::Acquire);
-            let state = app.proof(&context.channel)?.verify()?;
-            let device = state.member(&context.peer)?;
             let prompt_stop = stop.child_token();
             let _guard = CancelOnDrop(stop.clone());
-            let make_prompt = || {
-                broker.request(
-                    |token| NativeEvent::Prompt {
-                        prompt: PinPrompt {
-                            token,
-                            session: context.session.clone(),
-                            request: 0,
-                            channel: state.name.clone(),
-                            device_name: device.name.clone(),
-                            device_id: context.peer.clone(),
-                            kind: if nfc {
-                                PromptKind::CardNfc
-                            } else {
-                                PromptKind::CardUsb
-                            },
-                            title: String::new(),
-                            description: hibiki_lib::card_prompt::description(
-                                target
-                                    .serial
-                                    .as_deref()
-                                    .or_else(|| registered.map(|c| c.card.serial.as_str())),
-                                None,
-                            ),
-                            label: String::new(),
-                            error: String::new(),
-                            repeat: String::new(),
-                            repeat_error: String::new(),
-                            ok: String::new(),
-                            cancel: String::new(),
-                            not_ok: String::new(),
-                            timeout_seconds: app.config.operation_timeout_seconds as u32,
-                        },
-                    },
-                    &prompt_stop,
-                    Duration::from_secs(app.config.operation_timeout_seconds),
-                )
+            let make_prompt = || async {
+                let serial = target
+                    .serial
+                    .as_deref()
+                    .or_else(|| registered.map(|c| c.card.serial.as_str()))
+                    .context("card serial number is required for insertion prompt")?;
+                confirm_card(&app, &context, &broker, &prompt_stop, serial, nfc).await
             };
             let mut prompt = Box::pin(make_prompt());
             let mut acknowledged = false;
@@ -252,6 +223,7 @@ impl Provider for MobileProvider {
                 None
             };
             let registry = self.cards.clone();
+            let selected_nfc = self.selected_nfc.clone();
             let mut card_set = CardSetSession::new();
             let broker = self.broker.clone();
             let usb_present = self.usb_present.clone();
@@ -346,6 +318,26 @@ impl Provider for MobileProvider {
                                             )
                                         })
                                         .await?
+                                    } else if cmd == "SERIALNO" {
+                                        let cards = registry.lock().unwrap().clone();
+                                        let query = SerialQuery {
+                                            cards: &cards,
+                                            selected_nfc: selected_nfc.lock().unwrap().clone(),
+                                            broker: &broker,
+                                            usb_present: usb_present.load(Ordering::Acquire),
+                                            nfc_available: nfc_available.load(Ordering::Acquire),
+                                        };
+                                        match query.run(args, &app, &context, &command_stop).await?
+                                        {
+                                            Some(info) => {
+                                                card_set.bind(info);
+                                                card_set.card.command(&line)
+                                            }
+                                            None => Ok(AssuanResult::error(
+                                                assuan::CARD_NOT_PRESENT,
+                                                "Card not present",
+                                            )),
+                                        }
                                     } else {
                                         if matches!(cmd, "RESET" | "RESTART") {
                                             *prepared.lock().unwrap() = None;
@@ -408,6 +400,119 @@ impl Provider for MobileProvider {
         })
     }
 }
+// Presence queries never infer USB readiness from a saved registration.
+// An explicitly selected NFC key is advertised without asking; only a demand
+// for another registered NFC key may open an availability prompt.
+struct SerialQuery<'a> {
+    cards: &'a [RegisteredCard],
+    selected_nfc: Option<String>,
+    broker: &'a Arc<Broker>,
+    usb_present: bool,
+    nfc_available: bool,
+}
+impl SerialQuery<'_> {
+    async fn run(
+        &self,
+        args: &str,
+        app: &App,
+        context: &ProviderContext,
+        stop: &CancellationToken,
+    ) -> Result<Option<CardInfo>> {
+        let serial = args
+            .split_ascii_whitespace()
+            .find_map(|a| a.strip_prefix("--demand="));
+        if self.usb_present && self.cards.iter().any(|c| c.usb_enabled) {
+            let broker = self.broker.clone();
+            let probe_stop = stop.child_token();
+            let _guard = CancelOnDrop(probe_stop.clone());
+            match tokio::task::spawn_blocking(move || {
+                card::inspect(broker, probe_stop, CardTransport::Usb)
+            })
+            .await?
+            {
+                Ok(info)
+                    if serial.is_none_or(|s| s.eq_ignore_ascii_case(&info.serial))
+                        && self.cards.iter().any(|c| {
+                            c.usb_enabled && c.card.serial.eq_ignore_ascii_case(&info.serial)
+                        }) =>
+                {
+                    return Ok(Some(info));
+                }
+                Err(error) if card::operation_error(&error).canceled() => return Err(error),
+                _ => {}
+            }
+        }
+        let selected = self.selected_nfc.as_deref().and_then(|selected| {
+            self.cards.iter().find(|c| {
+                self.nfc_available
+                    && c.nfc_enabled
+                    && c.card.serial.eq_ignore_ascii_case(selected)
+                    && serial.is_none_or(|s| s.eq_ignore_ascii_case(&c.card.serial))
+            })
+        });
+        if let Some(entry) = selected {
+            let mut info = entry.card.clone();
+            info.transport = CardTransport::Nfc;
+            return Ok(Some(info));
+        }
+        let nfc = serial.and_then(|serial| {
+            self.cards.iter().find(|c| {
+                c.nfc_enabled && self.nfc_available && c.card.serial.eq_ignore_ascii_case(serial)
+            })
+        });
+        if let Some(entry) = nfc {
+            confirm_card(app, context, self.broker, stop, &entry.card.serial, true).await?;
+            let mut info = entry.card.clone();
+            info.transport = CardTransport::Nfc;
+            return Ok(Some(info));
+        }
+        Ok(None)
+    }
+}
+
+async fn confirm_card(
+    app: &App,
+    context: &ProviderContext,
+    broker: &Arc<Broker>,
+    stop: &CancellationToken,
+    serial: &str,
+    nfc: bool,
+) -> Result<Zeroizing<Vec<u8>>> {
+    let state = app.proof(&context.channel)?.verify()?;
+    let device = state.member(&context.peer)?;
+    broker
+        .request(
+            |token| NativeEvent::Prompt {
+                prompt: PinPrompt {
+                    token,
+                    session: context.session.clone(),
+                    request: 0,
+                    channel: state.name.clone(),
+                    device_name: device.name.clone(),
+                    device_id: context.peer.clone(),
+                    kind: if nfc {
+                        PromptKind::CardNfc
+                    } else {
+                        PromptKind::CardUsb
+                    },
+                    title: String::new(),
+                    description: hibiki_lib::card_prompt::description(serial, ""),
+                    label: String::new(),
+                    error: String::new(),
+                    repeat: String::new(),
+                    repeat_error: String::new(),
+                    ok: String::new(),
+                    cancel: String::new(),
+                    not_ok: String::new(),
+                    timeout_seconds: app.config.operation_timeout_seconds as u32,
+                },
+            },
+            stop,
+            Duration::from_secs(app.config.operation_timeout_seconds),
+        )
+        .await
+}
+
 async fn send(outputs: &mpsc::Sender<SessionOutput>, request: u64, line: Line) -> Result<()> {
     outputs.send(SessionOutput::Line { request, line }).await?;
     Ok(())

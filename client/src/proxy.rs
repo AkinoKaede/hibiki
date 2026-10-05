@@ -348,6 +348,40 @@ struct CardState {
     preparation: Vec<Line>,
 }
 impl CardState {
+    fn observe_keyinfo(&mut self, args: &str, result: &AssuanResult) {
+        let Some(key) = keygrip(args).filter(|_| result.success()) else {
+            return;
+        };
+        let serial = |record: &str| {
+            let mut fields = record.split_ascii_whitespace();
+            if !fields.next()?.eq_ignore_ascii_case(key) || fields.next()? != "T" {
+                return None;
+            }
+            let serial = fields.next()?;
+            (!serial.is_empty() && serial.bytes().all(|b| b.is_ascii_hexdigit()))
+                .then(|| serial.to_owned())
+        };
+        let mut data = Vec::new();
+        for line in &result.lines {
+            if let Some(record) = line.strip_prefix(b"S KEYINFO ")
+                && let Ok(record) = std::str::from_utf8(record)
+                && let Some(serial) = serial(record)
+            {
+                self.serial = serial;
+                return;
+            }
+            if let Some(record) = line.strip_prefix(b"D ")
+                && let Ok(record) = assuan::unescape(record)
+            {
+                data.extend_from_slice(&record);
+            }
+        }
+        if let Ok(data) = std::str::from_utf8(&data)
+            && let Some(serial) = data.lines().find_map(serial)
+        {
+            self.serial = serial;
+        }
+    }
     fn observe_serial(&mut self, command: &str, result: &AssuanResult) {
         // Inventory responses may contain several cards. Enumerating them must
         // not silently bind the next private operation to the first one.
@@ -382,6 +416,11 @@ impl CardState {
     }
 }
 
+fn keygrip(args: &str) -> Option<&str> {
+    args.split_ascii_whitespace()
+        .find(|value| value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
 pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result<()> {
     hub.authorized(&open.channel, &hub.app.identity.device.id())?;
     let lease = hub.track_local(&open.channel)?;
@@ -401,12 +440,13 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
         reader_stop.cancel();
     });
     let result = async {
-        write_line(&mut writer, b"OK HIbiki Assuan stdio service").await?;
+        write_line(&mut writer, b"OK Hibiki Assuan stdio service").await?;
         let pool = (open.service == ServiceKind::Scdaemon)
             .then(|| crate::card_pool::Pool::start(hub.clone(), open.clone(), stop.clone()));
         let mut card_state = CardState::default();
         let mut settings = Settings::default();
         let mut broken = false;
+        let mut canceled = false;
         while let Some(line) = inputs.recv().await {
             hub.authorized(&open.channel, &hub.app.identity.device.id())?;
             let (cmd, args) = match assuan::command(&line) {
@@ -507,8 +547,15 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                 if matches!(cmd, "RESET" | "RESTART") {
                     pool.reset(line.clone()).await;
                     broken = false;
+                    canceled = false;
                     card_state = CardState::default();
                     return Ok(AssuanResult::ok());
+                }
+                if canceled {
+                    return Ok(AssuanResult::error(
+                        assuan::CANCELED,
+                        "card operation canceled; reset before retrying",
+                    ));
                 }
                 if matches!(cmd, "SERIALNO" | "SWITCHCARD") {
                     broken = false;
@@ -519,10 +566,6 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                         .find_map(|a| a.strip_prefix("--demand="))
                         .unwrap_or(if cmd == "SWITCHCARD" { args } else { "" })
                         .to_string();
-                    pool.prepare(hibiki_lib::protocol::CardTarget {
-                        serial: (!card_state.serial.is_empty()).then(|| card_state.serial.clone()),
-                        key: None,
-                    });
                 }
                 if broken {
                     bail!("card session failed; reset before a new operation");
@@ -588,7 +631,11 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                     }
                     return Ok(result);
                 }
-                let result = if card_state.public_source.is_empty() {
+                // A previous SERIALNO may have found an unrelated card. The
+                // requested key must still be looked up across all devices.
+                let result = if card_state.public_source.is_empty()
+                    || (cmd == "KEYINFO" && keygrip(args).is_some())
+                {
                     let (peer, result) = pool.query(line.clone(), &mut query_failures).await?;
                     if result.success() {
                         card_state.public_source = peer;
@@ -599,6 +646,9 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                         .await?
                 };
                 card_state.observe_serial(cmd, &result);
+                if cmd == "KEYINFO" {
+                    card_state.observe_keyinfo(args, &result);
+                }
                 if result.success() {
                     card_state.remember(&line)?;
                 }
@@ -656,6 +706,12 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                     )
                 }
             };
+            if open.service == ServiceKind::Scdaemon && result.canceled() {
+                canceled = true;
+                if let Some(pool) = &pool {
+                    pool.cancel_prompts();
+                }
+            }
             tracing::debug!(service=?open.service,command=cmd,success=result.success(),elapsed_us=started.elapsed().as_micros(),"Assuan result");
             write_result(&mut writer, &result).await?;
         }
@@ -806,6 +862,33 @@ mod card_state_tests {
             },
         );
         assert_eq!(state.serial, "original");
+    }
+
+    #[test]
+    fn keyinfo_selects_the_requested_card_but_not_inventory_or_failed_results() {
+        let key = "A".repeat(40);
+        for data in [false, true] {
+            let mut state = CardState {
+                serial: "previous".into(),
+                ..Default::default()
+            };
+            let record = format!("{key} T AABB OPENPGP.1 s");
+            let mut lines = if data {
+                assuan::data_lines(format!("{record}\n").as_bytes())
+            } else {
+                vec![format!("S KEYINFO {record}").as_str().into()]
+            };
+            lines.push("ERR 17 No key".into());
+            let mut result = AssuanResult { lines };
+            state.observe_keyinfo(&key, &result);
+            assert_eq!(state.serial, "previous");
+            *result.lines.last_mut().unwrap() = "OK".into();
+            state.observe_keyinfo("--list", &result);
+            state.observe_keyinfo(&"B".repeat(40), &result);
+            assert_eq!(state.serial, "previous");
+            state.observe_keyinfo(&key, &result);
+            assert_eq!(state.serial, "AABB");
+        }
     }
 
     #[test]

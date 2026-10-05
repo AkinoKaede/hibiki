@@ -87,18 +87,9 @@ struct StatusView: View {
             Section("Provider Services") {
                 Toggle("Pinentry", isOn: $model.pinEnabled).onChange(of: model.pinEnabled) { _, _ in model.updateServices() }
                 Toggle("OpenPGP Card", isOn: $model.cardEnabled).onChange(of: model.cardEnabled) { _, _ in model.updateServices() }
-                if model.cardEnabled, model.registeredCards.isEmpty { Text("Register your security key in the Security Keys tab.").foregroundStyle(.secondary) }
-                if model.cardEnabled, !model.registeredCards.isEmpty {
-                    if model.usableCards.isEmpty {
-                        Text("Unavailable on This Device").foregroundStyle(.secondary)
-                    } else if model.usbAvailable {
-                        Label("USB Connection Detected", systemImage: "cable.connector")
-                    } else if model.nfcSupported {
-                        Label(model.usbSupported ? "Connect via USB, or enter the PIN and tap with NFC." : "Enter your PIN, then tap your security key with NFC.", systemImage: "wave.3.right")
-                    } else {
-                        Label("Insert your security key, then continue.", systemImage: "cable.connector")
-                    }
-                }
+            }
+            if !model.nfcCards.isEmpty {
+                Section("NFC Key") { NFCKeyRows(model: model) }
             }
             if let pairing = model.pairing {
                 Section("Waiting for Approval") {
@@ -109,11 +100,26 @@ struct StatusView: View {
                     WithdrawRequestButton(model: model)
                 }
             }
-            Section {
-                Label("Private keys remain on your security key.", systemImage: "lock.shield")
-                Text("Keep Hibiki open to receive requests. Returning to the app reconnects automatically.").foregroundStyle(.secondary)
-            }
         }.navigationTitle("Hibiki").refreshable { await model.refresh() }
+    }
+}
+
+struct NFCKeyRows: View {
+    @Bindable var model: AppModel
+    var body: some View {
+        ForEach(model.nfcCards) { entry in
+            let selected = model.selectedNFCCard == entry.card.serial
+            Button { model.selectNFCCard(selected ? nil : entry.card.serial) } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: selected ? "largecircle.fill.circle" : "circle")
+                    Text(verbatim: entry.name).foregroundStyle(.primary).lineLimit(1)
+                    Spacer(minLength: 8)
+                    Text(verbatim: formatCardNumber(serial: entry.card.serial)).font(.caption.monospaced()).foregroundStyle(.secondary)
+                }
+            }
+            .accessibilityIdentifier("nfcCard-\(entry.card.serial)")
+            .accessibilityValue(selected ? Text("Selected") : Text("Not Selected"))
+        }
     }
 }
 
@@ -724,9 +730,14 @@ struct PinView: View {
         NavigationStack {
             Form {
                 Section("Verified Requester") {
-                    Text(verbatim: prompt.deviceName).font(.headline)
-                    Text(verbatim: prompt.channel).foregroundStyle(.secondary)
-                    Text(verbatim: prompt.deviceId).font(.caption.monospaced()).textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(verbatim: prompt.deviceName).font(.headline)
+                            Spacer()
+                            Text(verbatim: prompt.channel).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        Text(verbatim: prompt.deviceId).font(.caption2.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+                    }
                 }
                 Section {
                     if cardRequest {
@@ -748,13 +759,16 @@ struct PinView: View {
                             .focused($focused)
                             .accessibilityIdentifier("pinInput")
                     }
+                    if prompt.kind == .confirm { NFCKeyRows(model: model) }
                     Button(prompt.ok.isEmpty ? String(localized: "Continue") : PinentryLabel.display(prompt.ok)) { submit() }
                         .disabled(submitting || (prompt.kind == .cardUsb && !model.usbPresent))
                         .accessibilityIdentifier("submitPIN")
                     if !prompt.notOk.isEmpty, !asksPin { Button(PinentryLabel.display(prompt.notOk)) { model.answer(prompt, accepted: false) } }
                 }
             }
+            .listSectionSpacing(.compact)
             .navigationTitle(prompt.title.isEmpty ? String(localized: "Hibiki Request") : prompt.title)
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button { pin = ""; model.cancelPrompt(prompt) } label: {

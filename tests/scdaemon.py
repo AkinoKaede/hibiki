@@ -84,7 +84,7 @@ def pin(ref):
 def attributes():
     yield 'SERIALNO ' + card['serial']
     yield 'APPTYPE OPENPGP'
-    yield 'DISP-NAME HIbiki test card'
+    yield 'DISP-NAME Hibiki test card'
     yield 'DISP-LANG en'
     yield 'DISP-SEX 9'
     yield 'CHV-STATUS 1 127 127 127 3 3 3'
@@ -104,11 +104,14 @@ try:
         if (base / 'card.json').exists(): card = json.loads((base / 'card.json').read_text())
         with (base / 'card-commands.log').open('a') as f:
             f.write(command + (' '+args if command in ('SERIALNO','LEARN','READKEY','GETATTR','KEYINFO') else '') + '\n')
+        if not card.get('present', True) and command in ('LEARN', 'KEYINFO', 'GETATTR', 'READKEY', 'PKSIGN', 'PKDECRYPT', 'SWITCHCARD'):
+            emit(b'ERR 100663408 Card not present')
+            continue
         if command == 'SERIALNO':
             time.sleep(card.get('delay', 0))
             demand = next((a[9:] for a in args.split() if a.startswith('--demand=')), None)
             if not card.get('present', True) or (demand and demand != card['serial']):
-                emit(b'ERR 100663404 Card not present')
+                emit(b'ERR 100663408 Card not present')
                 continue
             emit(('S SERIALNO ' + card['serial']).encode())
         elif command == 'LEARN':

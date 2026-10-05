@@ -54,7 +54,7 @@ struct CardIdentityFields: View {
             Text(verbatim: info.serial).font(.caption.monospaced()).textSelection(.enabled)
         }
         if let identity = OpenPGPIdentity(aid: info.serial) {
-            LabeledContent("Card Number", value: identity.manufacturer + " " + identity.serial)
+            LabeledContent("Card Number", value: formatCardNumber(serial: info.serial))
             LabeledContent("Serial Number", value: identity.serial)
             LabeledContent("OpenPGP Version", value: identity.version)
             LabeledContent("Manufacturer ID", value: identity.manufacturer)

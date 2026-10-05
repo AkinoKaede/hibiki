@@ -1,5 +1,5 @@
 [Unit]
-Description=HIbiki remote OpenPGP card and Pinentry daemon
+Description=Hibiki remote OpenPGP card and Pinentry daemon
 
 [Service]
 Type=simple

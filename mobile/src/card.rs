@@ -360,7 +360,7 @@ impl CardSession {
             "GETINFO" => Ok(match args {
                 "version" => ok_data(b"2.4.0"),
                 "app_list" => ok_data(b"openpgp:\n"),
-                "reader_list" => ok_data(b"HIbiki iOS\n"),
+                "reader_list" => ok_data(b"Hibiki iOS\n"),
                 "deny_admin" => AssuanResult::ok(),
                 "card_list" => ok_status([format!("SERIALNO {}", self.info.serial)]),
                 "status" => ok_data(b"u"),

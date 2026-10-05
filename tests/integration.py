@@ -145,7 +145,7 @@ class Device:
         self.daemon=subprocess.Popen([str(CLIENT),'daemon'],env=self.env,stdout=self.log,stderr=self.log)
         def ready():
             assert self.daemon.poll() is None,self.log_path.read_text()
-            if connected: return 'HIbiki daemon connected' in self.log_path.read_text()
+            if connected: return 'Hibiki daemon connected' in self.log_path.read_text()
             return b'daemon: running;' in self.cli('status', ok=False).stdout
         wait_for(ready)
     def stop(self):
@@ -300,6 +300,62 @@ def pinentry_compatibility(requester, provider):
         provider.mode()
 
 
+def missing_card_prompt(requester, provider, input_device, card, args, data, cancel=False):
+    """Exercise gpg-agent's own numbered CONFIRM, including an offline card peer."""
+    answer = input_device.root/'confirm-answer'
+    description = input_device.root/'pinentry-description.txt'
+    count = lambda: len(list(input_device.root.glob('pinentry-[0-9]*')))
+    def confirm(response):
+        pending = answer.with_suffix('.new')
+        pending.write_bytes(response)
+        pending.replace(answer)
+    def wait_prompt(previous):
+        wait_for(lambda: count() > previous and input_device.waiting() and description.exists()
+                 and b'Please insert the card with serial number' in description.read_bytes(), timeout=3)
+        assert b'0005 00001234' in description.read_bytes(), description.read_bytes()
+        return count()
+    provider.card(dict(card, present=False))
+    if cancel: provider.stop()
+    input_device.mode(confirm_file=str(answer))
+    previous = count()
+    command = 'PKDECRYPT' if '--decrypt' in args else 'PKSIGN'
+    executions = lambda: (provider.root/'card-commands.log').read_text().splitlines().count(command)
+    before = executions()
+    process = None
+    try:
+        with tempfile.TemporaryFile() as source:
+            source.write(data); source.seek(0)
+            process = subprocess.Popen([GPG, '--homedir', str(requester.native), *args], env=requester.env,
+                                       stdin=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            previous = wait_prompt(previous)
+            if cancel:
+                confirm(b'ERR 99 canceled')
+            else:
+                confirm(b'OK')  # Confirming without the card must prompt again.
+                previous = wait_prompt(previous)
+                provider.card(dict(card, serial='D2760001240103040005000099990000', keys=[]))
+                confirm(b'OK')  # A different card cannot satisfy the key lookup.
+                wait_prompt(previous)
+                assert executions() == before
+                provider.card(card)
+                confirm(b'OK')
+            output, error = process.communicate(timeout=15)
+            if cancel:
+                assert process.returncode != 0 and b'cancel' in error.lower(), error
+                assert executions() == before
+            else:
+                assert process.returncode == 0, error
+                assert executions() == before + 1, 'private operation was retried'
+            return output
+    finally:
+        if process and process.poll() is None:
+            process.kill(); process.communicate()
+        answer.unlink(missing_ok=True)
+        provider.card(card)
+        if cancel: provider.start()
+        input_device.mode()
+
+
 def test_all():
     with tempfile.TemporaryDirectory(prefix='hi-',dir='/tmp') as temp:
         root=Path(temp);server_data=root/'server';server_data.mkdir(mode=0o700)
@@ -376,7 +432,7 @@ def test_all():
             assert b'daemon: running; relay: connected' in a.cli('status').stdout
             assert b'client channel creation: false' in a.cli('doctor').stdout
             assert b'hibiki use NAME' in a.cli('setup').stderr
-            print('PASS: fresh HIbiki pairing, server-only creation and independent services',flush=True)
+            print('PASS: fresh Hibiki pairing, server-only creation and independent services',flush=True)
 
             channel_id = json.loads(a.cli('channel', 'list', '--json').stdout)['channels'][0]['id']
             assert json.loads(a.cli('channel', 'pending', channel_id[:6], '--json').stdout)['channel']['id'] == channel_id
@@ -447,73 +503,95 @@ def test_all():
             assert counts==[len(list(d.root.glob('pinentry-[0-9]*'))) for d in (b,c)]
             print('PASS: local input and signing bypass stalled relay, including cold daemon startup',flush=True)
 
-            # Every enabled provider starts with no card, even with password sharing disabled.
+            # Discovery is silent even when every enabled provider has no card.
             a.services(scdaemon=True); a.mode(delay=10); a.restart()
             b.services(scdaemon=True); b.mode(delay=10); b.restart()
             for device in (a,b): device.card(dict(card,present=False))
             wait_for(lambda: a.idle() and b.idle())
+            prompts = [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)]
             with Assuan(a, 'scdaemon') as sc:
                 wait_for(lambda: not a.idle('scdaemon') and not b.idle('scdaemon'))
-                wait_for(lambda: a.waiting() and b.waiting())
                 children = [len(list(d.root.glob('scdaemon-[0-9]*'))) for d in (a,b)]
-                prompts = [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)]
-                sc.send(b'SERIALNO')
-                time.sleep(1)  # Several public-query retries with no user input.
-                assert prompts == [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)], ('background queries recreated unanswered prompts', [[p.name for p in v] for v in prompts], [[(p.name,p.read_text()) for p in d.root.glob('pinentry-[0-9]*')] for d in (a,b)])
-                assert a.waiting() and b.waiting(), 'background queries closed unanswered prompts'
+                for command in [b'SERIALNO', ('SERIALNO --demand='+card['serial']).encode()]:
+                    started = time.monotonic()
+                    assert sc.command(command) == [b'ERR 100663408 Card not present']
+                    assert time.monotonic() - started < 3, 'no-card discovery waited for insertion'
+                assert prompts == [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)], 'discovery created insertion prompts'
+                assert a.idle() and b.idle()
                 a.card(card)
-                assert sc.result()[-1] == b'OK'
+                assert sc.command(b'SERIALNO')[-1] == b'OK'
+                for command in [b'READKEY OPENPGP.1', ('SWITCHCARD '+card['serial']).encode(), b'GETATTR SERIALNO']:
+                    assert sc.command(command)[-1] == b'OK'
+                assert prompts == [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)]
+                a.card(dict(card, present=False))
                 assert sc.command(b'SETDATA '+b'00'*32)[-1] == b'OK'
-                assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode(), lambda _: [b'D 123456',b'END'])[-1] == b'OK'
+                sc.send(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode())
+                wait_for(lambda: a.waiting() and b.waiting())
+                prompts = [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)]
+                time.sleep(1)
+                assert prompts == [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)], 'polling recreated unanswered prompts'
+                assert a.waiting() and b.waiting()
+                a.card(card)
+                assert sc.result(lambda _: [b'D 123456',b'END'])[-1] == b'OK'
                 wait_for(lambda: a.idle() and b.idle())
                 assert not a.idle('scdaemon') and not b.idle('scdaemon'), 'losing candidate process was closed'
                 assert children == [len(list(d.root.glob('scdaemon-[0-9]*'))) for d in (a,b)]
                 assert sc.command(b'RESET')[-1] == b'OK'
                 assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
                 assert children == [len(list(d.root.glob('scdaemon-[0-9]*'))) for d in (a,b)]
+                assert prompts == [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)], 'RESET discovery recreated insertion prompts'
             wait_for(lambda: a.idle('scdaemon') and b.idle('scdaemon'))
-            # Canceling either Mac's insertion dialog terminates discovery immediately.
+            # Canceling either Mac's insertion dialog terminates private preparation.
             for cancelling in (a, b):
                 for device in (a, b):
                     device.card(dict(card, present=False))
                     device.mode(delay=.1 if device is cancelling else 10,
                                 cancel=device is cancelling)
                 started = time.monotonic()
+                a.card(card)
                 with Assuan(a, 'scdaemon') as sc:
-                    result = sc.command(b'SERIALNO')
+                    assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
+                    a.card(dict(card, present=False))
+                    assert sc.command(b'SETDATA '+b'00'*32)[-1] == b'OK'
+                    result = sc.command(b'PKSIGN --hash=sha256 OPENPGP.1')
                     assert result[-1].startswith(b'ERR 99 '), result
                     assert time.monotonic() - started < 3, 'insertion Cancel waited for timeout'
                     assert sc.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR')
                 wait_for(lambda: a.idle() and b.idle())
             a.mode(delay=10); b.mode(delay=10)
-            print('PASS: local or remote Mac insertion Cancel ends discovery without a key', flush=True)
+            print('PASS: local or remote Mac insertion Cancel ends private preparation without a key', flush=True)
             # The requester stays cardless while the target card arrives remotely.
             for device in (a,b): device.card(dict(card,present=False))
+            prompts = [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)]
             with Assuan(a, 'scdaemon') as sc:
-                sc.send(('SERIALNO --demand='+card['serial']).encode())
-                wait_for(lambda: a.waiting() and b.waiting())
-                prompts = [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)]
-                time.sleep(1)
-                assert prompts == [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)]
+                assert sc.command(('SERIALNO --demand='+card['serial']).encode()) == [b'ERR 100663408 Card not present']
+                assert prompts == [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)], 'targeted discovery created insertion prompts'
                 b.card(card)
-                assert sc.result()[-1] == b'OK'
+                assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
+                b.card(dict(card, present=False))
                 assert sc.command(b'SETDATA '+b'00'*32)[-1] == b'OK'
-                assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode(), lambda _: [b'D 123456',b'END'])[-1] == b'OK'
+                sc.send(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode())
+                wait_for(lambda: a.waiting() and b.waiting())
+                b.card(card)
+                assert sc.result(lambda _: [b'D 123456',b'END'])[-1] == b'OK'
                 wait_for(lambda: a.idle() and b.idle())
             wait_for(lambda: a.idle('scdaemon') and b.idle('scdaemon'))
 
             # A command timeout must also close prompts before the caller disconnects.
             b.card(dict(card,present=False))
             a.services(scdaemon=True,timeout=2); a.restart()
+            a.card(card)
             with Assuan(a, 'scdaemon') as sc:
-                sc.send(b'SERIALNO')
+                assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
+                a.card(dict(card, present=False))
+                sc.send(b'PKSIGN --hash=sha256 OPENPGP.1')
                 wait_for(lambda: a.waiting() and b.waiting())
                 assert sc.result()[-1].startswith(b'ERR')
                 wait_for(lambda: a.idle() and b.idle())
             wait_for(lambda: a.idle('scdaemon') and b.idle('scdaemon'))
             b.card(card)
             a.services(); a.restart(); b.services(scdaemon=True,pinentry=True); b.mode(); b.restart()
-            print('PASS: unanswered local/remote prompts survive discovery; winners and timeouts close prompts; RESET retains processes', flush=True)
+            print('PASS: discovery stays silent; private preparation waits for local/remote cards; winners and timeouts close prompts; RESET retains processes', flush=True)
 
             concurrent_agent_sessions(a)
             print('PASS: simultaneous GnuPG clients use independent scdaemon connections', flush=True)
@@ -527,7 +605,7 @@ def test_all():
             server.terminate();server.wait(timeout=10)
             config.write_text(config.read_text().replace('127.0.0.1:0','127.0.0.1:'+port))
             server=subprocess.Popen([str(SERVER),'--config',str(config)],stdout=log,stderr=log)
-            wait_for(lambda:a.log_path.read_text().count('HIbiki daemon connected')>=2,timeout=15)
+            wait_for(lambda:a.log_path.read_text().count('Hibiki daemon connected')>=2,timeout=15)
             b.start();assert pe.result()[-1]==b'OK';pe.close()
             count=len(list(c.root.glob('pinentry-[0-9]*')))
             c.start();time.sleep(.5)
@@ -543,14 +621,25 @@ def test_all():
 
             b.stop()
             with Assuan(a,'scdaemon') as sc:
-                sc.send(('SERIALNO --demand='+card['serial']).encode());time.sleep(.3);assert not queued();b.start()
-                assert sc.result()[-1]==b'OK'
+                started = time.monotonic()
+                assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1].startswith(b'ERR')
+                assert time.monotonic() - started < 3 and not queued()
+                b.start()
+                wait_for(lambda: sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK')
                 assert sc.command(b'SETDATA '+b'00'*32)[-1]==b'OK'
                 count=b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN')
-                b.stop();sc.send(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode());time.sleep(.3);b.start()
-                assert sc.result(lambda _: [b'D 123456',b'END'])[-1]==b'OK'
+                b.stop()
+                started = time.monotonic()
+                assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode())[-1].startswith(b'ERR')
+                assert time.monotonic() - started < 3
+                assert b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN') == count
+                b.start()
+                assert sc.command(b'RESET')[-1] == b'OK'
+                wait_for(lambda: sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK')
+                assert sc.command(b'SETDATA '+b'00'*32)[-1] == b'OK'
+                assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode(), lambda _: [b'D 123456',b'END'])[-1] == b'OK'
                 assert b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN')==count+1
-            print('PASS: offline card discovery and pinned card preparation restore; signature executes once',flush=True)
+            print('PASS: offline devices end discovery/preparation promptly; an explicit new request after reconnect signs once',flush=True)
 
             # Once execution has been claimed, a lost response must never repeat it.
             delayed=dict(card,private_delay=4);b.card(delayed)
@@ -641,8 +730,12 @@ def test_all():
             assert b'D 123456' in result.stdout and b'ERR ' not in result.stdout, result.stdout
             a.kill_agent()
             print('PASS: real gpg-agent accepts an unsupported PINENTRY_USER_DATA option', flush=True)
+            # The requester participates with both services enabled but no local card.
+            a.services(scdaemon=True, pinentry=True); a.mode(delay=10); a.card(dict(card, present=False)); a.restart()
+            prompts = [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)]
             status=a.gpg('--card-status')
-            assert b'00001234' in status.stdout or b'HIbiki test card' in status.stdout,status.stdout
+            assert b'00001234' in status.stdout or b'Hibiki test card' in status.stdout,status.stdout
+            assert prompts == [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)], 'real GnuPG card discovery created insertion prompts'
             a.gpg('--batch','--local-user',fpr,'--armor','--detach-sign',data=b'card message')
             signed=a.gpg('--batch','--local-user',fpr,'--detach-sign',data=b'card message').stdout
             message=root/'message';message.write_bytes(b'card message');signature=root/'signature';signature.write_bytes(signed)
@@ -655,7 +748,7 @@ def test_all():
             run(['git','config','gpg.program',GPG],cwd=git);run(['git','config','user.signingkey',fpr],cwd=git)
             run(['git','commit','--allow-empty','-S','-m','remote card'],cwd=git,env=a.env)
             run(['git','verify-commit','HEAD'],cwd=git,env=a.env)
-            print('PASS: real GnuPG card learning, RSA signing/decryption and native Git signing; A calls, B holds card, C enters PIN',flush=True)
+            print('PASS: real GnuPG silent discovery, RSA signing/decryption and Git signing; A has no card with both services enabled, B holds card, C enters PIN',flush=True)
 
             # Native scdaemon's wrapped PIN cache belongs to its persistent process.
             # Real gpg-agent must return the opaque value, without another pinentry.
@@ -681,6 +774,18 @@ def test_all():
             attempts.write_text('0')
             c.mode(password='123456')
             print('PASS: real gpg-agent PINCACHE round trip avoids a second PIN prompt and reuses native scdaemon',flush=True)
+            a.card(dict(card, serial='D2760001240103040005000099990000', keys=[]))
+            signed = a.gpg('--local-user', fpr, '--detach-sign', data=b'card message').stdout
+            signature.write_bytes(signed); a.gpg('--verify', signature, message)
+            assert a.gpg('--decrypt', data=cipher).stdout == b'card secret'
+            a.card(dict(card, present=False))
+            print('PASS: an unrelated local card does not hide the remote signing/decryption key', flush=True)
+            signed = missing_card_prompt(a, b, c, card, ['--local-user', fpr, '--detach-sign'], b'card message')
+            signature.write_bytes(signed); a.gpg('--verify', signature, message)
+            assert missing_card_prompt(a, b, c, card, ['--decrypt'], cipher) == b'card secret'
+            missing_card_prompt(a, b, c, card, ['--local-user', fpr, '--detach-sign'], b'cancel missing card', cancel=True)
+            print('PASS: gpg-agent shows the numbered insertion prompt with absent/offline cards; confirmation rechecks all devices, wrong cards fail, Cancel ends the operation', flush=True)
+            a.kill_agent(); a.services(); a.restart()
 
 
             # A software private key stays in A; native agent retries the bad remote password.
@@ -721,7 +826,7 @@ def test_all():
 
             # The fastest present card is not necessarily the requested card.
             other={'serial':'D2760001240103040005000099990000','keys':[]}
-            # Leave the wrong-card insertion prompt unanswered; Cancel would now end discovery.
+            # A wrong-card candidate must not prompt during discovery.
             c.mode(delay=10)
             c.card(other);c.services(scdaemon=True,pinentry=True);c.restart()
             card['delay']=.15;b.card(card)
@@ -729,8 +834,11 @@ def test_all():
                 reply=sc.command(('SERIALNO --demand='+card['serial']).encode())
                 assert ('S SERIALNO '+card['serial']).encode() in reply
                 assert sc.command(b'RESTART')[-1]==b'OK'
+                assert ('S SERIALNO '+other['serial']).encode() in sc.command(b'SERIALNO')
                 reply=sc.command(('KEYINFO '+card['keys'][0]['grip']).encode())
                 assert any(card['serial'].encode() in l for l in reply),reply
+                assert sc.command(b'SETDATA '+b'00'*32)[-1] == b'OK'
+                assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode(), lambda _: [b'D 123456',b'END'])[-1] == b'OK'
                 b.stop()
                 assert sc.command(b'GETATTR SERIALNO')[-1].startswith(b'ERR')
                 b.start()
@@ -740,20 +848,20 @@ def test_all():
             wait_for(lambda:b.idle('scdaemon') and c.idle('scdaemon'))
             print('PASS: serial/keygrip matching excludes faster wrong cards; lost bindings require explicit reset',flush=True)
 
-            # Preserve a definitive error at the deadline while another eligible
-            # card provider is offline, then allow another query without RESET.
+            # An offline member must not delay a native query result or cause
+            # retries. A later query can still succeed without RESET.
             a.services(timeout=2); a.restart(); c.stop()
             try:
                 with Assuan(a, 'scdaemon') as sc:
                     before = (b.root/'card-commands.log').read_text().count('READKEY OPENPGP.99\n')
                     started = time.monotonic()
                     assert sc.command(b'READKEY OPENPGP.99') == [b'ERR 17 No key']
-                    assert 1.5 <= time.monotonic() - started < 4
+                    assert time.monotonic() - started < 1.5, 'offline member delayed discovery'
                     assert (b.root/'card-commands.log').read_text().count('READKEY OPENPGP.99\n') == before + 1
                     assert sc.command(b'READKEY OPENPGP.1')[-1] == b'OK'
             finally:
                 c.start()
-            print('PASS: offline candidates retain the deadline without masking or retrying a native No key error', flush=True)
+            print('PASS: offline candidates do not delay or mask native discovery results', flush=True)
 
             # Only local pinentry remains available.
             a.services(pinentry=True);b.services(scdaemon=True);c.services()
@@ -803,7 +911,7 @@ def test_all():
             counts=[len(list(d.root.glob('pinentry-[0-9]*'))) for d in devices]
             config.write_text(config.read_text().replace('127.0.0.1:0','127.0.0.1:'+port))
             server=subprocess.Popen([str(SERVER),'--config',str(config)],stdout=log,stderr=log)
-            wait_for(lambda:all(d.log_path.read_text().count('HIbiki daemon connected')>=2 for d in devices),timeout=45)
+            wait_for(lambda:all(d.log_path.read_text().count('Hibiki daemon connected')>=2 for d in devices),timeout=45)
             assert counts==[len(list(d.root.glob('pinentry-[0-9]*'))) for d in devices]
             c.mode(delay=.05)
             with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN')[-1]==b'OK'

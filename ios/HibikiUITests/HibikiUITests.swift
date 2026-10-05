@@ -70,13 +70,58 @@ final class HibikiUITests: XCTestCase {
         }
     }
 
+    func testStatusNFCSelectionCanBeClearedAndDoesNotSurviveRelaunch() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-cards-fixture", "--ui-nfc", "--ui-multiple-nfc"]
+        app.launch()
+        let key = app.buttons["nfcCard-D2760001240103040005000012340000"]
+        XCTAssertTrue(key.waitForExistence(timeout: 10))
+        XCTAssertEqual(key.value as? String, "Not Selected")
+        XCTAssertTrue(app.staticTexts["0005 00001234"].exists)
+        XCTAssertTrue(app.staticTexts["12 080 862"].exists)
+        let second = app.buttons["nfcCard-D2760001240100000006120808620000"]
+        key.tap()
+        second.tap()
+        XCTAssertEqual(key.value as? String, "Not Selected")
+        XCTAssertEqual(second.value as? String, "Selected")
+        second.tap()
+        XCTAssertEqual(second.value as? String, "Not Selected")
+        XCTAssertFalse(app.staticTexts["Connect via USB, or enter the PIN and tap with NFC."].exists)
+        key.tap()
+        XCTAssertEqual(key.value as? String, "Selected")
+        key.tap()
+        XCTAssertEqual(key.value as? String, "Not Selected")
+        key.tap()
+        app.terminate()
+        app.launch()
+        XCTAssertTrue(key.waitForExistence(timeout: 10))
+        XCTAssertEqual(key.value as? String, "Not Selected")
+    }
+
+    func testInsertionConfirmationAllowsNFCSelectionBeforeOK() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture", "--ui-nfc", "--ui-confirm"]
+        app.launch()
+        let key = app.buttons["nfcCard-D2760001240103040005000012340000"].firstMatch
+        XCTAssertTrue(app.buttons["submitPIN"].waitForExistence(timeout: 10))
+        XCTAssertTrue(key.isHittable)
+        XCTAssertEqual(key.value as? String, "Not Selected")
+        key.tap()
+        XCTAssertEqual(key.value as? String, "Selected")
+        XCTAssertTrue(app.buttons["submitPIN"].isHittable)
+        app.buttons["submitPIN"].tap()
+        XCTAssertTrue(app.buttons["submitPIN"].waitForNonExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["nfcCard-D2760001240103040005000012340000"].value as? String, "Selected")
+    }
+
     func testPINUsesOnlyCloseButtonToCancel() {
         let app = XCUIApplication()
-        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture"]
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture", "--ui-nfc"]
         app.launch()
         let ok = app.buttons["submitPIN"]
         let close = app.buttons["cancelPIN"]
         XCTAssertTrue(ok.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["nfcCard-D2760001240103040005000012340000"].isHittable)
         XCTAssertFalse(app.buttons["cancelOperation"].exists)
         XCTAssertTrue(close.isHittable)
         XCTAssertEqual(close.label, "Cancel")

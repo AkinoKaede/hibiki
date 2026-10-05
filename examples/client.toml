@@ -12,7 +12,7 @@ gpgconf_program = "gpgconf"
 [scdaemon]
 enabled = true
 # Omit program to locate the native binary with gpgconf --list-components.
-# scdaemon runs with --server and a dedicated home under HIbiki's data directory.
+# scdaemon runs with --server and a dedicated home under Hibiki's data directory.
 # program = "/usr/lib/gnupg/scdaemon"
 
 [pinentry]

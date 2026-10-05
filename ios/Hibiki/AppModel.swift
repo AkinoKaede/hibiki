@@ -9,7 +9,10 @@ final class AppModel {
     var channels: [ChannelInfo] = []
     private(set) var nfcAvailable: Bool
     @ObservationIgnored private let readNFCCapability: () -> Bool
-    var registeredCards: [RegisteredCard] = []
+    var registeredCards: [RegisteredCard] = [] {
+        didSet { reconcileNFCSelection() }
+    }
+    private(set) var selectedNFCCard: String?
     var connection = "offline"
     var error: String?
     var busy = false
@@ -60,12 +63,12 @@ final class AppModel {
               let host = url.host, !host.isEmpty,
               url.user == nil, url.password == nil, url.fragment == nil,
               url.port.map({ (1...65535).contains($0) }) ?? true else {
-            throw NSError(domain: "HIbiki.ServerAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address, with or without wss:// or ws://.")])
+            throw NSError(domain: "Hibiki.ServerAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address, with or without wss:// or ws://.")])
         }
         url.scheme = scheme
         if url.path.isEmpty || url.path == "/" { url.path = "/hibiki" }
         guard let result = url.url?.absoluteString else {
-            throw NSError(domain: "HIbiki.ServerAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address, with or without wss:// or ws://.")])
+            throw NSError(domain: "Hibiki.ServerAddress", code: 1, userInfo: [NSLocalizedDescriptionKey: String(localized: "Enter a valid server address, with or without wss:// or ws://.")])
         }
         if explicitScheme { return [result] }
         url.scheme = "ws"
@@ -78,7 +81,7 @@ final class AppModel {
         for candidate in candidates {
             try Task.checkCancellation()
             do {
-                // Each probe checks the HIbiki protocol and authentication, not just the port.
+                // Each probe checks the Hibiki protocol and authentication, not just the port.
                 try await probe(candidate)
                 try Task.checkCancellation()
                 return candidate
@@ -89,7 +92,7 @@ final class AppModel {
                 failures.append("\(candidate): \(error.localizedDescription)")
             }
         }
-        throw NSError(domain: "HIbiki.ServerConnection", code: 1, userInfo: [NSLocalizedDescriptionKey: failures.joined(separator: "\n\n")])
+        throw NSError(domain: "Hibiki.ServerConnection", code: 1, userInfo: [NSLocalizedDescriptionKey: failures.joined(separator: "\n\n")])
     }
 
     var currentPrompt: PinPrompt? { prompts.first }
@@ -99,10 +102,24 @@ final class AppModel {
     var usbSupported: Bool { registeredCards.contains { $0.usbEnabled } }
     var usbAvailable: Bool { usbPresent && usbSupported }
     var nfcSupported: Bool { nfcAvailable && registeredCards.contains { $0.nfcEnabled } }
+    var nfcCards: [RegisteredCard] { nfcAvailable ? registeredCards.filter { $0.nfcEnabled } : [] }
+    func selectNFCCard(_ serial: String?) {
+        let selected = serial.flatMap { serial in nfcCards.first { $0.card.serial == serial }?.card.serial }
+        do {
+            try client?.selectNfcCard(serial: selected)
+            selectedNFCCard = selected
+        } catch { show(error) }
+    }
+    private func reconcileNFCSelection() {
+        if let serial = selectedNFCCard, !nfcCards.contains(where: { $0.card.serial == serial }) {
+            selectNFCCard(nil)
+        }
+    }
     func refreshHardwareCapabilities() {
         nfcAvailable = readNFCCapability()
         cardInspection.setNFCAvailable(nfcAvailable)
         client?.setNfcAvailable(available: nfcAvailable)
+        reconcileNFCSelection()
     }
     var statusText: String {
         switch connection {
@@ -214,6 +231,7 @@ final class AppModel {
     private func configure(identity: Data) throws {
         let core = try MobileClient(directory: SecureStorage.directory().path, server: server, identity: identity, skipTlsCertificateValidation: skipTLSCertificateValidation)
         client = core
+        selectedNFCCard = nil
         device = try core.device()
         refreshHardwareCapabilities()
         registeredCards = core.registeredCards()
@@ -355,8 +373,8 @@ final class AppModel {
         }
     }
     func answer(_ prompt: PinPrompt, text: String = "", accepted: Bool) {
-        guard let client else { return }
         defer { prompts.removeAll { $0.token == prompt.token } }
+        guard let client else { return }
         do { try client.respond(token: prompt.token, data: Data(text.utf8), accepted: accepted) }
         catch { if client.requestIsPending(token: prompt.token) { show(error) } }
     }

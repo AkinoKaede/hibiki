@@ -92,7 +92,7 @@ async fn run_until_shutdown(
                 .runtime
                 .join(format!("d-{}.lock", &app.identity.device.id()[..16])),
         )?;
-    fs2::FileExt::try_lock_exclusive(&lock).context("HIbiki daemon already running")?;
+    fs2::FileExt::try_lock_exclusive(&lock).context("Hibiki daemon already running")?;
     let socket = app.paths.ipc_socket();
     if socket.as_os_str().len() >= 104 {
         bail!("XDG runtime path too long");
@@ -171,7 +171,7 @@ async fn run_until_shutdown(
             continue;
         }
         hub.changed.notify_waiters();
-        eprintln!("{SUCCESS}HIbiki daemon connected{SUCCESS:#}");
+        eprintln!("{SUCCESS}Hibiki daemon connected{SUCCESS:#}");
         delay = 1;
         let mut refresh = tokio::time::interval(Duration::from_secs(10));
         let mut jobs = tokio::task::JoinSet::new();
@@ -418,7 +418,7 @@ mod tests {
             .unwrap();
         let mut output = String::new();
         caller.read_to_string(&mut output).await.unwrap();
-        assert!(output.starts_with("OK HIbiki Assuan"), "{output}");
+        assert!(output.starts_with("OK Hibiki Assuan"), "{output}");
         assert!(output.contains("OK closing connection"));
     }
 }

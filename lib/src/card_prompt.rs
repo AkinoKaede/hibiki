@@ -23,15 +23,12 @@ pub fn card_number(serial: &str) -> String {
         serial
     }
 }
-pub fn description(serial: Option<&str>, label: Option<&str>) -> String {
-    match serial {
-        Some(serial) => format!(
-            "Please insert the card with serial number:\n\n  {}\n  {}",
-            card_number(serial),
-            label.unwrap_or_default()
-        ),
-        None => "Please insert your OpenPGP card.".into(),
-    }
+pub fn description(serial: &str, label: &str) -> String {
+    format!(
+        "Please insert the card with serial number:\n\n  {}\n  {}",
+        card_number(serial),
+        label
+    )
 }
 #[cfg(test)]
 mod tests {
@@ -48,7 +45,7 @@ mod tests {
         );
         assert_eq!(card_number("12345678901234567890"), "1234567890123456789");
         assert_eq!(
-            description(Some("ABC"), None),
+            description("ABC", ""),
             "Please insert the card with serial number:\n\n  ABC\n  "
         );
     }

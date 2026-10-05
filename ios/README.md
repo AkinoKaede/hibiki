@@ -245,9 +245,16 @@ an extra availability prompt. Otherwise, the app asks you to insert it and conti
 or cancel. The actual card and key are checked before sending the PIN.
 
 **NFC:** open the **+** menu and choose **Register via NFC** and tap once to read public information;
-registration does not require a PIN or change the key. Registered public data can
-answer discovery while the card service is enabled. Every private operation asks
-whether you want to use the key; there is no persistent readiness switch. Canceling
+registration does not require a PIN or change the key. In Status, optionally check
+one NFC key to make it discoverable. No key is selected by default, and the choice
+is not saved across app launches. The same selection control appears inside
+Pinentry confirmation sheets, so an insertion prompt cannot block you from choosing
+a key; changing either control updates the other. Ordinary `SERIALNO` checks USB
+first, then returns the selected NFC card, or no card if neither is available.
+A targeted `SERIALNO --demand=<serial>` checks USB first and can ask for confirmation
+for that registered NFC card when it is not selected. Public keys remain readable
+from registrations. Every private NFC operation still asks whether you want to use
+the key, and PIN entry cannot change an operation’s selected card. Canceling
 ends the current operation without requesting a PIN or opening a card connection.
 
 For signing or decryption, Hibiki requests the PIN first, then opens the NFC sheet
@@ -256,12 +263,13 @@ The serial number, keygrip and fingerprint must still match the registered recor
 before the PIN is sent. A different key fails the operation. After changing keys
 on a security key, register it again.
 
-NFC discovery describes the registered public snapshot, not proof that a physical
+The selected NFC card describes its registered public snapshot, not proof that a physical
 key is currently in range. Live mutable fields such as retry counters are not
 invented from cached data. PIN failures report the card's actual returned status.
 Hibiki does not automatically retry PIN verification or replay private operations.
-A waiting request can reach the app when it returns online before the caller's
-original deadline. Card operations remain bound to the original device and card;
+A waiting password request can reach the app when it returns online before the caller's
+original deadline. Offline devices do not hold card discovery open; a new query can
+find a returning device. Card operations remain bound to the original device and card;
 unstarted commands may resume after selection and data preparation are restored.
 A command with an unknown execution result is never automatically repeated.
 
@@ -383,7 +391,7 @@ PGP user ID fetched from a key server. Card number is `manufacturer serial`, suc
 as `0006 20473185`; the complete AID remains visible and is used for matching.
 GnuPG insertion dialogs may format a YubiKey serial as `20 473 185` instead.
 
-Every enabled candidate prepares independently. A USB-only target requires an
+Ordinary `SERIALNO` reports actual USB or the explicitly selected NFC key without prompting; targeted discovery may ask for NFC confirmation. Public keys remain available from registration. Every enabled candidate prepares independently when signing or decryption is requested. A USB-only target requires an
 actually inserted, matching card; confirmation without it repeats the prompt.
 NFC-capable targets may confirm first, then enter a PIN and tap. Matching USB takes
 precedence at preparation time for dual-interface targets. The chosen transport

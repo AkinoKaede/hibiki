@@ -36,6 +36,15 @@ try:
             mode = json.loads((base / 'pinentry-mode.json').read_text())
             marker.write_text('waiting')
             time.sleep(mode.get('delay', 0))
+            if command == b'CONFIRM' and mode.get('confirm_file'):
+                answer = Path(mode['confirm_file'])
+                while not answer.exists():
+                    time.sleep(.01)
+                response = answer.read_bytes()
+                answer.unlink()
+                emit(response)
+                marker.write_text('completed')
+                continue
             if mode.get('inquiry'):
                 emit(b'INQUIRE QUALITY candidate%2Bvalue')
                 answer = []

@@ -8,6 +8,7 @@ pub const MAX_LINE: usize = 1000;
 pub const MAX_DATA: usize = 1024 * 1024;
 pub const MAX_LINES: usize = 8192;
 pub const CANCELED: u32 = 99;
+pub const CARD_NOT_PRESENT: u32 = 112;
 pub const FULLY_CANCELED: u32 = 198;
 pub const GENERAL: u32 = 1;
 pub const NOT_SUPPORTED: u32 = 60;

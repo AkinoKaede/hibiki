@@ -1,7 +1,7 @@
 """Test-only software card arithmetic using GnuPG's independently installed libgcrypt.
 
 Private test keys come from temporary GnuPG homes. This module is never linked into
-HIbiki, packaged with iOS, or used for production private-key operations.
+Hibiki, packaged with iOS, or used for production private-key operations.
 """
 import ctypes as C
 import ctypes.util

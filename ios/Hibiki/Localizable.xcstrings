@@ -600,16 +600,6 @@
         }
       }
     },
-    "Private keys remain on your security key.": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "私钥始终留在安全密钥中。"
-          }
-        }
-      }
-    },
     "Protocol": {
       "localizations": {
         "zh-Hans": {
@@ -1516,16 +1506,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Hibiki仅在应用打开时保持连接。各项服务默认处于关闭状态。"
-          }
-        }
-      }
-    },
-    "Keep Hibiki open to receive requests. Returning to the app reconnects automatically.": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请保持Hibiki在前台以接收请求。切回应用时会自动重连并处理等待中的请求。"
           }
         }
       }
@@ -2478,6 +2458,36 @@
         }
       },
       "extractionState": "manual"
+    },
+    "NFC Key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "NFC密钥"
+          }
+        }
+      }
+    },
+    "Not Selected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未选择"
+          }
+        }
+      }
+    },
+    "Selected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已选择"
+          }
+        }
+      }
     }
   },
   "version": "1.1"

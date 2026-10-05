@@ -71,6 +71,10 @@ async fn main() -> anyhow::Result<()> {
 async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
     let text = |name: &str| v[name].as_str().unwrap_or_default().to_string();
     match text("action").as_str() {
+        "select_nfc" => {
+            client.select_nfc_card(v["serial"].as_str().map(str::to_owned))?;
+            emit(json!({"kind":"nfc-selected", "serial":client.selected_nfc_card()}));
+        }
         "nfc_capability" => {
             client.set_nfc_available(v["available"].as_bool().unwrap_or(false));
             emit(json!({"kind":"nfc-capability"}));

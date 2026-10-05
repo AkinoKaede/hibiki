@@ -78,6 +78,12 @@ impl CardReadCancellation {
     }
 }
 
+/// Use the same human-readable card number as insertion requests.
+#[uniffi::export]
+pub fn format_card_number(serial: String) -> String {
+    hibiki_lib::card_prompt::card_number(&serial)
+}
+
 #[uniffi::export]
 pub fn create_identity(name: String) -> MobileResult<Vec<u8>> {
     (|| Ok(encode(&Identity::generate(name)?)?))().map_err(|e: anyhow::Error| e.into())
@@ -154,6 +160,7 @@ impl MobileClient {
         registry.selected = None;
         atomic_write(&self.registry_path(), &encode(&registry)?)?;
         *self.provider.cards.lock().unwrap() = registry.cards.clone();
+        self.selected_nfc_card();
         *self.registry.lock().unwrap() = registry;
         Ok(())
     }
@@ -391,6 +398,9 @@ impl MobileClient {
             .provider
             .nfc_available
             .swap(available, Ordering::AcqRel);
+        if !available {
+            *self.provider.selected_nfc.lock().unwrap() = None;
+        }
         if was_available
             && !available
             && let Some(hub) = self.hub.lock().unwrap().as_ref()
@@ -500,6 +510,44 @@ impl MobileClient {
         }
         .await;
         result.map_err(|e: anyhow::Error| e.into())
+    }
+    /// Volatile discovery choice; never written to the card registry or config.
+    pub fn select_nfc_card(&self, serial: Option<String>) -> MobileResult<()> {
+        let cards = self.provider.cards.lock().unwrap();
+        let selected = if let Some(serial) = serial {
+            Some(
+                cards
+                    .iter()
+                    .find(|c| {
+                        c.nfc_enabled
+                            && self.provider.nfc_available.load(Ordering::Acquire)
+                            && c.card.serial.eq_ignore_ascii_case(&serial)
+                    })
+                    .ok_or_else(|| MobileError::Failed {
+                        message: "NFC card is unavailable".into(),
+                    })?
+                    .card
+                    .serial
+                    .clone(),
+            )
+        } else {
+            None
+        };
+        *self.provider.selected_nfc.lock().unwrap() = selected;
+        Ok(())
+    }
+    pub fn selected_nfc_card(&self) -> Option<String> {
+        let cards = self.provider.cards.lock().unwrap();
+        let mut selected = self.provider.selected_nfc.lock().unwrap();
+        if selected.as_ref().is_some_and(|serial| {
+            !self.provider.nfc_available.load(Ordering::Acquire)
+                || !cards
+                    .iter()
+                    .any(|c| c.nfc_enabled && c.card.serial == *serial)
+        }) {
+            *selected = None;
+        }
+        selected.clone()
     }
     pub fn registered_cards(&self) -> Vec<RegisteredCard> {
         self.registry.lock().unwrap().cards.clone()

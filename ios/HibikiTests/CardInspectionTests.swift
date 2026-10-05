@@ -25,6 +25,35 @@ final class CardInspectionTests: XCTestCase {
         XCTAssertEqual(entry.connections(nfcAvailable: false), String(localized: "Unavailable on This Device"))
     }
 
+    func testNFCSelectionIsOptionalExclusiveAndNotPersisted() throws {
+        let suite = "hibiki-nfc-selection-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        var available = true
+        let model = AppModel(defaults: defaults, nfcCapability: { available })
+        let first = RegisteredCard(card: card("one", .nfc), name: "One", usbEnabled: true, nfcEnabled: true)
+        let second = RegisteredCard(card: card("two", .nfc), name: "Two", usbEnabled: true, nfcEnabled: true)
+        model.registeredCards = [first, second]
+        XCTAssertNil(model.selectedNFCCard)
+        model.selectNFCCard("one")
+        XCTAssertEqual(model.selectedNFCCard, "one")
+        model.selectNFCCard("two")
+        XCTAssertEqual(model.selectedNFCCard, "two")
+        model.selectNFCCard(nil)
+        XCTAssertNil(model.selectedNFCCard)
+        model.selectNFCCard("one")
+        XCTAssertNil(AppModel(defaults: defaults, nfcCapability: { true }).selectedNFCCard)
+        model.registeredCards = [second]
+        XCTAssertNil(model.selectedNFCCard)
+        model.selectNFCCard("two")
+        available = false
+        model.refreshHardwareCapabilities()
+        XCTAssertNil(model.selectedNFCCard)
+        available = true
+        model.refreshHardwareCapabilities()
+        XCTAssertNil(model.selectedNFCCard)
+    }
+
     private func card(_ serial: String, _ transport: CardTransport) -> CardInfo {
         CardInfo(serial: serial, transport: transport, keys: [])
     }

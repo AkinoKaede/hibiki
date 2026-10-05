@@ -105,18 +105,24 @@ impl hibiki_core::provider::Preparation for NativePreparation {
                 if pause.is_cancelled() {
                     return Ok(None);
                 }
-                if self.prompt.is_none() {
+                if self.prompt.is_none()
+                    && let Some(serial) = self.target.serial.clone()
+                {
                     let app = self.app.clone();
-                    let target = self.target.clone();
                     let token = self.prompt_stop.0.child_token();
                     let local = self.local.clone();
                     self.prompt = Some(tokio::spawn(async move {
-                        insertion_prompt(app, target, token, local).await
+                        insertion_prompt(app, serial, token, local).await
                     }));
                 }
                 tokio::select! {
                     _=pause.cancelled()=>return Ok(None),
-                    result=self.prompt.as_mut().unwrap()=>{
+                    result=async {
+                        match self.prompt.as_mut() {
+                            Some(prompt) => prompt.await,
+                            None => std::future::pending().await,
+                        }
+                    }=>{
                         self.prompt_result(result)?;
                     },
                     _=tokio::time::sleep(Duration::from_millis(250))=>{},
@@ -184,7 +190,7 @@ pub async fn program(app: &App, service: ServiceKind) -> Result<PathBuf> {
         .file_name()
         .is_some_and(|n| n.to_string_lossy().starts_with("hibiki"))
     {
-        bail!("native program points to HIbiki");
+        bail!("native program points to Hibiki");
     }
     if let Some(dir) = std::env::current_exe()?.parent() {
         for name in ["hibiki", "hibiki-scdaemon", "hibiki-pinentry"] {
@@ -192,7 +198,7 @@ pub async fn program(app: &App, service: ServiceKind) -> Result<PathBuf> {
                 use std::os::unix::fs::MetadataExt;
                 let n = std::fs::metadata(&resolved)?;
                 if n.dev() == m.dev() && n.ino() == m.ino() {
-                    bail!("native program points to HIbiki");
+                    bail!("native program points to Hibiki");
                 }
             }
         }
@@ -625,7 +631,7 @@ impl Drop for PromptGuard {
 }
 async fn insertion_prompt(
     app: Arc<App>,
-    target: hibiki_lib::protocol::CardTarget,
+    serial: String,
     stop: CancellationToken,
     local: Option<LocalContext>,
 ) -> Result<bool> {
@@ -640,7 +646,7 @@ async fn insertion_prompt(
         local,
     )
     .await?;
-    let description = hibiki_lib::card_prompt::description(target.serial.as_deref(), None)
+    let description = hibiki_lib::card_prompt::description(&serial, "")
         .replace('%', "%25")
         .replace('\r', "%0D")
         .replace('\n', "%0A");
@@ -775,6 +781,12 @@ done
             id
         }
     }
+    fn card_target(serial: &str) -> CardTarget {
+        CardTarget {
+            serial: Some(serial.into()),
+            key: None,
+        }
+    }
     async fn until(mut predicate: impl FnMut() -> bool) {
         tokio::time::timeout(Duration::from_secs(3), async {
             while !predicate() {
@@ -804,17 +816,35 @@ done
     }
 
     #[tokio::test]
+    async fn preparation_without_a_card_number_probes_without_a_generic_prompt() {
+        let fixture = WaitingFixture::new();
+        let mut ep = fixture.endpoint().await;
+        let id = fixture.start(&mut ep, CardTarget::default()).await;
+        for _ in 0..4 {
+            assert!(!query(&mut ep, "SERIALNO").await.success());
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(fixture.prompts().is_empty());
+        fixture.write("card", "AABB");
+        assert!(
+            matches!(prepared(&mut ep, &id).await, CardPreparation::Ready { serial } if serial == "AABB")
+        );
+        assert!(fixture.prompts().is_empty());
+        ep.close().await;
+    }
+
+    #[tokio::test]
     async fn public_queries_and_duplicate_targets_preserve_unanswered_native_prompt() {
         let fixture = WaitingFixture::new();
         let mut ep = fixture.endpoint().await;
-        let first = fixture.start(&mut ep, CardTarget::default()).await;
+        let first = fixture.start(&mut ep, card_target("AABB")).await;
         until(|| fixture.prompts().len() == 1).await;
         let pid = fixture.prompts()[0];
         for _ in 0..12 {
             assert!(!query(&mut ep, "SERIALNO").await.success());
             assert!(alive(pid), "public query closed an unanswered prompt");
         }
-        let id = fixture.start(&mut ep, CardTarget::default()).await;
+        let id = fixture.start(&mut ep, card_target("AABB")).await;
         ep.cancel_preparation(first).await.unwrap(); // Stale cancellation must not affect the new ID.
         assert!(!query(&mut ep, "SERIALNO").await.success());
         assert!(alive(pid));
@@ -881,7 +911,7 @@ done
     async fn insertion_prompt_failure_does_not_reject_or_prevent_later_card_detection() {
         let fixture = WaitingFixture::new();
         let mut ep = fixture.endpoint().await;
-        let id = fixture.start(&mut ep, CardTarget::default()).await;
+        let id = fixture.start(&mut ep, card_target("AABB")).await;
         until(|| fixture.prompts().len() == 1).await;
         let pid = fixture.prompts()[0];
         fixture.write("answer", "ERR 1 unable to display dialog");
@@ -901,7 +931,7 @@ done
     async fn insertion_cancel_wins_over_card_arriving_during_probe() {
         let fixture = WaitingFixture::new();
         let mut ep = fixture.endpoint().await;
-        let id = fixture.start(&mut ep, CardTarget::default()).await;
+        let id = fixture.start(&mut ep, card_target("AABB")).await;
         until(|| fixture.prompts().len() == 1).await;
         let pid = fixture.prompts()[0];
         fixture.write("block-probe", "");
@@ -923,7 +953,7 @@ done
         for accepted in [true, false] {
             let fixture = WaitingFixture::new();
             let mut ep = fixture.endpoint().await;
-            let id = fixture.start(&mut ep, CardTarget::default()).await;
+            let id = fixture.start(&mut ep, card_target("AABB")).await;
             until(|| fixture.prompts().len() == 1).await;
             let pid = fixture.prompts()[0];
             ep.command("GETATTR BLOCK".into()).await.unwrap();
@@ -954,7 +984,7 @@ done
                     CardPreparation::Rejected
                 ));
                 let repeated = random_id();
-                ep.prepare(repeated.clone(), CardTarget::default())
+                ep.prepare(repeated.clone(), card_target("AABB"))
                     .await
                     .unwrap();
                 assert!(matches!(
@@ -1000,7 +1030,7 @@ done
         let fixture = WaitingFixture::new();
         fixture.write("block-probe", "");
         let mut ep = fixture.endpoint().await;
-        let id = fixture.start(&mut ep, CardTarget::default()).await;
+        let id = fixture.start(&mut ep, card_target("AABB")).await;
         until(|| fixture.root.path().join("probing").exists()).await;
         ep.command("GETATTR BLOCK".into()).await.unwrap();
         fixture.write("card", "AABB");
@@ -1022,7 +1052,7 @@ done
     async fn target_changes_reset_and_session_exit_close_only_the_current_prompt() {
         let fixture = WaitingFixture::new();
         let mut ep = fixture.endpoint().await;
-        let first = fixture.start(&mut ep, CardTarget::default()).await;
+        let first = fixture.start(&mut ep, card_target("CCDD")).await;
         until(|| fixture.prompts().len() == 1).await;
         let old = fixture.prompts()[0];
         let target = CardTarget {
