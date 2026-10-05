@@ -2693,7 +2693,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有设备申请加入频道，请打开 Hibiki 审核。"
+            "value": "有设备申请加入频道，请打开Hibiki审核。"
           }
         }
       }
@@ -2703,7 +2703,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有密码请求需要处理，请打开 Hibiki 继续。"
+            "value": "有密码请求需要处理，请打开Hibiki继续。"
           }
         }
       }
@@ -2713,7 +2713,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有安全密钥操作需要处理，请打开 Hibiki 继续。"
+            "value": "有安全密钥操作需要处理，请打开Hibiki继续。"
           }
         }
       }
@@ -2733,7 +2733,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有操作消息需要查看，请打开 Hibiki 继续。"
+            "value": "有操作消息需要查看，请打开Hibiki继续。"
           }
         }
       }
@@ -2743,7 +2743,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有操作需要确认，请打开 Hibiki 继续。"
+            "value": "有操作需要确认，请打开Hibiki继续。"
           }
         }
       }
@@ -2763,7 +2763,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hibiki 会在 iOS 允许后台运行期间保持连接。通知需要获得授权，App 被系统挂起后无法接收新请求通知。"
+            "value": "Hibiki会在iOS允许后台运行期间保持连接。通知需要获得授权，App被系统挂起后无法接收新请求通知。"
           }
         }
       }
