@@ -1,5 +1,4 @@
-use crate::{Error, Result, encode, encode_secret, identity::Identity, protocol::VERSION};
-use serde::{Deserialize, Serialize};
+use crate::{Error, Result, encode, identity::Identity, protocol::VERSION, wire};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 pub const PARAMS: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
@@ -81,10 +80,10 @@ impl Handshake {
         })
     }
 }
-#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-struct Fragment {
-    last: bool,
-    bytes: Vec<u8>,
+#[derive(Zeroize, ZeroizeOnDrop)]
+pub(crate) struct Fragment {
+    pub(crate) last: bool,
+    pub(crate) bytes: Vec<u8>,
 }
 
 pub struct Transport {
@@ -101,7 +100,7 @@ impl Transport {
             .chunks(CHUNK)
             .enumerate()
             .map(|(i, chunk)| {
-                let input = encode_secret(&Fragment {
+                let input = wire::encode_secret(&Fragment {
                     last: i + 1 == count,
                     bytes: chunk.to_vec(),
                 })?;
@@ -124,7 +123,7 @@ impl Transport {
             .inner
             .read_message(packet, &mut out)
             .map_err(|e| Error::Crypto(e.to_string()))?;
-        let part: Fragment = crate::decode(&out[..n])?;
+        let part: Fragment = wire::decode(&out[..n])?;
         if part.bytes.len() > CHUNK || self.pending.len() + part.bytes.len() > MAX_PAYLOAD {
             return Err(Error::Invalid("reassembly limit".into()));
         }

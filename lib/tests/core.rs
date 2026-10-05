@@ -331,11 +331,12 @@ fn hibiki_version_is_bound_to_authentication_and_noise() {
     };
     let a = Identity::generate("a".into()).unwrap();
     let b = Identity::generate("b".into()).unwrap();
-    let payload = (VERSION, "nonce", a.device.id());
-    let signature = a.sign("server-auth/v1", &payload).unwrap();
+    let payload =
+        hibiki_lib::wire::authentication_body(VERSION, "nonce", &a.device.id(), &[], &[]).unwrap();
+    let signature = a.sign("server-auth/v2", &payload).unwrap();
     verify(
         &a.device.signing_key,
-        "server-auth/v1",
+        "server-auth/v2",
         &payload,
         &signature,
     )
@@ -343,8 +344,15 @@ fn hibiki_version_is_bound_to_authentication_and_noise() {
     assert!(
         verify(
             &a.device.signing_key,
-            "server-auth/v1",
-            &("hibiki/invalid", "nonce", a.device.id()),
+            "server-auth/v2",
+            &hibiki_lib::wire::authentication_body(
+                "hibiki/invalid",
+                "nonce",
+                &a.device.id(),
+                &[],
+                &[]
+            )
+            .unwrap(),
             &signature
         )
         .is_err()
@@ -630,4 +638,24 @@ fn reverse_revocation_uses_current_admission_and_exact_thirty_day_boundary() {
     let state = p.verify().unwrap();
     assert!(!state.can_revoke_at(&c.device.id(), &a.device.id(), available));
     assert!(state.can_revoke_at(&c.device.id(), &a.device.id(), available + 30 * 86400));
+}
+
+#[test]
+fn protobuf_fragment_transport_handles_every_boundary_and_payload_limit() {
+    let (mut tx, mut rx) = transports("fragment-boundaries");
+    for size in [1, CHUNK - 1, CHUNK, CHUNK + 1, MAX_PAYLOAD] {
+        let plain = vec![17; size];
+        let packets = tx.encrypt(&plain).unwrap();
+        assert_eq!(packets.len(), size.div_ceil(CHUNK));
+        let mut result = None;
+        for (i, packet) in packets.iter().enumerate() {
+            assert!(packet.len() <= 65535);
+            result = rx.decrypt(packet).unwrap();
+            assert_eq!(result.is_some(), i + 1 == packets.len());
+        }
+        assert_eq!(result.unwrap(), plain);
+    }
+    assert!(tx.encrypt(&[]).is_err());
+    assert!(tx.encrypt(&vec![0; MAX_PAYLOAD + 1]).is_err());
+    assert!(rx.decrypt(&vec![0; 65536]).is_err());
 }

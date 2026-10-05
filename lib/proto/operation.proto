@@ -1,0 +1,40 @@
+// hibiki/2: never reuse tags or enum values; reserve deleted names and numbers.
+syntax = "proto3";
+package hibiki.v2;
+
+enum ServiceKind {
+  SERVICE_KIND_UNSPECIFIED = 0;
+  SERVICE_KIND_SCDAEMON = 1;
+  SERVICE_KIND_PINENTRY = 2;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_PENDING = 1;
+  OPERATION_STATE_COMPLETED = 2;
+  OPERATION_STATE_CANCELED = 3;
+  OPERATION_STATE_EXPIRED = 4;
+}
+
+enum TargetState {
+  TARGET_STATE_UNSPECIFIED = 0;
+  TARGET_STATE_PENDING = 1;
+  TARGET_STATE_EXECUTING = 2;
+  TARGET_STATE_SUCCEEDED = 3;
+  TARGET_STATE_FAILED = 4;
+}
+
+message OperationTarget {
+  string device = 1;
+  TargetState state = 2;
+}
+
+message Operation {
+  string id = 1;
+  string channel = 2;
+  string initiator = 3;
+  ServiceKind service = 4;
+  uint64 deadline = 5;
+  OperationState state = 6;
+  repeated OperationTarget targets = 7;
+}

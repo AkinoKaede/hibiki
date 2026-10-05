@@ -53,7 +53,8 @@ native Pinentry. Relay-only hosts do not need GnuPG.
 5. [Configure the requesting machine's GPG adapters](USAGE.md#4-connect-the-requesting-devices-agent)
    and [sign or decrypt](USAGE.md#sign-and-decrypt).
 
-Relay and clients must use matching builds of protocol `hibiki/2`. The desktop
+Relay and clients use the Protobuf `hibiki/2` baseline; application release
+versions may differ within its [compatibility contract](PROTOCOL.md). The desktop
 daemon starts local providers immediately, including while the relay is offline;
 remote providers join the race independently. Card access
 supports discovery, public-key reading, signing, and decryption; PIN changes,

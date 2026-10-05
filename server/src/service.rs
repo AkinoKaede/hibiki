@@ -10,7 +10,12 @@ use axum::{
     routing::get,
 };
 use futures_util::{SinkExt, StreamExt};
-use hibiki_lib::{decode, encode, identity::verify, protocol::*, random_id};
+use hibiki_lib::{
+    identity::verify,
+    protocol::*,
+    random_id,
+    wire::{self, decode, encode},
+};
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
@@ -506,11 +511,13 @@ async fn upgrade(State(service): State<Service>, ws: WebSocketUpgrade) -> impl I
 }
 async fn session(service: Service, mut socket: WebSocket) -> Result<()> {
     let nonce = random_id();
+    let server_capabilities = wire::supported_capabilities();
     socket
         .send(Message::Binary(
             encode(&Envelope::Hello {
                 version: VERSION.into(),
                 nonce: nonce.clone(),
+                capabilities: server_capabilities.clone(),
             })?
             .into(),
         ))
@@ -521,20 +528,34 @@ async fn session(service: Service, mut socket: WebSocket) -> Result<()> {
     let Message::Binary(bytes) = message else {
         bail!("binary authentication required");
     };
-    let Envelope::Authenticate { device, signature } = decode(&bytes)? else {
+    let Envelope::Authenticate {
+        device,
+        signature,
+        capabilities: client_capabilities,
+    } = decode(&bytes)?
+    else {
         bail!("authentication required");
     };
     device.verify()?;
     let device_id = device.id();
     verify(
         &device.signing_key,
-        "server-auth/v1",
-        &(VERSION, &nonce, &device_id),
+        "server-auth/v2",
+        &wire::authentication_body(
+            VERSION,
+            &nonce,
+            &device_id,
+            &server_capabilities,
+            &client_capabilities,
+        )?,
         &signature,
     )?;
+    let capabilities = wire::negotiate_capabilities(&server_capabilities, &client_capabilities)?;
     service.db.register(&device).await?;
     socket
-        .send(Message::Binary(encode(&Envelope::Authenticated)?.into()))
+        .send(Message::Binary(
+            encode(&Envelope::Authenticated { capabilities })?.into(),
+        ))
         .await?;
     let connection = random_id();
     let stop = CancellationToken::new();
@@ -1353,6 +1374,110 @@ mod tests {
             )
             .await
             .unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn future_client_authenticates_to_baseline_relay_but_tampered_capabilities_do_not() {
+        use tokio_tungstenite::tungstenite::Message as ClientMessage;
+        for tampered in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Database::open(&dir.path().join("db")).await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}{WS_PATH}", listener.local_addr().unwrap());
+            let router = Service::new(db, false).router();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router).await.unwrap();
+            });
+            let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+            let ClientMessage::Binary(raw) = ws.next().await.unwrap().unwrap() else {
+                panic!()
+            };
+            let Envelope::Hello {
+                version,
+                nonce,
+                capabilities: server_caps,
+            } = decode(&raw).unwrap()
+            else {
+                panic!()
+            };
+            assert!(server_caps.is_empty());
+            let identity = Identity::generate("future-client".into()).unwrap();
+            let capabilities = vec!["future/query".to_owned()];
+            let signature = identity
+                .sign(
+                    "server-auth/v2",
+                    &wire::authentication_body(
+                        &version,
+                        &nonce,
+                        &identity.device.id(),
+                        &server_caps,
+                        &capabilities,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            let declared = if tampered {
+                vec!["substituted".to_owned()]
+            } else {
+                capabilities
+            };
+            let mut auth = encode(&Envelope::Authenticate {
+                device: identity.device.clone(),
+                signature,
+                capabilities: declared,
+            })
+            .unwrap();
+            auth.extend_from_slice(&[0xa2, 0x06, 0x01, 42]);
+            ws.send(ClientMessage::Binary(auth.into())).await.unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(2), ws.next())
+                .await
+                .unwrap();
+            if tampered {
+                assert!(!matches!(reply, Some(Ok(ClientMessage::Binary(_)))));
+            } else {
+                let Some(Ok(ClientMessage::Binary(raw))) = reply else {
+                    panic!()
+                };
+                let Envelope::Authenticated { capabilities } = decode(&raw).unwrap() else {
+                    panic!()
+                };
+                assert!(capabilities.is_empty());
+                let mut request = encode(&Envelope::Request {
+                    id: "policy".into(),
+                    command: Control::Policy,
+                })
+                .unwrap();
+                request.extend_from_slice(&[0xa2, 0x06, 0x01, 42]);
+                ws.send(ClientMessage::Binary(request.into()))
+                    .await
+                    .unwrap();
+                // The server can emit a WebSocket heartbeat immediately after auth.
+                let reply = tokio::time::timeout(Duration::from_secs(2), async {
+                    loop {
+                        match ws.next().await.unwrap().unwrap() {
+                            ClientMessage::Ping(data) => {
+                                ws.send(ClientMessage::Pong(data)).await.unwrap()
+                            }
+                            ClientMessage::Binary(raw) => break decode::<Envelope>(&raw).unwrap(),
+                            _ => panic!(),
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(matches!(
+                    reply,
+                    Envelope::Response {
+                        result: Ok(Reply::Policy {
+                            allow_client_channel_creation: false
+                        }),
+                        ..
+                    }
+                ));
+                ws.close(None).await.unwrap();
+            }
+            server.abort();
+            let _ = server.await;
         }
     }
 }

@@ -1,6 +1,6 @@
 # Upgrading to Hibiki protocol v2
 
-Upgrade the relay, every desktop daemon/adapter and the iOS Rust framework/app together. The authenticated protocol is `hibiki/2`; the endpoint remains `/hibiki`. Old peers are explicitly rejected. Stop active signing/decryption before replacing binaries, then restart daemons. Do not retry a private operation whose result is unknown; first check whether the caller already received or recorded it.
+The first published `hibiki/2` uses Protocol Buffers; the endpoint remains `/hibiki`. If running the earlier unpublished Postcard format, upgrade the relay, desktop daemon/adapter and iOS Rust framework/app together once. After that, application releases may differ within the same protocol major version: baseline behavior remains supported and extensions require capability negotiation. Other protocol majors are rejected. See [the compatibility contract](PROTOCOL.md). Stop active signing/decryption before replacing binaries, then restart daemons. Do not retry a private operation whose result is unknown; first check whether the caller already received or recorded it.
 
 Existing device identities and card registrations remain usable. Trusted channels must satisfy the approval-chain rule described below. New self-rename membership events require v2 peers. Invitation versions are independent: old `hibiki-v1:` and `hibiki-init-v1:` imports still work, while newly exported `hibiki-psk-v1:` invitations contain their PSK. Old clients cannot import the new envelope. Bootstrap invitations remain single-use and membership approval still requires all 24 verification words. PSK rotation invalidates pending requests and old credentials without removing approved members.
 
@@ -73,5 +73,5 @@ events.
 Server administrators have an independent `channel revoke NAME DEVICE_ID
 [--subtree]` command. Its durable relay deny list is created automatically in the
 existing database. It can target any member and does not rewrite member-signed
-history or disable offline local keys. All v2 components must be upgraded together:
-channel snapshots now include the administrator-revoked device IDs.
+history or disable offline local keys. Administrator-revoked device IDs in channel snapshots are part of the published
+v2 baseline and must be honored by every v2 component.

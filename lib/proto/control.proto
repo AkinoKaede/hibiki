@@ -1,0 +1,198 @@
+// hibiki/2: never reuse tags or enum values; reserve deleted names and numbers.
+syntax = "proto3";
+package hibiki.v2;
+import "membership.proto";
+import "operation.proto";
+
+enum JoinState {
+  JOIN_STATE_UNSPECIFIED = 0;
+  JOIN_STATE_PENDING = 1;
+  JOIN_STATE_MEMBER = 2;
+  JOIN_STATE_ABSENT = 3;
+}
+
+message WireError {
+  string code = 1;
+  string message = 2;
+}
+
+message ResponseResult {
+  oneof kind { Reply ok = 1; WireError error = 2; }
+}
+
+message Control {
+  oneof kind {
+    ControlQueue queue = 1;
+    ControlResumeOperation resume_operation = 2;
+    ControlOperationStatus operation_status = 3;
+    ControlClaimOperation claim_operation = 4;
+    ControlTargetDone target_done = 5;
+    ControlAbandonTarget abandon_target = 6;
+    ControlEndOperation end_operation = 7;
+    ControlCreate create = 8;
+    ControlGetChannel get_channel = 9;
+    ControlListChannels list_channels = 10;
+    ControlChannelSnapshot channel_snapshot = 11;
+    ControlJoin join = 12;
+    ControlPending pending = 13;
+    ControlAppend append = 14;
+    ControlAnnounce announce = 15;
+    ControlPeers peers = 16;
+    ControlClaim claim = 17;
+    ControlPolicy policy = 18;
+    ControlRejectJoin reject_join = 19;
+    ControlWithdrawJoin withdraw_join = 20;
+    ControlJoinStatus join_status = 21;
+    ControlWithdrawPending withdraw_pending = 22;
+  }
+}
+
+message ControlQueue {
+  Operation operation = 1;
+}
+
+message ControlResumeOperation {
+  string id = 1;
+}
+
+message ControlOperationStatus {
+  string id = 1;
+}
+
+message ControlClaimOperation {
+  string id = 1;
+  string initiator = 2;
+  string channel = 3;
+  ServiceKind service = 4;
+}
+
+message ControlTargetDone {
+  string id = 1;
+  bool success = 2;
+}
+
+message ControlAbandonTarget {
+  string id = 1;
+  string peer = 2;
+}
+
+message ControlEndOperation {
+  string id = 1;
+  bool completed = 2;
+}
+
+message ControlCreate {
+  ChannelGenesis genesis = 1;
+  string verifier = 2;
+}
+
+message ControlGetChannel {
+  string channel = 1;
+}
+
+message ControlListChannels {
+}
+
+message ControlChannelSnapshot {
+  string channel = 1;
+}
+
+message ControlJoin {
+  JoinRequest request = 1;
+  string psk = 2;
+}
+
+message ControlPending {
+  string channel = 1;
+}
+
+message ControlAppend {
+  MembershipEvent event = 1;
+  optional string verifier = 2;
+}
+
+message ControlAnnounce {
+  repeated string channels = 1;
+}
+
+message ControlPeers {
+  string channel = 1;
+}
+
+message ControlClaim {
+  ChannelGenesis genesis = 1;
+  string psk = 2;
+}
+
+message ControlPolicy {
+}
+
+message ControlRejectJoin {
+  string channel = 1;
+  string request = 2;
+}
+
+message ControlWithdrawJoin {
+  string channel = 1;
+  string request = 2;
+}
+
+message ControlJoinStatus {
+  string channel = 1;
+  string request = 2;
+}
+
+message ControlWithdrawPending {
+  string channel = 1;
+}
+
+message Reply {
+  oneof kind {
+    ReplyOperation operation = 1;
+    ReplyOk ok = 2;
+    ReplyProof proof = 3;
+    ReplyProofs proofs = 4;
+    ReplyChannelSnapshot channel_snapshot = 5;
+    ReplyRequests requests = 6;
+    ReplyPeers peers = 7;
+    ReplyPolicy policy = 8;
+    ReplyJoinStatus join_status = 9;
+  }
+}
+
+message ReplyOperation {
+  Operation value = 1;
+}
+
+message ReplyOk {
+}
+
+message ReplyProof {
+  MembershipProof value = 1;
+}
+
+message ReplyProofs {
+  repeated MembershipProof value = 1;
+}
+
+message ReplyChannelSnapshot {
+  MembershipProof proof = 1;
+  repeated string online = 2;
+  repeated string revoked = 3;
+}
+
+message ReplyRequests {
+  repeated JoinRequest value = 1;
+}
+
+message ReplyPeers {
+  repeated string value = 1;
+}
+
+message ReplyPolicy {
+  bool allow_client_channel_creation = 1;
+}
+
+message ReplyJoinStatus {
+  JoinState value = 1;
+}

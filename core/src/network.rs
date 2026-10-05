@@ -1,6 +1,11 @@
 use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
-use hibiki_lib::{decode, encode, identity::Identity, protocol::*, random_id};
+use hibiki_lib::{
+    identity::Identity,
+    protocol::*,
+    random_id,
+    wire::{self, decode, encode},
+};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -27,6 +32,7 @@ pub struct Connection {
     tx: mpsc::Sender<Message>,
     pending: Pending,
     pub closed: CancellationToken,
+    pub capabilities: Vec<String>,
 }
 #[allow(clippy::large_enum_variant)] // Bounded internal event queue.
 pub enum Event {
@@ -54,6 +60,7 @@ impl Connection {
             tx,
             pending: Default::default(),
             closed,
+            capabilities: Vec::new(),
         })
     }
 
@@ -88,18 +95,35 @@ impl Connection {
         let Message::Binary(raw) = hello else {
             bail!("invalid server greeting");
         };
-        let Envelope::Hello { version, nonce } = decode(&raw)? else {
+        let Envelope::Hello {
+            version,
+            nonce,
+            capabilities: server_capabilities,
+        } = decode(&raw)?
+        else {
             bail!("missing protocol greeting");
         };
         if version != VERSION || nonce.len() > 128 {
             bail!("unsupported server protocol; expected {VERSION}");
         }
-        let signature =
-            identity.sign("server-auth/v1", &(version, &nonce, &identity.device.id()))?;
+        let client_capabilities = wire::supported_capabilities();
+        let capabilities =
+            wire::negotiate_capabilities(&client_capabilities, &server_capabilities)?;
+        let signature = identity.sign(
+            "server-auth/v2",
+            &wire::authentication_body(
+                &version,
+                &nonce,
+                &identity.device.id(),
+                &server_capabilities,
+                &client_capabilities,
+            )?,
+        )?;
         ws.send(Message::Binary(
             encode(&Envelope::Authenticate {
                 device: identity.device.clone(),
                 signature,
+                capabilities: client_capabilities,
             })?
             .into(),
         ))
@@ -110,8 +134,14 @@ impl Connection {
         let Message::Binary(raw) = response else {
             bail!("invalid authentication response");
         };
-        if !matches!(decode::<Envelope>(&raw)?, Envelope::Authenticated) {
+        let Envelope::Authenticated {
+            capabilities: selected,
+        } = decode::<Envelope>(&raw)?
+        else {
             bail!("authentication failed");
+        };
+        if wire::normalize_capabilities(&selected)? != capabilities {
+            bail!("invalid negotiated server capabilities");
         }
 
         let (tx, mut rx) = mpsc::channel::<Message>(64);
@@ -122,6 +152,7 @@ impl Connection {
             tx: tx.clone(),
             pending: pending.clone(),
             closed: closed.clone(),
+            capabilities,
         });
         let (mut writer, mut reader) = ws.split();
         let write_stop = closed.clone();
@@ -246,6 +277,7 @@ mod tests {
                     encode(&Envelope::Hello {
                         version: version.into(),
                         nonce: random_id(),
+                        capabilities: Vec::new(),
                     })
                     .unwrap()
                     .into(),
@@ -265,5 +297,117 @@ mod tests {
             }
             peer.await.unwrap();
         }
+    }
+    #[tokio::test]
+    async fn future_relay_capabilities_and_optional_fields_preserve_baseline_requests() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}{WS_PATH}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let offered = vec!["future/query".to_owned()];
+            let mut greeting = encode(&Envelope::Hello {
+                version: VERSION.into(),
+                nonce: "nonce".into(),
+                capabilities: offered.clone(),
+            })
+            .unwrap();
+            greeting.extend_from_slice(&[0xa2, 0x06, 0x01, 42]);
+            ws.send(Message::Binary(greeting.into())).await.unwrap();
+            let Message::Binary(raw) = ws.next().await.unwrap().unwrap() else {
+                panic!()
+            };
+            let Envelope::Authenticate {
+                device,
+                signature,
+                capabilities,
+            } = decode(&raw).unwrap()
+            else {
+                panic!()
+            };
+            assert!(capabilities.is_empty());
+            hibiki_lib::identity::verify(
+                &device.signing_key,
+                "server-auth/v2",
+                &wire::authentication_body(VERSION, "nonce", &device.id(), &offered, &capabilities)
+                    .unwrap(),
+                &signature,
+            )
+            .unwrap();
+            ws.send(Message::Binary(
+                encode(&Envelope::Authenticated {
+                    capabilities: vec![],
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            let Message::Binary(raw) = ws.next().await.unwrap().unwrap() else {
+                panic!()
+            };
+            let Envelope::Request {
+                id,
+                command: Control::Policy,
+            } = decode(&raw).unwrap()
+            else {
+                panic!()
+            };
+            let mut reply = encode(&Envelope::Response {
+                id,
+                result: Ok(Reply::Policy {
+                    allow_client_channel_creation: false,
+                }),
+            })
+            .unwrap();
+            reply.extend_from_slice(&[0xa2, 0x06, 0x01, 42]);
+            ws.send(Message::Binary(reply.into())).await.unwrap();
+            let _ = ws.next().await;
+        });
+        let identity = Identity::generate("baseline-client".into()).unwrap();
+        let (connection, _events) = Connection::open(&url, true, &identity).await.unwrap();
+        assert!(connection.capabilities.is_empty());
+        assert!(matches!(
+            connection.request(Control::Policy).await.unwrap(),
+            Reply::Policy {
+                allow_client_channel_creation: false
+            }
+        ));
+        connection.close();
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn relay_cannot_select_an_unoffered_capability() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}{WS_PATH}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            ws.send(Message::Binary(
+                encode(&Envelope::Hello {
+                    version: VERSION.into(),
+                    nonce: "nonce".into(),
+                    capabilities: vec![],
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            assert!(matches!(ws.next().await, Some(Ok(Message::Binary(_)))));
+            ws.send(Message::Binary(
+                encode(&Envelope::Authenticated {
+                    capabilities: vec!["unoffered".into()],
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        });
+        let identity = Identity::generate("baseline-client".into()).unwrap();
+        assert!(Connection::open(&url, true, &identity).await.is_err());
+        peer.await.unwrap();
     }
 }

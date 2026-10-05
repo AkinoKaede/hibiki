@@ -341,7 +341,8 @@ Hardware release checklist (must run on an actual iPhone and YubiKey):
 
 ## Server policy and pending requests
 
-The app uses protocol `hibiki/2`; the server and clients must use matching builds.
+The app uses the Protobuf `hibiki/2` baseline. Server and client application
+versions may differ under the [compatibility contract](../PROTOCOL.md).
 The Channels screen shows Create only when the connected server permits client channel
 creation. Otherwise, obtain an initialization invitation from the administrator.
 
@@ -377,7 +378,9 @@ The USB PIN description can read live Number, Holder, signature Counter and low
 remaining-attempt counts. NFC does not present stale counters before the tap.
 Neither confirmation nor a registered public key is proof of USB readiness.
 
-All mobile and desktop components must be upgraded together to `hibiki/2`.
+When replacing an unpublished Postcard build, upgrade all components to the
+Protobuf `hibiki/2` baseline once. Later same-major releases support separate
+upgrades through capability negotiation.
 
 ### Approval-chain authority
 

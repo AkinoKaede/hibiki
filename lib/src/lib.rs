@@ -6,6 +6,7 @@ pub mod identity;
 pub mod paths;
 pub mod protocol;
 pub mod selection;
+pub mod wire;
 
 pub type Result<T> = std::result::Result<T, Error>;
 

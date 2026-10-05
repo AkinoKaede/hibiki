@@ -7,11 +7,10 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{
     channel::MembershipProof,
-    decode,
     e2ee::{Handshake, Transport},
-    encode_secret,
     protocol::*,
     random_id,
+    wire::{self, decode, encode_secret},
 };
 use std::{
     collections::HashMap,
@@ -50,6 +49,7 @@ pub struct PeerSession {
     pub stop: CancellationToken,
     sent_messages: std::sync::atomic::AtomicU64,
     opened_at: std::time::Instant,
+    capabilities: Vec<String>,
 }
 impl Drop for PeerSession {
     fn drop(&mut self) {
@@ -211,6 +211,7 @@ impl Hub {
             stop,
             sent_messages: std::sync::atomic::AtomicU64::new(0),
             opened_at: std::time::Instant::now(),
+            capabilities: Vec::new(),
         })
     }
     pub async fn refresh(&self, channel: &str) -> Result<MembershipProof> {
@@ -427,13 +428,23 @@ impl Hub {
             session.send(hs.write()?).await?;
             let mut transport = hs.finish()?;
             session
-                .send_private(&mut transport, &PrivateMessage::PingOpen { proof })
+                .send_private(
+                    &mut transport,
+                    &PrivateMessage::PingOpen {
+                        proof,
+                        capabilities: wire::supported_capabilities(),
+                    },
+                )
                 .await?;
-            let PrivateMessage::PingOpened { proof } =
-                session.receive_private(&mut transport).await?
+            let PrivateMessage::PingOpened {
+                proof,
+                capabilities,
+            } = session.receive_private(&mut transport).await?
             else {
                 bail!("ping handshake failed");
             };
+            session.capabilities =
+                wire::validate_negotiated(&wire::supported_capabilities(), &capabilities)?;
             if proof.genesis.body.id != channel {
                 bail!("ping channel mismatch");
             }
@@ -547,14 +558,23 @@ impl Hub {
             session
                 .send_private(
                     &mut transport,
-                    &PrivateMessage::OpenService { proof, service },
+                    &PrivateMessage::OpenService {
+                        proof,
+                        service,
+                        capabilities: wire::supported_capabilities(),
+                    },
                 )
                 .await?;
-            let PrivateMessage::ServiceOpened { proof, enabled } =
-                session.receive_private(&mut transport).await?
+            let PrivateMessage::ServiceOpened {
+                proof,
+                enabled,
+                capabilities,
+            } = session.receive_private(&mut transport).await?
             else {
                 bail!("service open response required");
             };
+            session.capabilities =
+                wire::validate_negotiated(&wire::supported_capabilities(), &capabilities)?;
             if proof.genesis.body.id != channel {
                 bail!("trust channel mismatch");
             }
@@ -658,11 +678,20 @@ impl Hub {
             session.send(hs.write()?).await?;
             hs.read(&session.packet().await?)?;
             let mut transport = hs.finish()?;
-            let (proof, service) = match session.receive_private(&mut transport).await? {
-                PrivateMessage::OpenService { proof, service } => (proof, Some(service)),
-                PrivateMessage::PingOpen { proof } => (proof, None),
+            let (proof, service, offered) = match session.receive_private(&mut transport).await? {
+                PrivateMessage::OpenService {
+                    proof,
+                    service,
+                    capabilities,
+                } => (proof, Some(service), capabilities),
+                PrivateMessage::PingOpen {
+                    proof,
+                    capabilities,
+                } => (proof, None, capabilities),
                 _ => bail!("service or ping open required"),
             };
+            session.capabilities =
+                wire::negotiate_capabilities(&wire::supported_capabilities(), &offered)?;
             if proof.genesis.body.id != session.channel {
                 bail!("trust channel mismatch");
             }
@@ -678,6 +707,7 @@ impl Hub {
                     &mut transport,
                     &PrivateMessage::PingOpened {
                         proof: self.app.proof(&session.channel)?,
+                        capabilities: session.capabilities.clone(),
                     },
                 )
                 .await?;
@@ -707,6 +737,7 @@ impl Hub {
                     &mut transport,
                     &PrivateMessage::ServiceOpened {
                         proof: self.app.proof(&session.channel)?,
+                        capabilities: session.capabilities.clone(),
                         enabled: false,
                     },
                 )
@@ -756,6 +787,7 @@ impl Hub {
                 &mut transport,
                 &PrivateMessage::ServiceOpened {
                     proof: self.app.proof(&session.channel)?,
+                    capabilities: session.capabilities.clone(),
                     enabled: true,
                 },
             )

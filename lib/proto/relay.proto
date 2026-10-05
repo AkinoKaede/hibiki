@@ -1,0 +1,82 @@
+// hibiki/2: never reuse tags or enum values; reserve deleted names and numbers.
+syntax = "proto3";
+package hibiki.v2;
+import "membership.proto";
+import "control.proto";
+
+message Envelope {
+  oneof kind {
+    EnvelopeOperationReady operation_ready = 1;
+    EnvelopeOperationChanged operation_changed = 2;
+    EnvelopeHello hello = 3;
+    EnvelopeAuthenticate authenticate = 4;
+    EnvelopeAuthenticated authenticated = 5;
+    EnvelopeRequest request = 6;
+    EnvelopeResponse response = 7;
+    EnvelopeRelay relay = 8;
+    EnvelopeRelayFailure relay_failure = 9;
+    EnvelopeChannelChanged channel_changed = 10;
+    EnvelopePeerOnline peer_online = 11;
+    EnvelopePeerOffline peer_offline = 12;
+  }
+}
+
+message EnvelopeOperationReady {
+  string id = 1;
+  string peer = 2;
+}
+
+message EnvelopeOperationChanged {
+  string id = 1;
+}
+
+message EnvelopeHello {
+  string version = 1;
+  string nonce = 2;
+  repeated string capabilities = 3;
+}
+
+message EnvelopeAuthenticate {
+  Device device = 1;
+  bytes signature = 2;
+  repeated string capabilities = 3;
+}
+
+message EnvelopeAuthenticated {
+  repeated string capabilities = 1;
+}
+
+message EnvelopeRequest {
+  string id = 1;
+  Control command = 2;
+}
+
+message EnvelopeResponse {
+  string id = 1;
+  ResponseResult result = 2;
+}
+
+message EnvelopeRelay {
+  string channel = 1;
+  string peer = 2;
+  string session = 3;
+  bytes data = 4;
+}
+
+message EnvelopeRelayFailure {
+  string session = 1;
+  string peer = 2;
+  WireError error = 3;
+}
+
+message EnvelopeChannelChanged {
+  string channel = 1;
+}
+
+message EnvelopePeerOnline {
+  string peer = 1;
+}
+
+message EnvelopePeerOffline {
+  string peer = 1;
+}

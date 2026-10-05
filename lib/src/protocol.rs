@@ -146,12 +146,16 @@ pub enum Envelope {
     Hello {
         version: String,
         nonce: String,
+        capabilities: Vec<String>,
     },
     Authenticate {
         device: Device,
         signature: Vec<u8>,
+        capabilities: Vec<String>,
     },
-    Authenticated,
+    Authenticated {
+        capabilities: Vec<String>,
+    },
     Request {
         id: String,
         command: Control,
@@ -222,9 +226,11 @@ pub enum SessionOutput {
 pub enum PrivateMessage {
     PingOpen {
         proof: MembershipProof,
+        capabilities: Vec<String>,
     },
     PingOpened {
         proof: MembershipProof,
+        capabilities: Vec<String>,
     },
     Ping {
         nonce: String,
@@ -235,10 +241,12 @@ pub enum PrivateMessage {
     OpenService {
         proof: MembershipProof,
         service: ServiceKind,
+        capabilities: Vec<String>,
     },
     ServiceOpened {
         proof: MembershipProof,
         enabled: bool,
+        capabilities: Vec<String>,
     },
     Execute {
         id: String,

@@ -1,0 +1,164 @@
+// hibiki/2: never reuse tags or enum values; reserve deleted names and numbers.
+syntax = "proto3";
+package hibiki.v2;
+import "membership.proto";
+import "operation.proto";
+
+message CardTarget {
+  optional string serial = 1;
+  optional string key = 2;
+}
+
+message Fragment {
+  bool last = 1;
+  bytes bytes = 2;
+}
+
+message SessionInput {
+  oneof kind {
+    SessionInputPrepareCard prepare_card = 1;
+    SessionInputCancelPreparation cancel_preparation = 2;
+    SessionInputExecute execute = 3;
+    SessionInputCommand command = 4;
+    SessionInputInquiryReply inquiry_reply = 5;
+  }
+}
+
+message SessionInputPrepareCard {
+  string id = 1;
+  CardTarget target = 2;
+}
+
+message SessionInputCancelPreparation {
+  string id = 1;
+}
+
+message SessionInputExecute {
+  uint64 request = 1;
+  repeated bytes preparation = 2;
+  bytes line = 3;
+}
+
+message SessionInputCommand {
+  uint64 request = 1;
+  bytes line = 2;
+}
+
+message SessionInputInquiryReply {
+  uint64 request = 1;
+  bytes line = 2;
+}
+
+message SessionOutput {
+  oneof kind {
+    SessionOutputCardStatus card_status = 1;
+    SessionOutputLine line = 2;
+    SessionOutputFailure failure = 3;
+  }
+}
+
+message SessionOutputCardStatus {
+  string id = 1;
+  CardPreparation  state = 2;
+}
+
+message SessionOutputLine {
+  uint64 request = 1;
+  bytes line = 2;
+}
+
+message SessionOutputFailure {
+}
+
+message PrivateMessage {
+  oneof kind {
+    PrivateMessagePingOpen ping_open = 1;
+    PrivateMessagePingOpened ping_opened = 2;
+    PrivateMessagePing ping = 3;
+    PrivateMessagePong pong = 4;
+    PrivateMessageOpenService open_service = 5;
+    PrivateMessageServiceOpened service_opened = 6;
+    PrivateMessageExecute execute = 7;
+    PrivateMessageInput input = 8;
+    PrivateMessageOutput output = 9;
+    PrivateMessageOutputBatch output_batch = 10;
+    PrivateMessageClose close = 11;
+    PrivateMessageClosed closed = 12;
+    PrivateMessageFailure failure = 13;
+  }
+}
+
+message PrivateMessagePingOpen {
+  MembershipProof proof = 1;
+  repeated string capabilities = 2;
+}
+
+message PrivateMessagePingOpened {
+  MembershipProof proof = 1;
+  repeated string capabilities = 2;
+}
+
+message PrivateMessagePing {
+  string nonce = 1;
+}
+
+message PrivateMessagePong {
+  string nonce = 1;
+}
+
+message PrivateMessageOpenService {
+  MembershipProof proof = 1;
+  ServiceKind service = 2;
+  repeated string capabilities = 3;
+}
+
+message PrivateMessageServiceOpened {
+  MembershipProof proof = 1;
+  bool enabled = 2;
+  repeated string capabilities = 3;
+}
+
+message PrivateMessageExecute {
+  string id = 1;
+  SessionInput input = 2;
+}
+
+message PrivateMessageInput {
+  SessionInput value = 1;
+}
+
+message PrivateMessageOutput {
+  SessionOutput value = 1;
+}
+
+message PrivateMessageOutputBatch {
+  uint64 request = 1;
+  repeated bytes lines = 2;
+}
+
+message PrivateMessageClose {
+}
+
+message PrivateMessageClosed {
+}
+
+message PrivateMessageFailure {
+}
+
+message CardPreparation {
+  oneof kind {
+    CardPreparationWaiting waiting = 1;
+    CardPreparationReady ready = 2;
+    CardPreparationUnavailable unavailable = 3;
+  }
+}
+
+message CardPreparationWaiting {
+}
+
+message CardPreparationReady {
+  string serial = 1;
+}
+
+message CardPreparationUnavailable {
+}

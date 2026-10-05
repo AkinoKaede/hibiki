@@ -1,0 +1,90 @@
+// hibiki/2: never reuse tags or enum values; reserve deleted names and numbers.
+syntax = "proto3";
+package hibiki.v2;
+
+message Device {
+  string name = 1;
+  bytes signing_key = 2;
+  bytes noise_key = 3;
+  bytes binding = 4;
+}
+
+message GenesisBody {
+  uint32 version = 1;
+  string id = 2;
+  string name = 3;
+  Device founder = 4;
+  bytes psk_commitment = 5;
+}
+
+message ChannelGenesis {
+  GenesisBody body = 1;
+  bytes signature = 2;
+}
+
+message JoinBody {
+  string channel_id = 1;
+  bytes genesis_hash = 2;
+  Device device = 3;
+  string nonce = 4;
+  uint64 psk_epoch = 5;
+  uint64 created_at = 6;
+}
+
+message JoinRequest {
+  JoinBody body = 1;
+  bytes signature = 2;
+}
+
+message EventBody {
+  string channel_id = 1;
+  uint64 sequence = 2;
+  bytes previous_event_hash = 3;
+  MembershipAction action = 4;
+  string issuer_device_id = 5;
+  uint64 issued_at = 6;
+}
+
+message MembershipEvent {
+  EventBody body = 1;
+  bytes signature = 2;
+}
+
+message MembershipProof {
+  ChannelGenesis genesis = 1;
+  repeated MembershipEvent events = 2;
+}
+
+message MembershipAction {
+  oneof kind {
+    MembershipActionAdmit admit = 1;
+    MembershipActionRevoke revoke = 2;
+    MembershipActionChangePsk change_psk = 3;
+    MembershipActionLeave leave = 4;
+    MembershipActionRename rename = 5;
+    MembershipActionRevokeSubtree revoke_subtree = 6;
+  }
+}
+
+message MembershipActionAdmit {
+  JoinRequest value = 1;
+}
+
+message MembershipActionRevoke {
+  string device_id = 1;
+}
+
+message MembershipActionChangePsk {
+  bytes verifier_commitment = 1;
+}
+
+message MembershipActionLeave {
+}
+
+message MembershipActionRename {
+  Device device = 1;
+}
+
+message MembershipActionRevokeSubtree {
+  string device_id = 1;
+}
