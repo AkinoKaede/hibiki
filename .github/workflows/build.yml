@@ -177,17 +177,17 @@ jobs:
     name: Build and upload iOS
     if: github.event_name == 'workflow_dispatch' && (inputs.build == 'ios' || inputs.build == 'all')
     needs: validate
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 90
     concurrency:
       group: ios-app-store-connect
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
-      - name: Select Xcode
+      - name: Verify Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
           xcodebuild -version
+          xcodebuild -version | grep -Eq '^Xcode 27([.]|$)'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
@@ -196,11 +196,11 @@ jobs:
           python-version: '3.12'
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ios-release-xcode-26.3
+          key: ios-release-xcode-27
       - uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/hibiki-source-packages
-          key: ios-spm-26.3-${{ hashFiles('ios/Hibiki.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          key: ios-spm-27-${{ hashFiles('ios/Hibiki.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
       - name: Install release dependencies and check release tooling
         run: |
           python3 -m pip install -r ios/scripts/release-requirements.txt

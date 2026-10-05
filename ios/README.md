@@ -85,7 +85,7 @@ On macOS, encode a credential with `base64 -i /path/to/file | pbcopy`, then past
 it directly into the corresponding GitHub secret. Keep these files out of Git.
 The workflow creates a random temporary Keychain password and removes the
 Keychain, installed profile, and private files when the release script exits.
-Use GitHub-hosted runners for this workflow.
+Use a clean, ephemeral macOS runner with the `xcode-27` label and Xcode 27 selected.
 Before importing the P12, the job registers the certificate's account-holder name,
 certificate common name, organization, and Team ID with GitHub Actions `add-mask`.
 Saved text logs are also redacted before artifact upload. The signed IPA retains
@@ -108,7 +108,7 @@ its required signing metadata.
    at 1. An override must be a larger integer, at most 9999. Upload jobs are
    serialized across branches; avoid concurrent uploads from other tools.
 
-The job uses macOS 15 with Xcode 26.3, builds the Release Rust XCFramework, resolves
+The job uses the `xcode-27` runner, verifies Xcode 27, builds the Release Rust XCFramework, resolves
 locked Swift packages, and applies the workflow version through Xcode build
 settings. Release signing uses app-specific `HIBIKI_*` overrides so Swift package
 resource bundles do not receive the app's provisioning profile.
