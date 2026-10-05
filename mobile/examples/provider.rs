@@ -65,6 +65,14 @@ async fn main() -> anyhow::Result<()> {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
         let value: Value = serde_json::from_str(&line)?;
+        if let Some(connections) = value["usb_connections"].as_array() {
+            client.usb_connections(
+                connections
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+            );
+        }
         let client = client.clone();
         tokio::spawn(async move {
             if let Err(error) = command(client, value).await {

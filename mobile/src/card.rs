@@ -59,10 +59,15 @@ pub fn inspect(
     stop: CancellationToken,
     transport: CardTransport,
 ) -> Result<CardInfo> {
-    let backend = NativeCard::open(broker, stop, transport.clone())?;
+    let backend = NativeCard::open(broker.clone(), stop, transport.clone())?;
+    let usb_connection = backend.usb_connection.clone();
     let mut card =
         OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
-    snapshot(&mut card.transaction()?, transport)
+    let info = snapshot(&mut card.transaction()?, transport)?;
+    if let Some(connection) = usb_connection {
+        broker.pin_cache.observe_usb(&connection, &info.serial)?;
+    }
+    Ok(info)
 }
 /// PIN entry identifies the target; reader selection happens after the reply.
 pub fn pin_description(info: &CardInfo) -> String {
@@ -339,7 +344,7 @@ fn verified_card(
     info: &CardInfo,
     key: &CardKey,
 ) -> Result<Option<OpenPGP>> {
-    let backend = match NativeCard::open(broker, stop, transport.clone()) {
+    let backend = match NativeCard::open(broker.clone(), stop, transport.clone()) {
         Ok(card) => card,
         Err(error)
             if transport == CardTransport::Usb && error.is::<crate::broker::CardNotPresent>() =>
@@ -348,9 +353,13 @@ fn verified_card(
         }
         Err(error) => return Err(error),
     };
+    let usb_connection = backend.usb_connection.clone();
     let mut card =
         OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
     let current = snapshot(&mut card.transaction()?, transport)?;
+    if let Some(connection) = usb_connection {
+        broker.pin_cache.observe_usb(&connection, &current.serial)?;
+    }
     if current.serial != info.serial
         || !current.keys.iter().any(|k| {
             k.slot == key.slot && k.keygrip == key.keygrip && k.fingerprint == key.fingerprint
@@ -391,7 +400,7 @@ pub fn private_operation(
     mut input: Zeroizing<Vec<u8>>,
     mut pin: Zeroizing<Vec<u8>>,
     nfc_available: bool,
-    cached_pin: bool,
+    cached_pin: Option<(&crate::pin_cache::PinCache, &crate::pin_cache::Ticket)>,
 ) -> Result<PrivateResult> {
     // USB is probed now, even if the last UI presence notification was stale.
     // Keep the verified connection through VERIFY and signing/decryption.
@@ -414,7 +423,9 @@ pub fn private_operation(
             .application_related_data()?
             .pw_status_bytes()?
             .pw1_cds_valid_once());
-    if cached_pin && !cacheable {
+    // A removal may be delivered while the native reader is opening. Never use
+    // plaintext decrypted before that invalidation on a replacement connection.
+    if cached_pin.is_some_and(|(cache, ticket)| !cacheable || !cache.is_valid(ticket)) {
         return Ok(PrivateResult::NeedFreshPin(input));
     }
     // gpg-agent sends a fixed-size NUL-padded inquiry buffer, not just a terminator.

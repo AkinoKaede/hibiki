@@ -35,6 +35,8 @@ final class AppModel {
     private let hardware: any CardHardwareAccess
     private var eventTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
+    private var usbTask: Task<Void, Never>?
+    private var lastUSBState: USBState?
     private var nativeTasks: [String: Task<Void, Never>] = [:]
     private var lifecycleTask: Task<Void, Never>?
     private var disconnecting = false
@@ -225,6 +227,8 @@ final class AppModel {
         seenJoins.removeAll()
         channelPath.removeAll()
         requestRefreshGeneration += 1
+        usbTask?.cancel(); usbTask = nil
+        lastUSBState = nil
         client = nil
         core?.setServices(pinentry: false, card: false)
         eventTask?.cancel(); eventTask = nil
@@ -261,6 +265,8 @@ final class AppModel {
         pendingJoins.removeAll()
         seenJoins.removeAll()
         requestRefreshGeneration += 1
+        usbTask?.cancel(); usbTask = nil
+        lastUSBState = nil
         client = core
         device = try core.device()
         refreshHardwareCapabilities()
@@ -282,6 +288,8 @@ final class AppModel {
     func configureNFCOrderFixture() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("nfc-order-\(UUID().uuidString)")
         let core = try MobileClient(directory: directory.path, server: "ws://127.0.0.1:1/hibiki", identity: createIdentity(name: "NFC UI Test"), skipTlsCertificateValidation: false)
+        usbTask?.cancel(); usbTask = nil
+        lastUSBState = nil
         client = core
         device = try core.device()
         initialized = true
@@ -407,6 +415,17 @@ final class AppModel {
             if backgroundExpired || disconnecting || client !== core { core.requestStop() }
             return
         }
+        await syncUSBState()
+        guard foreground, client === core, !disconnecting else { return }
+        if usbTask == nil {
+            let events = await hardware.usbEvents()
+            usbTask = Task { [weak self] in
+                for await state in events {
+                    guard !Task.isCancelled, let self, self.client === core else { return }
+                    self.applyUSBState(state, core: core)
+                }
+            }
+        }
         hardwareReady = true
         cardInspection.setActive(true)
         prompts.removeAll { !core.requestIsPending(token: $0.token) }
@@ -427,7 +446,6 @@ final class AppModel {
         pollingTask = Task {
             while !Task.isCancelled, client === core, foreground || !backgroundExpired {
                 if foreground {
-                    await refreshUSBAvailability()
                     await refresh()
                 } else {
                     await refreshPendingRequests()
@@ -437,13 +455,24 @@ final class AppModel {
         }
     }
 
-    func refreshUSBAvailability() async {
-        guard foreground, hardwareReady, let client else { return }
-        let present = await hardware.usbAvailable()
-        guard foreground, self.client === client, !Task.isCancelled else { return }
-        usbPresent = present
-        cardInspection.usbChanged(present)
-        client.usbPresent(present: present)
+    /// One-shot state reconciliation, never reads card information or sends APDUs.
+    func syncUSBState() async {
+        guard foreground, let core = client else { return }
+        let state = await hardware.usbState()
+        guard foreground, client === core, !Task.isCancelled else { return }
+        applyUSBState(state, core: core)
+    }
+
+    private func applyUSBState(_ state: USBState, core: MobileClient) {
+        guard lastUSBState == nil || state.revision > lastUSBState!.revision else { return }
+        if let old = lastUSBState,
+           !Set(old.connections).subtracting(state.connections).isEmpty {
+            cardInspection.usbRemoved()
+        }
+        lastUSBState = state
+        usbPresent = !state.connections.isEmpty
+        core.usbConnections(connections: state.connections)
+        cardInspection.usbChanged(usbPresent)
     }
     func deactivate() async {
         endBackgroundRuntime()
@@ -633,7 +662,7 @@ final class AppModel {
             nfcReadCancellation = nil
             if !client.requestIsPending(token: prompt.token) { prompts.removeAll { $0.token == prompt.token } }
         }
-        await refreshUSBAvailability()
+        await syncUSBState()
         guard foreground, self.client === client, client.requestIsPending(token: prompt.token) else { throw CancellationError() }
         try await client.continueCardInsertion(prompt: prompt, cancellation: cancellation)
         recordedNFCCard = client.nfcCard()
@@ -703,7 +732,11 @@ final class AppModel {
                 notifyOperation(token, kind: .card)
                 return
             }
-            native(token: token, core: core) { try await self.hardware.open(id: id, token: token, transport: transport); return Data() }
+            native(token: token, core: core) {
+                let result = try await self.hardware.open(id: id, token: token, transport: transport)
+                await self.syncUSBState()
+                return result
+            }
         case .cardTransmit(let token, let id, let command):
             guard foreground, hardwareReady else {
                 try? core.failNativeRequest(token: token, message: "App entered background", canceled: true)

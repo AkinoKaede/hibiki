@@ -64,8 +64,8 @@ impl MobileProvider {
     }
     pub fn new(broker: Arc<Broker>) -> Arc<Self> {
         Arc::new(Self {
+            pin_cache: broker.pin_cache.clone(),
             broker,
-            pin_cache: Arc::new(PinCache::default()),
             nfc_card: Arc::new(Mutex::new(None)),
             card_enabled: AtomicBool::new(true),
             pin_enabled: AtomicBool::new(true),
@@ -639,6 +639,7 @@ async fn private_with_cache(
         let work_permit = permit.clone();
         let work_cache = cache.clone();
         let work_scope = scope.clone();
+        let work_ticket = ticket.clone();
         let (outcome, invalidations) = tokio::task::spawn_blocking(move || {
             let _permit = work_permit;
             let outcome = card::private_operation(
@@ -651,7 +652,7 @@ async fn private_with_cache(
                 data,
                 pin,
                 nfc,
-                using_cache,
+                using_cache.then_some((&*work_cache, &work_ticket)),
             );
             // Invalidate even if timeout/cancellation has dropped the async waiter.
             let invalidations = if outcome.as_ref().err().is_some_and(card::bad_pin) {

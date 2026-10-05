@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 from pathlib import Path
 from integration import Device, Assuan, BIN, SERVER, ROOT, run, wait_for, make_card
 from mobile_crypto import make_ecc_card, ecc_sign, ecdh
@@ -131,6 +132,7 @@ class Mobile:
         self.root = root
         self.card = Card(card)
         self.usb_present = False
+        self.usb_insertion = None
         self.usb_card = None
         self.connections = {}
         self.delay = 0
@@ -154,9 +156,16 @@ class Mobile:
         self.thread.start()
 
     def send(self, **message):
-        if message['action'] in ('usb_presence', 'record_nfc'):
-            self.usb_present = message.get('present', False)
         with self.lock:
+            if message['action'] in ('usb_presence', 'record_nfc'):
+                self.usb_present = message.get('present', False)
+            if not self.usb_present:
+                self.usb_insertion = None
+            elif self.usb_insertion is None:
+                self.usb_insertion = str(uuid.uuid4())
+            message['usb_connections'] = [self.usb_insertion] if self.usb_insertion else []
+            if message.pop('usb_open', False):
+                message['data'] = self.usb_insertion.encode().hex()
             if self.p.poll() is None:
                 self.p.stdin.write(json.dumps(message)+'\n')
                 self.p.stdin.flush()
@@ -174,7 +183,7 @@ class Mobile:
                             continue
                         self.connections[event['connection']] = (self.usb_card or self.card) if event['transport'] == 'Usb' else self.card
                     response = self.connections[event['connection']].apdu(bytes.fromhex(event['command'])) if kind == 'apdu' else b''
-                    self.send(action='reply', token=event['token'], data=response.hex())
+                    self.send(action='reply', token=event['token'], data=response.hex(), usb_open=kind == 'open' and event['transport'] == 'Usb')
                 elif kind == 'prompt':
                     self.operation_events.append(('prompt', event.get('prompt_kind')))
                     token = event['token']
@@ -262,9 +271,13 @@ def pin_cache_scenarios(a, mobile, fpr, card, encrypted):
     a.gpg('--card-status')
     agent('RESTART')
     sign(0)
-    # Independent NFC connections and transport changes retain wrapping keys.
+    # USB removal invalidates the shared entry; separate NFC scans preserve it.
     mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+    assert ('open', 'Nfc') in sign(1)
     assert ('open', 'Nfc') in sign(0)
+    mobile.send(action='clear_nfc'); mobile.wait('nfc-cleared')
+    mobile.send(action='record_nfc'); mobile.wait('recorded')
+    assert ('open', 'Nfc') in sign(1)
     assert ('open', 'Nfc') in sign(0)
     mobile.send(action='stop'); mobile.wait('stopped')
     mobile.send(action='start'); mobile.wait('started')
@@ -277,7 +290,7 @@ def pin_cache_scenarios(a, mobile, fpr, card, encrypted):
     # The newly inserted wrong USB card arrives after the last presence report.
     mobile.usb_present = True
     mobile.usb_card = wrong
-    assert ('open', 'Nfc') in sign(0)
+    assert ('open', 'Nfc') in sign(1)
     assert not any(c[0] == 0x20 for c in wrong.commands)
     mobile.usb_card = None
     mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
@@ -316,6 +329,7 @@ def pin_cache_scenarios(a, mobile, fpr, card, encrypted):
     sign(1)
     # Policy changes must discard a hit before VERIFY and close NFC before input.
     mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+    sign(1)
     mobile.card.force_pin = True
     events = sign(1)
     first_nfc = events.index(('open', 'Nfc'))
@@ -346,7 +360,7 @@ def pin_cache_scenarios(a, mobile, fpr, card, encrypted):
     agent('RESET')
     a.kill_agent()
     sign(1)
-    print('PASS: mobile PINCACHE through real agent: USB/NFC, background stop/start, RESTART/RESET, Bad PIN, policy changes and unsupported/malformed cache replies', flush=True)
+    print('PASS: mobile PINCACHE through real agent: USB removal/NFC forget, background stop/start, RESTART/RESET, Bad PIN, policy changes and unsupported/malformed cache replies', flush=True)
 
 
 def main():

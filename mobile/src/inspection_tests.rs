@@ -20,6 +20,34 @@ fn seed(client: &MobileClient) {
     });
 }
 
+fn cached_scope(core: &MobileClient, serial: &str) -> crate::pin_cache::Scope {
+    let context = hibiki_core::provider::ProviderContext {
+        local: None,
+        channel: "channel".into(),
+        peer: "peer".into(),
+        session: "session".into(),
+    };
+    let key = CardKey {
+        slot: 1,
+        algorithm: "rsa2048".into(),
+        fingerprint: "A".repeat(40),
+        keygrip: "B".repeat(40),
+        public_key: vec![],
+        created_at: 0,
+    };
+    let info = CardInfo {
+        serial: serial.into(),
+        transport: CardTransport::Nfc,
+        keys: vec![],
+    };
+    let scope = crate::pin_cache::Scope::new("provider", &context, &info, &key);
+    let cache = &core.provider.pin_cache;
+    cache
+        .publish(cache.begin(scope.clone()), b"123456", |_| Ok(()))
+        .unwrap();
+    scope
+}
+
 async fn next(client: &MobileClient) -> NativeEvent {
     tokio::time::timeout(Duration::from_secs(3), client.next_event())
         .await
@@ -402,6 +430,7 @@ async fn only_insertion_confirmations_can_start_the_insertion_reader() {
 async fn rerecord_replaces_only_on_success_and_can_be_canceled_or_cleared() {
     for outcome in [
         "success",
+        "same-card",
         "wrong-card",
         "cancel",
         "clear",
@@ -411,12 +440,25 @@ async fn rerecord_replaces_only_on_success_and_can_be_canceled_or_cleared() {
         let root = tempfile::tempdir().unwrap();
         let core = client(root.path());
         seed(&core);
+        if outcome == "same-card" {
+            core.provider
+                .nfc_card
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .serial = "D2760001240103040005000012340000".into();
+        }
+        let previous = core.nfc_card().unwrap().serial;
+        let scope = cached_scope(&core, &previous);
+        let other = cached_scope(&core, "unrelated-card");
+        let stale = core.provider.pin_cache.begin(scope.clone());
         let cancellation = CardReadCancellation::new();
         let handle = cancellation.clone();
         let reader = core.clone();
         let expected = (outcome == "wrong-card").then(|| "0005 99999999".into());
         let task = tokio::spawn(async move { reader.record_nfc_card(expected, handle).await });
-        if matches!(outcome, "success" | "wrong-card") {
+        if matches!(outcome, "success" | "same-card" | "wrong-card") {
             finish_public_read(&core, CardTransport::Nfc).await;
         } else {
             let NativeEvent::CardOpen { token, .. } = next(&core).await else {
@@ -431,12 +473,26 @@ async fn rerecord_replaces_only_on_success_and_can_be_canceled_or_cleared() {
                     .unwrap(),
             }
         }
-        assert_eq!(task.await.unwrap().is_ok(), outcome == "success");
+        assert_eq!(
+            task.await.unwrap().is_ok(),
+            matches!(outcome, "success" | "same-card")
+        );
+        let cache = &core.provider.pin_cache;
+        assert_eq!(
+            cache.contains(&cache.begin(scope)),
+            !matches!(outcome, "success" | "clear")
+        );
+        assert!(cache.contains(&cache.begin(other)));
+        if matches!(outcome, "success" | "clear") {
+            cache
+                .publish(stale, b"123456", |_| panic!("stale NFC PUT"))
+                .unwrap();
+        }
         assert_eq!(
             core.nfc_card().map(|c| c.serial),
             match outcome {
                 "clear" => None,
-                "success" => Some("D2760001240103040005000012340000".into()),
+                "success" | "same-card" => Some("D2760001240103040005000012340000".into()),
                 _ => Some("previous".into()),
             }
         );
@@ -598,6 +654,67 @@ async fn insertion_on_a_device_without_nfc_is_an_ordinary_confirmation() {
         assert!(
             matches!(event, NativeEvent::Cancelled { .. }),
             "ordinary confirmation must not open a reader"
+        );
+    }
+}
+
+#[tokio::test]
+async fn usb_identification_tracks_native_insertions_and_rejects_late_reads() {
+    for removed_during_read in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let core = client(root.path());
+        core.usb_connections(vec!["insertion".into()]);
+        let scope = cached_scope(&core, "D2760001240103040005000012340000");
+        let other = cached_scope(&core, "other-card");
+        let reader = core.clone();
+        let read = tokio::spawn(async move {
+            reader
+                .inspect_card(CardTransport::Usb, CardReadCancellation::new())
+                .await
+        });
+        loop {
+            match next(&core).await {
+                NativeEvent::CardOpen { token, .. } => {
+                    core.respond(token, b"insertion".to_vec(), true).unwrap();
+                }
+                NativeEvent::CardTransmit { token, command, .. } => {
+                    let response = match command[1] {
+                        0xA4 => vec![0x90, 0],
+                        0xCA => {
+                            if removed_during_read {
+                                core.usb_connections(vec![]);
+                            }
+                            application_data()
+                        }
+                        _ => panic!("only public APDUs expected"),
+                    };
+                    core.respond(token, response, true).unwrap();
+                }
+                NativeEvent::CardClose { .. } => break,
+                NativeEvent::Cancelled { .. } => {}
+                _ => panic!("unexpected event"),
+            }
+        }
+        assert_eq!(read.await.unwrap().is_err(), removed_during_read);
+        if !removed_during_read {
+            core.usb_connections(vec!["replacement".into()]);
+        }
+        assert!(
+            !core
+                .provider
+                .pin_cache
+                .contains(&core.provider.pin_cache.begin(scope))
+        );
+        assert!(
+            core.provider
+                .pin_cache
+                .contains(&core.provider.pin_cache.begin(other))
+        );
+        assert!(
+            core.provider
+                .pin_cache
+                .observe_usb("insertion", "late")
+                .is_err()
         );
     }
 }

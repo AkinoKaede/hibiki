@@ -214,7 +214,7 @@ to replace it, or **Forget NFC Key** to clear it. Reading never asks for a PIN. 
 network reconnects retain completed records; a cold launch starts empty. No card
 information or names are persisted.
 
-Security Keys is a read-only information viewer. USB reads on entry/insertion;
+Security Keys is a read-only information viewer. USB reads only when **Refresh USB Information** is tapped;
 NFC reads only after tapping **Read NFC Information**. Viewing another card does
 not record it for use or change the Status record. Results show public keys,
 fingerprints, keygrips and creation dates; NFC results are snapshots, not proof
@@ -255,8 +255,14 @@ occurs. After changing keys on an NFC card, read it again in Status.
 Card PIN caching uses GnuPG's `PINCACHE_GET`/`PINCACHE_PUT` protocol. The requesting
 computer's agent holds an encrypted PIN; iOS holds only wrapping keys and validity
 metadata in the card-service instance's memory. No PIN cache is written to disk or
-Keychain. Wrapping keys survive background/foreground transitions, reconnections,
-USB removal and separate NFC scans, but not app termination or client recreation.
+Keychain. Wrapping keys survive background/foreground transitions, reconnections
+and separate NFC scans, but not app termination or client recreation.
+USB removal or forgetting an NFC record destroys that card's wrapping keys across
+USB/NFC, requesters, channels and keys; other cards retain their caches. Replacing
+an NFC record clears the previous card, while rereading the same card preserves it.
+The computer may retain ciphertext, but it is unusable without the wrapping key.
+USB availability uses reader/slot change events rather than polling, with a state
+reconciliation on foreground return. Suspension can delay native events.
 Public queries and `RESTART` preserve them. `RESET` clears entries for the requesting
 device/channel; disabling Scdaemon clears all mobile entries. Bad PIN or PIN blocked
 clears that card's entries without retrying VERIFY. Ordinary password TTL settings
@@ -376,7 +382,8 @@ end-to-end app pairing and Keychain validation.
 Hardware release checklist (must run on an actual iPhone and YubiKey):
 
 - NFC entitlement and permission handling; USB detection and reader contention.
-- Inspect USB information on entry/insertion, cancel an NFC read and switch back
+- Refresh USB information manually; verify entry, insertion, foreground return and
+  transport switching do not read automatically. Cancel an NFC read and switch back
   to USB, unplug during inspection, and confirm the Status record is unchanged.
 - Record, replace and forget NFC keys; relaunch to verify records are empty, and confirm private
   operations only use enabled connections; reject saving with both switches off.

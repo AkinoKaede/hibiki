@@ -8,7 +8,10 @@ use chacha20poly1305::{
 use hibiki_core::provider::ProviderContext;
 use hibiki_lib::assuan::Line;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex, Weak},
+};
 use zeroize::Zeroizing;
 
 const VERSION: u8 = 1;
@@ -52,28 +55,41 @@ struct Entry {
 struct State {
     epoch: u64,
     entries: BTreeMap<String, Entry>,
+    cards: BTreeMap<String, Weak<()>>,
+    usb: BTreeMap<String, BTreeSet<String>>,
 }
 #[derive(Default)]
 pub struct PinCache(Mutex<State>);
 
+#[derive(Clone)]
 pub struct Ticket {
     epoch: u64,
+    card: Arc<()>,
     pub scope: Scope,
 }
 impl PinCache {
     pub fn begin(&self, scope: Scope) -> Ticket {
+        let mut state = self.0.lock().unwrap();
+        state.cards.retain(|_, version| version.strong_count() > 0);
+        let version = state.cards.entry(scope.serial.clone()).or_default();
+        let card = version.upgrade().unwrap_or_else(|| Arc::new(()));
+        *version = Arc::downgrade(&card);
         Ticket {
-            epoch: self.0.lock().unwrap().epoch,
+            epoch: state.epoch,
+            card,
             scope,
         }
     }
+    pub fn is_valid(&self, ticket: &Ticket) -> bool {
+        Self::valid(&self.0.lock().unwrap(), ticket)
+    }
     pub fn contains(&self, ticket: &Ticket) -> bool {
         let state = self.0.lock().unwrap();
-        state.epoch == ticket.epoch && state.entries.contains_key(&ticket.scope.id)
+        Self::valid(&state, ticket) && state.entries.contains_key(&ticket.scope.id)
     }
     pub fn decrypt(&self, ticket: &Ticket, value: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
         let state = self.0.lock().unwrap();
-        if state.epoch != ticket.epoch || value.len() > 512 {
+        if !Self::valid(&state, ticket) || value.len() > 512 {
             return None;
         }
         let entry = state.entries.get(&ticket.scope.id)?;
@@ -112,7 +128,7 @@ impl PinCache {
         emit: impl FnOnce(Line) -> Result<()>,
     ) -> Result<()> {
         let mut state = self.0.lock().unwrap();
-        if ticket.epoch != state.epoch {
+        if !Self::valid(&state, &ticket) {
             return Ok(());
         }
         if pin.is_empty() || pin.len() > 127 || pin.contains(&0) {
@@ -158,6 +174,55 @@ impl PinCache {
                 key,
             },
         );
+        Ok(())
+    }
+    fn valid(state: &State, ticket: &Ticket) -> bool {
+        state.epoch == ticket.epoch
+            && state
+                .cards
+                .get(&ticket.scope.serial)
+                .and_then(Weak::upgrade)
+                .is_some_and(|version| Arc::ptr_eq(&version, &ticket.card))
+    }
+    /// A physical card's lifecycle spans all requesters, channels and transports.
+    pub fn clear_serial(&self, serial: &str) {
+        Self::invalidate_serial(&mut self.0.lock().unwrap(), &serial.to_ascii_uppercase());
+    }
+    fn invalidate_serial(state: &mut State, serial: &str) {
+        state.cards.remove(serial);
+        state
+            .entries
+            .retain(|_, entry| entry.scope.serial != serial);
+    }
+    /// Connection IDs are opaque native insertion identities, not reader names.
+    pub fn usb_connections(&self, connections: Vec<String>) {
+        let mut state = self.0.lock().unwrap();
+        let current: BTreeSet<_> = connections.into_iter().collect();
+        let removed: BTreeSet<_> = state
+            .usb
+            .iter()
+            .filter(|(id, _)| !current.contains(*id))
+            .flat_map(|(_, serials)| serials.iter().cloned())
+            .collect();
+        for serial in removed {
+            Self::invalidate_serial(&mut state, &serial);
+        }
+        state.usb.retain(|id, _| current.contains(id));
+        for id in current {
+            state.usb.entry(id).or_default();
+        }
+    }
+    /// Reject late public reads from a removed/replaced insertion.
+    pub fn observe_usb(&self, connection: &str, serial: &str) -> Result<()> {
+        let mut state = self.0.lock().unwrap();
+        let serial = serial.to_ascii_uppercase();
+        let Some(serials) = state.usb.get_mut(connection) else {
+            // The reader may finish identifying the removed card after its event.
+            // Invalidate its old cache, but never reattach it to a new insertion.
+            Self::invalidate_serial(&mut state, &serial);
+            bail!("USB card was removed during identification");
+        };
+        serials.insert(serial);
         Ok(())
     }
     pub fn clear_all(&self) {
@@ -284,6 +349,65 @@ mod tests {
                 .is_none()
         );
     }
+    #[test]
+    fn physical_removal_clears_all_card_scopes_and_only_fences_that_card() {
+        let cache = PinCache::default();
+        let (mut context, mut info, mut key) = fixture();
+        let first = Scope::new("provider", &context, &info, &key);
+        put(&cache, first.clone());
+        let stale = cache.begin(first.clone());
+        context.channel = "other-channel".into();
+        context.peer = "other-peer".into();
+        key.slot = 2;
+        info.transport = CardTransport::Nfc;
+        let second = Scope::new("provider", &context, &info, &key);
+        put(&cache, second.clone());
+        info.serial = "EEEE".into();
+        let unrelated = Scope::new("provider", &context, &info, &key);
+        let blob = put(&cache, unrelated.clone());
+        let unaffected = cache.begin(unrelated.clone());
+        cache.usb_connections(vec!["insertion-1".into(), "other-reader".into()]);
+        cache.observe_usb("insertion-1", "abcd").unwrap();
+        cache.observe_usb("other-reader", "EEEE").unwrap();
+        // Reinsertion of the same physical card has a fresh native identity.
+        cache.usb_connections(vec!["insertion-2".into(), "other-reader".into()]);
+        assert!(!cache.contains(&cache.begin(first.clone())));
+        assert!(!cache.contains(&cache.begin(second)));
+        assert!(cache.decrypt(&unaffected, &blob).is_some());
+        cache
+            .publish(stale, b"123456", |_| panic!("stale PUT after removal"))
+            .unwrap();
+        assert!(cache.observe_usb("insertion-1", "ABCD").is_err());
+        cache.observe_usb("insertion-2", "ABCD").unwrap();
+        put(&cache, first.clone());
+        // Duplicate state snapshots do not invalidate a new insertion's cache.
+        cache.usb_connections(vec!["insertion-2".into(), "other-reader".into()]);
+        assert!(cache.contains(&cache.begin(first)));
+        let mut published = false;
+        cache
+            .publish(unaffected, b"123456", |_| {
+                published = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(published);
+    }
+
+    #[test]
+    fn forgetting_a_card_fences_an_unpublished_ticket_without_affecting_other_cards() {
+        let cache = PinCache::default();
+        let (context, info, key) = fixture();
+        let scope = Scope::new("provider", &context, &info, &key);
+        let stale = cache.begin(scope.clone());
+        cache.clear_serial("abcd");
+        cache
+            .publish(stale, b"123456", |_| panic!("late first PUT"))
+            .unwrap();
+        assert!(!cache.contains(&cache.begin(scope.clone())));
+        put(&cache, scope.clone());
+        assert!(cache.contains(&cache.begin(scope)));
+    }
+
     #[test]
     fn reset_bad_pin_and_disable_fence_inflight_writes() {
         let cache = PinCache::default();

@@ -13,6 +13,7 @@ pub struct NativeCard {
     stop: CancellationToken,
     connection: String,
     runtime: tokio::runtime::Handle,
+    pub usb_connection: Option<String>,
 }
 impl NativeCard {
     pub fn open(
@@ -20,13 +21,15 @@ impl NativeCard {
         stop: CancellationToken,
         transport: CardTransport,
     ) -> Result<Self> {
-        let card = Self {
+        let usb = transport == CardTransport::Usb;
+        let mut card = Self {
             broker,
             stop,
+            usb_connection: None,
             connection: hibiki_lib::random_id(),
             runtime: tokio::runtime::Handle::current(),
         };
-        card.runtime.block_on(card.broker.request(
+        let response = card.runtime.block_on(card.broker.request(
             |token| NativeEvent::CardOpen {
                 token,
                 connection: card.connection.clone(),
@@ -35,6 +38,10 @@ impl NativeCard {
             &card.stop,
             Duration::from_secs(90),
         ))?;
+        // Empty responses are supported by non-iOS native test hosts.
+        if usb && !response.is_empty() {
+            card.usb_connection = Some(String::from_utf8(response.to_vec())?);
+        }
         Ok(card)
     }
     pub fn exchange(&self, bytes: &[u8]) -> Result<Vec<u8>, SmartcardError> {

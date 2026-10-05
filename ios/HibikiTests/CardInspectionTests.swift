@@ -48,29 +48,57 @@ final class CardInspectionTests: XCTestCase {
         XCTFail("State did not settle", file: file, line: line)
     }
 
-    func testUSBReadsOncePerInsertionAndKeepsLastSuccessfulResult() async throws {
+    func testUSBOnlyReadsOnExplicitRefresh() async throws {
         let state = CardInspection()
         state.setNFCAvailable(true)
         var reads = 0
-        state.appear(usbPresent: true, active: true) { mode in
+        let read: (CardTransport) async throws -> CardInfo = { mode in
             reads += 1
             return self.card("USB-\(reads)", mode)
         }
-        try await eventually { state.info != nil }
-        XCTAssertEqual(reads, 1)
-        for _ in 0..<5 { state.usbChanged(true) }
-        XCTAssertEqual(reads, 1)
+        state.appear(usbPresent: true, active: true, read: read)
         state.usbChanged(false)
-        XCTAssertEqual(state.info?.serial, "USB-1")
         state.usbChanged(true)
-        XCTAssertEqual(state.info?.serial, "USB-1")
-        try await eventually { reads == 2 && !state.isReading }
-        XCTAssertEqual(state.info?.serial, "USB-2")
-        state.refresh()
-        XCTAssertEqual(state.info?.serial, "USB-2")
-        try await eventually { reads == 3 && !state.isReading }
-        XCTAssertEqual(state.info?.serial, "USB-3")
+        state.setActive(false)
+        state.setActive(true)
+        state.select(.nfc)
+        state.select(.usb)
         state.disappear()
+        state.appear(usbPresent: true, active: true, read: read)
+        XCTAssertFalse(state.isReading)
+        await Task.yield()
+        XCTAssertEqual(reads, 0)
+        state.refresh()
+        try await eventually { !state.isReading }
+        XCTAssertEqual(reads, 1)
+        XCTAssertEqual(state.info?.serial, "USB-1")
+        state.usbChanged(false)
+        state.usbChanged(true)
+        XCTAssertFalse(state.isReading)
+        XCTAssertEqual(state.info?.serial, "USB-1")
+        state.refresh()
+        try await eventually { !state.isReading }
+        XCTAssertEqual(reads, 2)
+        XCTAssertEqual(state.info?.serial, "USB-2")
+        state.disappear()
+    }
+
+    func testUSBInsertionIdentityChangesOnRapidReplugAndPreservesOtherReaders() {
+        var insertions = USBInsertions()
+        XCTAssertFalse(insertions.update(name: "one", present: false))
+        insertions.update(name: "one", present: true)
+        insertions.update(name: "two", present: true)
+        let first = insertions.state
+        let other = insertions.identities["two"]
+        XCTAssertFalse(insertions.update(name: "one", present: true))
+        XCTAssertEqual(insertions.state, first)
+        insertions.update(name: "one", present: false)
+        insertions.update(name: "one", present: true)
+        XCTAssertEqual(insertions.state.revision, first.revision + 2)
+        XCTAssertNotEqual(insertions.state.connections, first.connections)
+        XCTAssertEqual(insertions.identities["two"], other)
+        insertions.update(name: "one", present: false)
+        XCTAssertEqual(insertions.state.connections, [other!])
     }
 
     func testUSBCacheSurvivesFailureCancellationAndTransportChanges() async throws {
@@ -84,6 +112,7 @@ final class CardInspectionTests: XCTestCase {
             if reads == 3 { return try await withCheckedThrowingContinuation { pending = $0 } }
             return self.card("USB-\(reads)", mode)
         }
+        state.refresh()
         try await eventually { !state.isReading }
         state.refresh()
         try await eventually { !state.isReading }
@@ -102,6 +131,8 @@ final class CardInspectionTests: XCTestCase {
         XCTAssertEqual(state.info?.serial, "USB-1")
         state.appear(usbPresent: true, active: true) { mode in self.card("New key", mode) }
         XCTAssertEqual(state.info?.serial, "USB-1")
+        XCTAssertFalse(state.isReading)
+        state.refresh()
         try await eventually { !state.isReading }
         XCTAssertEqual(state.info?.serial, "New key")
         state.reset()
@@ -125,6 +156,7 @@ final class CardInspectionTests: XCTestCase {
             }
             return self.card("USB", mode)
         }
+        state.refresh()
         try await eventually { state.info != nil }
         state.select(.nfc)
         XCTAssertNil(state.info)
@@ -132,6 +164,8 @@ final class CardInspectionTests: XCTestCase {
         state.refresh()
         try await eventually { nfc != nil }
         state.select(.usb)
+        XCTAssertFalse(state.isReading)
+        state.refresh()
         XCTAssertTrue(state.isReading)
         XCTAssertEqual(state.info?.serial, "USB")
         XCTAssertEqual(reads, [.usb, .nfc])
@@ -145,17 +179,19 @@ final class CardInspectionTests: XCTestCase {
     func testLeavingAndBackgroundingInvalidatePendingReads() async throws {
         for background in [false, true] {
             let state = CardInspection()
-        state.setNFCAvailable(true)
+            state.setNFCAvailable(true)
             var pending: CheckedContinuation<CardInfo, Error>?
             state.appear(usbPresent: true, active: true) { _ in
                 try await withCheckedThrowingContinuation { pending = $0 }
             }
+            state.refresh()
             try await eventually { pending != nil }
             if background { state.setActive(false) } else { state.disappear() }
             XCTAssertFalse(state.isReading)
             pending?.resume(returning: card("Stale", .usb))
             // Queue a new reader behind the old one to deterministically wait for its completion.
             state.appear(usbPresent: true, active: true) { mode in self.card("New", mode) }
+            state.refresh()
             try await eventually { !state.isReading }
             XCTAssertEqual(state.info?.serial, "New")
             XCTAssertNil(state.error)

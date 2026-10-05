@@ -24,6 +24,7 @@ pub struct CardNotPresent;
 
 type Answer = Result<Zeroizing<Vec<u8>>>;
 pub struct Broker {
+    pub pin_cache: Arc<crate::pin_cache::PinCache>,
     tx: mpsc::Sender<NativeEvent>,
     rx: tokio::sync::Mutex<mpsc::Receiver<NativeEvent>>,
     pending: Mutex<HashMap<String, oneshot::Sender<Answer>>>,
@@ -32,6 +33,7 @@ impl Broker {
     pub fn new() -> Arc<Self> {
         let (tx, rx) = mpsc::channel(256);
         Arc::new(Self {
+            pin_cache: Arc::default(),
             tx,
             rx: tokio::sync::Mutex::new(rx),
             pending: Mutex::new(HashMap::new()),

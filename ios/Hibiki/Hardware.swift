@@ -17,8 +17,9 @@ enum HardwareError: LocalizedError {
 }
 
 protocol CardHardwareAccess: Sendable {
-    func usbAvailable() async -> Bool
-    func open(id: String, token: String, transport: CardTransport) async throws
+    func usbState() async -> USBState
+    func usbEvents() async -> AsyncStream<USBState>
+    func open(id: String, token: String, transport: CardTransport) async throws -> Data
     func transmit(id: String, token: String, command: Data) async throws -> Data
     func cancel(token: String) async
     func close(id: String) async
@@ -37,23 +38,25 @@ actor CardHardware: CardHardwareAccess {
     private var usb: TKSmartCard?
     private var nfc: NFCReader?
 
-    func usbAvailable() -> Bool {
-        TKSmartCardSlotManager.default?.slotNames.contains { name in
-            TKSmartCardSlotManager.default?.slotNamed(name)?.state == .validCard
-        } ?? false
-    }
+    private let usbMonitor = USBMonitor()
+    func usbState() -> USBState { usbMonitor.snapshot() }
+    func usbEvents() -> AsyncStream<USBState> { usbMonitor.events() }
 
-    func open(id: String, token: String, transport: CardTransport) async throws {
+    func open(id: String, token: String, transport: CardTransport) async throws -> Data {
         closeAll()
         connection = id
         operation = token
         do {
+            var insertion: String?
             switch transport {
             case .usb:
                 guard let manager = TKSmartCardSlotManager.default else { throw HardwareError.unavailable }
                 let slots = manager.slotNames.compactMap { manager.slotNamed($0) }.filter { $0.state == .validCard }
                 guard slots.count <= 1 else { throw HardwareError.multipleCards }
-                guard let card = slots.first?.makeSmartCard() else { throw HardwareError.cardNotPresent }
+                guard let slot = slots.first,
+                      let identity = usbMonitor.connection(for: slot.name),
+                      let card = slot.makeSmartCard() else { throw HardwareError.cardNotPresent }
+                insertion = identity
                 card.isSensitive = true
                 usb = card
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -69,6 +72,11 @@ actor CardHardware: CardHardwareAccess {
             }
             guard connection == id, operation == token, !Task.isCancelled else { throw HardwareError.disconnected }
             operation = nil
+            if let insertion {
+                guard usbMonitor.snapshot().connections.contains(insertion) else { throw HardwareError.disconnected }
+                return Data(insertion.utf8)
+            }
+            return Data()
         } catch {
             if connection == id { closeAll() }
             throw error
@@ -170,5 +178,106 @@ final class NFCReader: NSObject, NFCTagReaderSessionDelegate, @unchecked Sendabl
         lock.lock(); closed = true; tag = nil; let reader = session; session = nil; lock.unlock()
         finish(HardwareError.disconnected)
         reader?.invalidate()
+    }
+}
+
+/// Immutable insertion identities also detect replacement while overall availability stays true.
+struct USBState: Sendable, Equatable {
+    var revision: UInt64 = 0
+    var connections: [String] = []
+}
+
+/// Pure transition state: slot names identify readers; UUIDs identify insertions.
+struct USBInsertions {
+    private(set) var identities: [String: String] = [:]
+    private var revision: UInt64 = 0
+    var state: USBState { USBState(revision: revision, connections: identities.values.sorted()) }
+
+    @discardableResult
+    mutating func update(name: String, present: Bool) -> Bool {
+        guard present != (identities[name] != nil) else { return false }
+        identities[name] = present ? UUID().uuidString : nil
+        revision += 1
+        return true
+    }
+}
+
+/// KVO callbacks run on system queues. Serialize transitions before handing them to Swift tasks.
+final class USBMonitor: @unchecked Sendable {
+    private let lock = NSRecursiveLock()
+    private let manager: TKSmartCardSlotManager?
+    private var managerObservation: NSKeyValueObservation?
+    private var slots: [String: (TKSmartCardSlot, NSKeyValueObservation)] = [:]
+    private var insertions = USBInsertions()
+    private var listeners: [UUID: AsyncStream<USBState>.Continuation] = [:]
+
+    init() {
+        manager = TKSmartCardSlotManager.default
+        managerObservation = manager?.observe(\.slotNames, options: [.new]) { [weak self] _, _ in
+            self?.rescan()
+        }
+        rescan()
+    }
+
+    deinit {
+        managerObservation?.invalidate()
+        for (_, observation) in slots.values { observation.invalidate() }
+        for continuation in listeners.values { continuation.finish() }
+    }
+
+    func snapshot() -> USBState {
+        lock.withLock {
+            rescan()
+            return current
+        }
+    }
+    func connection(for name: String) -> String? {
+        lock.withLock { rescan(); return insertions.identities[name] }
+    }
+    func events() -> AsyncStream<USBState> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            lock.withLock {
+                rescan()
+                listeners[id] = continuation
+                continuation.yield(current)
+            }
+            continuation.onTermination = { [weak self] _ in
+                self?.removeListener(id)
+            }
+        }
+    }
+    private func removeListener(_ id: UUID) { lock.withLock { _ = listeners.removeValue(forKey: id) } }
+    private var current: USBState { insertions.state }
+
+    private func rescan() {
+        lock.withLock {
+            let names = Set(manager?.slotNames ?? [])
+            for name in Array(slots.keys) where !names.contains(name) {
+                slots.removeValue(forKey: name)?.1.invalidate()
+                update(name: name, present: false)
+            }
+            for name in names {
+                if slots[name] == nil, let slot = manager?.slotNamed(name) {
+                    let observation = slot.observe(\.state, options: [.new]) { [weak self] slot, change in
+                        guard let state = change.newValue else { return }
+                        self?.changed(name: name, slot: slot, present: state == .validCard)
+                    }
+                    slots[name] = (slot, observation)
+                }
+                if let slot = slots[name]?.0 { update(name: name, present: slot.state == .validCard) }
+            }
+        }
+    }
+    private func changed(name: String, slot: TKSmartCardSlot, present: Bool) {
+        lock.withLock {
+            guard slots[name]?.0 === slot else { return }
+            update(name: name, present: present)
+        }
+    }
+    private func update(name: String, present: Bool) {
+        guard insertions.update(name: name, present: present) else { return }
+        let state = current
+        for continuation in listeners.values { continuation.yield(state) }
     }
 }

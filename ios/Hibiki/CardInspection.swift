@@ -22,7 +22,6 @@ final class CardInspection {
         self.usbPresent = usbPresent
         self.active = active
         visible = true
-        if transport == .usb { refresh() }
     }
 
     func disappear() {
@@ -34,7 +33,6 @@ final class CardInspection {
         guard active != value else { return }
         active = value
         if !value { cancel() }
-        else if visible, transport == .usb { refresh() }
     }
 
     func usbChanged(_ present: Bool) {
@@ -42,7 +40,10 @@ final class CardInspection {
         usbPresent = present
         guard transport == .usb else { return }
         cancel()
-        if present { refresh() }
+    }
+
+    func usbRemoved() {
+        if transport == .usb { cancel() }
     }
 
     func setNFCAvailable(_ available: Bool) {
@@ -56,7 +57,6 @@ final class CardInspection {
         cancel()
         self.transport = transport
         info = transport == .usb ? usbInfo : nil
-        if transport == .usb { refresh() }
     }
 
     func refresh() {

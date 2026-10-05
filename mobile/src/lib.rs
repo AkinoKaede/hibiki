@@ -242,7 +242,13 @@ impl MobileClient {
             return Err(broker::RequestCancelled.into());
         }
         if matches!(info.transport, CardTransport::Nfc) {
-            *self.provider.nfc_card.lock().unwrap() = Some(info.clone());
+            let mut recorded = self.provider.nfc_card.lock().unwrap();
+            if let Some(old) = recorded.as_ref()
+                && !old.serial.eq_ignore_ascii_case(&info.serial)
+            {
+                self.provider.pin_cache.clear_serial(&old.serial);
+            }
+            *recorded = Some(info.clone());
             let _ = self
                 .broker
                 .emit(NativeEvent::CardChanged { card: info.clone() });
@@ -491,6 +497,11 @@ impl MobileClient {
     pub fn usb_present(&self, present: bool) {
         self.provider.usb_present.store(present, Ordering::Release);
     }
+    /// Native insertion identities change even for a rapid unplug/replug of the same card.
+    pub fn usb_connections(&self, connections: Vec<String>) {
+        self.provider.pin_cache.usb_connections(connections.clone());
+        self.usb_present(!connections.is_empty());
+    }
     /// Host capability, separate from the process-local NFC snapshot.
     pub fn set_nfc_available(&self, available: bool) {
         let was_available = self
@@ -570,7 +581,9 @@ impl MobileClient {
         let mut stop = self.nfc_record_stop.lock().unwrap();
         stop.cancel();
         *stop = CancellationToken::new();
-        *self.provider.nfc_card.lock().unwrap() = None;
+        if let Some(info) = self.provider.nfc_card.lock().unwrap().take() {
+            self.provider.pin_cache.clear_serial(&info.serial);
+        }
         self.provider.cancel_nfc_sessions();
     }
     /// Only a recognized two-button CONFIRM may use the insertion workflow.

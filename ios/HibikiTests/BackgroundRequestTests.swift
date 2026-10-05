@@ -33,6 +33,35 @@ final class BackgroundRequestTests: XCTestCase {
         PendingInfo(id: id, channel: channel, device: DeviceInfo(id: "peer", name: "PRIVATE DEVICE", words: "", online: true, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: []))
     }
 
+    func testUSBEventsSurviveBackgroundAndIgnoreStaleSnapshots() async {
+        let (model, core, _, _, hardware) = fixture()
+        await hardware.setUSB(true)
+        await model.activate()
+        XCTAssertTrue(model.usbPresent)
+        let original = core.read { $0.usbConnections.last! }
+        await hardware.setUSB(false)
+        await hardware.setUSB(true)
+        await settle { core.read { $0.usbConnections.count } == 3 }
+        XCTAssertNotEqual(core.read { $0.usbConnections.last! }, original)
+        await hardware.emitUSB(USBState(revision: 0, connections: []))
+        await Task.yield()
+        XCTAssertTrue(model.usbPresent)
+        model.sceneChanged(.background)
+        await hardware.setUSB(false)
+        await settle { !model.usbPresent }
+        XCTAssertEqual(core.read { $0.usbConnections.last! }, [])
+        model.sceneChanged(.active)
+        await model.activate()
+        XCTAssertFalse(model.usbPresent)
+        let count = core.read { $0.usbConnections.count }
+        await model.syncUSBState()
+        XCTAssertEqual(core.read { $0.usbConnections.count }, count)
+        await model.disconnectRelay()
+        await hardware.setUSB(true)
+        await Task.yield()
+        XCTAssertFalse(model.usbPresent)
+    }
+
     func testBackgroundKeepsConnectionAndPromptsButHidesPresentation() async {
         let (model, core, runtime, notices, _) = fixture()
         core.update { $0.tokens = ["pin"] }
@@ -344,12 +373,23 @@ private final class TestNotifications: RequestNotifications {
 private actor TestCardHardware: CardHardwareAccess {
     var opened: [String] = []
     var transmitted: [String] = []
-    func usbAvailable() -> Bool { false }
+    private var insertions = USBInsertions()
+    private var usbContinuation: AsyncStream<USBState>.Continuation?
+    func usbState() -> USBState { insertions.state }
+    func usbEvents() -> AsyncStream<USBState> {
+        AsyncStream { usbContinuation = $0; $0.yield(insertions.state) }
+    }
+    func setUSB(_ present: Bool) {
+        insertions.update(name: "test-reader", present: present)
+        usbContinuation?.yield(insertions.state)
+    }
+    func emitUSB(_ state: USBState) { usbContinuation?.yield(state) }
     private var holdingOpen = false
     func holdOpen() { holdingOpen = true }
-    func open(id: String, token: String, transport: CardTransport) async throws {
+    func open(id: String, token: String, transport: CardTransport) async throws -> Data {
         opened.append(token)
         if holdingOpen { try await Task.sleep(for: .seconds(30)) }
+        return Data()
     }
     func transmit(id: String, token: String, command: Data) -> Data { transmitted.append(token); return Data([0x90, 0]) }
     func cancel(token: String) {}
@@ -380,6 +420,7 @@ private final class BackgroundClient: MobileClient, @unchecked Sendable {
         var channels: [ChannelInfo] = []
         var joins: [String: [PendingInfo]] = [:]
         var failPending = false
+        var usbConnections: [[String]] = []
     }
     private let lock = NSLock()
     private var state = State()
@@ -396,6 +437,7 @@ private final class BackgroundClient: MobileClient, @unchecked Sendable {
     override func setNfcAvailable(available: Bool) {}
     override func setServices(pinentry: Bool, card: Bool) {}
     override func usbPresent(present: Bool) {}
+    override func usbConnections(connections: [String]) { update { $0.usbConnections.append(connections) } }
     override func channels() async throws -> [ChannelInfo] { read { $0.channels } }
     override func allowsChannelCreation() async throws -> Bool { true }
     override func pending(channel: String) async throws -> [PendingInfo] {
