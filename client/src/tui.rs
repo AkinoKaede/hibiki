@@ -1,4 +1,7 @@
 //! Interactive management uses its own control connection; the service daemon is untouched.
+mod graphics;
+mod qr;
+
 use crate::{
     management::{self, Manager, Snapshot},
     presentation::{self, safe},
@@ -159,6 +162,7 @@ struct Ui {
     message: String,
     busy: bool,
     detail_scroll: u16,
+    qr_view: qr::View,
 }
 impl Ui {
     fn rows(&self) -> Vec<Row> {
@@ -841,8 +845,11 @@ impl Ui {
         }
         false
     }
-    fn draw(&self, f: &mut Frame) {
+    fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
+        if !matches!(self.modal, Some(Modal::Secret { qr: true, .. })) {
+            self.qr_view.clear();
+        }
         let parts = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -979,12 +986,16 @@ impl Ui {
         );
         f.render_widget(Paragraph::new(if self.filtering{format!("Filter: {}",safe(&self.filter))}else{"1–5 pages · Tab focus · ↑↓/jk move · Enter details · a actions · i invite · / filter · r refresh · ? help · q quit".into()}),parts[3]);
         if let Some(modal) = &self.modal {
-            let rect = Rect::new(
-                area.x + area.width / 20,
-                area.y + area.height / 20,
-                area.width.saturating_sub(area.width / 10),
-                area.height.saturating_sub(area.height / 10),
-            );
+            let rect = if matches!(modal, Modal::Secret { qr: true, .. }) {
+                area
+            } else {
+                Rect::new(
+                    area.x + area.width / 20,
+                    area.y + area.height / 20,
+                    area.width.saturating_sub(area.width / 10),
+                    area.height.saturating_sub(area.height / 10),
+                )
+            };
             f.render_widget(Clear, rect);
             match modal {
                 Modal::Menu{choices,selected}=>{
@@ -1004,16 +1015,19 @@ impl Ui {
                     f.render_widget(Paragraph::new(text).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(Block::default().borders(Borders::ALL).title(format!("{title} · ↑↓ scroll · Tab choose · Enter submit · Esc cancel"))),rect);
                 },
                 Modal::Secret{title,text,scroll,qr}=> {
-                    let block = Block::default().borders(Borders::ALL).title(format!("{title} · v QR/text · e export (.png for image) · Esc clear"));
                     if *qr {
-                        let rendered = hibiki_lib::qr::terminal(text).unwrap_or_else(|e| e.to_string());
-                        let width = rendered.lines().map(|l| l.chars().count()).max().unwrap_or(0);
-                        if width + 2 > rect.width as usize || rendered.lines().count() + 2 > rect.height as usize {
-                            f.render_widget(Paragraph::new("Terminal too small for this QR code. Enlarge it or press e to export a .png image.").wrap(Wrap{trim:false}).block(block),rect);
-                        } else {
-                            f.render_widget(Paragraph::new(rendered).style(Style::default().fg(Color::Black).bg(Color::White)).block(block),rect);
+                        let block = Block::default().borders(Borders::ALL).title(safe(title));
+                        let inner = block.inner(rect);
+                        f.render_widget(block, rect);
+                        let body = Rect { height: inner.height.saturating_sub(1), ..inner };
+                        self.qr_view.draw(f, text, body);
+                        if inner.height > 0 {
+                            f.render_widget(Paragraph::new("v QR/text · e export (.png) · Esc clear"), Rect::new(inner.x, inner.bottom() - 1, inner.width, 1));
                         }
-                    } else { f.render_widget(Paragraph::new(safe(text)).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(block),rect); }
+                    } else {
+                        let block = Block::default().borders(Borders::ALL).title(format!("{title} · v QR/text · e export (.png for image) · Esc clear"));
+                        f.render_widget(Paragraph::new(safe(text)).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(block),rect);
+                    }
                 },
                 Modal::Result{text,scroll}=>f.render_widget(Paragraph::new(text.as_str()).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(Block::default().borders(Borders::ALL).title("Result · ↑↓ scroll · Esc close")),rect),
                 Modal::Help=>f.render_widget(Paragraph::new("1–5: page   Tab: focus   ↑↓ / j k: navigate\nEnter: details   a: actions   i: invite (Channels)   /: filter   r: refresh\nEsc: close/cancel   q / Ctrl-C: quit\n\nManagement connects to the server independently of the local daemon.\nOffline data is cached. Reconnect to manage membership; local settings remain editable.\nService settings require a daemon restart; the TUI never restarts it.\nSecrets are not saved unless you explicitly export them.\nApproval always requires full identity comparison.\n\nPress Esc to close.").wrap(Wrap{trim:false}).block(Block::default().borders(Borders::ALL).title("Help")),rect),
@@ -1296,18 +1310,23 @@ pub async fn run(explicit: Option<PathBuf>) -> Result<()> {
         }
     };
     let _guard = TerminalGuard::enter()?;
+    let detection = graphics::detect();
     let mut terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     let (tx, rx) = mpsc::channel(1);
     let (updates, mut output) = mpsc::channel(8);
     let mut ui = Ui::default();
+    ui.qr_view.cell_size = detection.cell_size;
+    ui.qr_view.direct_placement = detection.direct_placement;
     if app.is_none() {
         ui.form(FormKind::Init);
     }
     let job = tokio::spawn(worker(app, rx, updates));
-    let mut events = EventStream::new();
+    let mut events =
+        futures_util::stream::iter(detection.input.into_iter().map(Ok)).chain(EventStream::new());
     let result=async {
         loop {
             terminal.draw(|frame|ui.draw(frame))?;
+            ui.qr_view.flush_graphics(&mut std::io::stdout())?;
             tokio::select! {
                 _=tokio::signal::ctrl_c()=>break,
                 update=output.recv()=>match update {
@@ -1320,7 +1339,11 @@ pub async fn run(explicit: Option<PathBuf>) -> Result<()> {
                 event=events.next()=>match event {
                     Some(Ok(Event::Key(key)))=>if ui.key(key,&tx){break;},
                     Some(Ok(Event::Paste(text)))=>if let Some(Modal::Form{fields,selected,..})=&mut ui.modal && *selected<fields.len() && fields[*selected].value.len()+text.len()<=32768{fields[*selected].value.push_str(text.trim());},
-                    Some(Ok(Event::Resize(..)))=>{},
+                    Some(Ok(Event::Resize(..)))=>{
+                        if ui.qr_view.cell_size.is_some() && let Some(size) = graphics::current_cell_size() {
+                            ui.qr_view.cell_size = Some(size);
+                        }
+                    },
                     Some(Err(error))=>return Err(error.into()),None=>break,_=>{},
                 }
             }
@@ -1329,7 +1352,11 @@ pub async fn run(explicit: Option<PathBuf>) -> Result<()> {
     }.await;
     job.abort();
     let _ = job.await;
-    result
+    ui.qr_view.clear();
+    let cleanup = ui.qr_view.flush_deletions(&mut std::io::stdout());
+    result?;
+    cleanup?;
+    Ok(())
 }
 
 #[cfg(test)]

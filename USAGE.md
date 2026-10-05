@@ -448,6 +448,13 @@ The TUI does not install or restart system services.
 
 In TUI Channels, press `i` or choose Generate invitation from the actions menu. Press `v` in the result to switch text/QR views; `e` exports text or a PNG when the filename ends in `.png`. To reopen your pending verification code, select your request in Requests and choose Show verification QR / text. Every focused pane has a cyan double border and a `*` title marker. A QR that cannot fit the terminal is never clipped.
 
+Ghostty, Kitty and Warp can show centered image QRs, including in an 80×24 window
+when the font's pixel size permits. Images use up to 12 pixels per module and
+shrink in whole-pixel steps to fit; their white border is preserved. Warp uses
+ordinary Kitty image placements without requiring Unicode placeholder support.
+Terminals without detected image support, and tmux/screen sessions, use centered
+character QRs. If neither representation fits, enlarge the window or export a PNG.
+
 CLI creation, invitation and joining also accept `--qr` to display a QR on stderr and `--qr-output PATH` to export a private PNG. Joining displays a separate public verification code bound to that request. On iOS, scan invitations with the camera or choose a QR image from Photos; in a pending request, Scan and Approve immediately approves only a matching verification code.
 The TUI masks secret input, clears secrets on closing their view, and exports only
 on an explicit action to a file with mode 0600. Overwriting requires confirmation.
