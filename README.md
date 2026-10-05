@@ -12,6 +12,8 @@ successful response wins and the other prompts close.
 
 - **Remote card access:** discover an OpenPGP Card, learn its public keys, sign,
   and decrypt through your existing GPG workflow.
+- **Terminal management:** `hibiki tui` manages channels, devices, requests, invitations and local settings. CLI queries also support versioned JSON.
+- **Peer diagnostics:** encrypted device-to-device Ping separates connection setup from established round-trip latency.
 - **Remote password entry:** use another device's native Pinentry or the iOS app
   for card PINs and software-key passphrases.
 - **Independent device roles:** provide card access, password entry, both, or
@@ -31,6 +33,7 @@ provider. See the [trust model](ARCHITECTURE.md#trust-and-storage).
 | Guide | What it covers |
 | --- | --- |
 | [Usage](USAGE.md) | Installation, relay deployment, pairing, provider settings, GPG/Git signing, diagnostics, and administration |
+| [Upgrade notes](UPGRADING.md) | Protocol v2 rollout, invitations, card prompts, management, and validation |
 | [Architecture](ARCHITECTURE.md) | Components, request flow, channel admission, session behavior, limits, and trust/storage |
 | [iOS](ios/README.md) | App build and setup, USB/NFC security keys, lifecycle, tests, and App Store Connect uploads |
 | [Example client configuration](examples/client.toml) | Desktop provider and timeout settings |
@@ -50,7 +53,7 @@ native Pinentry. Relay-only hosts do not need GnuPG.
 5. [Configure the requesting machine's GPG adapters](USAGE.md#4-connect-the-requesting-devices-agent)
    and [sign or decrypt](USAGE.md#sign-and-decrypt).
 
-Relay and clients must use matching builds of protocol `hibiki/1`. The desktop
+Relay and clients must use matching builds of protocol `hibiki/2`. The desktop
 daemon starts local providers immediately, including while the relay is offline;
 remote providers join the race independently. Card access
 supports discovery, public-key reading, signing, and decryption; PIN changes,
@@ -69,6 +72,8 @@ cargo build --locked --workspace
 python3 tests/server.py
 python3 tests/integration.py
 python3 tests/mobile.py
+python3 tests/tui.py
+python3 tests/performance.py
 ```
 
 CI runs on Ubuntu 24.04 and macOS. Integration tests use temporary identities and GnuPG homes, controlled stdio Pinentry processes, and an OpenPGP Card emulator. Real GnuPG exercises card learning, RSA signing and decryption, Git signing, password races and retries, cancellation, revocation, disconnects, and process cleanup.

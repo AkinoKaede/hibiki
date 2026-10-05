@@ -66,6 +66,10 @@ class Card:
             prints = tlv('C5', b''.join(bytes.fromhex(k['fingerprint']) for k in self.info['keys']) + b'\0'*20)
             times = tlv('CD', b'\0'*12)
             return aid + historical + tlv('73', caps + algorithms + status + prints + times) + b'\x90\x00'
+        if ins == 0xCA and p1 == 0 and p2 == 0x7A:
+            return tlv('93', bytes([0, 0, 7])) + b'\x90\x00'
+        if ins == 0xCA and p1 == 0 and p2 == 0x65:
+            return tlv('5B', b'DOE<<JANE') + b'\x90\x00'
         if ins == 0x47 and p1 == 0x81:
             slot = {0xB6: 0, 0xB8: 1, 0xA4: 2}[data[0]]
             if slot >= len(self.info['keys']):
@@ -158,7 +162,7 @@ class Mobile:
                     token = event['token']
                     if event.get('prompt_kind') in ('CardUsb', 'CardNfc'):
                         self.card_confirmations += 1
-                        self.send(action='reply', token=token, data='', accepted=not self.decline_card)
+                        threading.Timer(.05, lambda token=token, accepted=not self.decline_card: self.send(action='reply', token=token, data='', accepted=accepted)).start()
                         continue
                     self.prompts.add(token)
                     def reply(token=token, prompt_kind=event.get('prompt_kind')):
@@ -223,7 +227,7 @@ def main():
             devices = [a, keygen]
             psk = root/'psk'; psk.write_text('isolated-test-channel-psk'); psk.chmod(0o600)
             a.cli('channel', 'create', 'mobile-test', '--psk-file', psk)
-            invite = a.cli('channel', 'invite', 'mobile-test').stdout.decode().strip()
+            invite = a.cli('channel', 'invite', 'mobile-test', '--psk-file', psk).stdout.decode().strip()
             a.cli('use', 'mobile-test')
             fpr, public, card = make_card(keygen)
             a.gpg('--import', data=public)
@@ -231,11 +235,22 @@ def main():
             mobile = Mobile(root/'mobile', url, card)
             while mobile.wait('state')['state'] != 'online':
                 pass
-            mobile.send(action='join', invite=invite, psk=psk.read_text())
+            mobile.send(action='join', invite=invite, psk='')
             joined = mobile.wait('joined')
             a.cli('channel', 'approve', 'mobile-test', joined['request'], data=b'y\n')
-            mobile.send(action='register')
+            mobile.send(action='ping', channel=joined['channel'], device=a.id)
+            latency = mobile.wait('ping')
+            assert len(latency['round_trips_micros']) == 4 and all(v is not None for v in latency['round_trips_micros'])
+            assert not mobile.operation_events
+            members = json.loads(a.cli('device', 'list', '--json').stdout)
+            mobile_id = next(d['id'] for c in members['channels'] for d in c['devices'] if not d['local'])
+            reply = json.loads(a.cli('device', 'ping', mobile_id, '--channel', 'mobile-test', '--json').stdout)
+            assert all(v is not None for v in reply['ping']['round_trips_micros'])
+            assert not mobile.operation_events
+            print('PASS: mobile/desktop Ping in both directions with services disabled', flush=True)
+            mobile.send(action='register', name='')
             registered = mobile.wait('registered')
+            assert registered['name'] == 'JANE DOE'
             assert registered['serial'] == card['serial'] and registered['keys'] == 2
             time.sleep(1)
             a.gpg('--card-status')
@@ -258,7 +273,7 @@ def main():
             print('PASS: returning mobile app receives a still-pending offline PIN request', flush=True)
 
             # Discovery uses public data; each private operation requires fresh consent.
-            assert mobile.card_confirmations == 2
+            assert mobile.card_confirmations >= 2
             a.kill_agent()
             mobile.decline_card = True
             before = len(mobile.card.commands)
@@ -331,9 +346,9 @@ def main():
                     mobile.before_pin_reply = None
                 events = mobile.operation_events[first_event:]
                 assert ('prompt', 'CardNfc') in events, events
-                assert ('open', 'Usb') in events and ('open', 'Nfc') not in events, events
-                assert events.index(('prompt', 'CardNfc')) < events.index(('prompt', 'Pin')) < events.index(('open', 'Usb')), events
-            print('PASS: USB inserted during PIN entry is used for dual-interface signing and decryption', flush=True)
+                assert ('open', 'Nfc') in events and ('open', 'Usb') not in events, events
+                assert events.index(('prompt', 'CardNfc')) < events.index(('prompt', 'Pin')) < events.index(('open', 'Nfc')), events
+            print('PASS: inserting USB during PIN entry does not change an already prepared NFC operation', flush=True)
             previous = mobile.card_confirmations
             mobile.decline_card = True
             print('PASS: USB-registered dual-interface key falls back to NFC; PIN precedes NFC open for signing and decryption', flush=True)
@@ -342,11 +357,18 @@ def main():
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
             mobile.send(action='register', transport='usb', present=False, nfc_supported=False); mobile.wait('registered')
+            mobile.decline_card = False
+            before = len(mobile.card.commands)
+            previous = mobile.card_confirmations
+            with Assuan(a, 'scdaemon') as scd:
+                wait_for(lambda: mobile.card_confirmations >= previous + 2)
+                assert len(mobile.card.commands) == before, 'USB confirmation must not open NFC or send a PIN'
+            mobile.decline_card = True
             before = len(mobile.card.commands)
             with Assuan(a, 'scdaemon') as scd:
                 scd.command(b'SERIALNO'); scd.command(b'SETDATA '+b'01'*32)
                 assert scd.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR')
-            assert mobile.card_confirmations == previous + 1
+            assert mobile.card_confirmations >= previous + 1
             assert len(mobile.card.commands) == before
             mobile.decline_card = False
             a.kill_agent()
@@ -395,22 +417,22 @@ def main():
             guest=Device(root,'guest',url); devices.append(guest)
             guest_psk=root/'guest-psk'; guest_psk.write_text(created['psk']); guest_psk.chmod(0o600)
             mobile.send(action='policy'); assert mobile.wait('policy')['allow_creation']
-            rejected = guest.cli('channel','join',created['invite'],'--psk-file',guest_psk,'--no-wait').stdout.decode().split()[1]
+            rejected = guest.cli('channel','join',created['invite'],'--no-wait').stdout.decode().split()[1]
             mobile.send(action='reject', channel=created['channel'], request=rejected); mobile.wait('rejected')
             mobile.send(action='pending', channel=created['channel'])
             assert not mobile.wait('pending')['requests']
-            joined_guest=guest.cli('channel','join',created['invite'],'--psk-file',guest_psk,'--no-wait').stdout.decode().split()[1]
+            joined_guest=guest.cli('channel','join',created['invite'],'--no-wait').stdout.decode().split()[1]
             mobile.send(action='pending',channel=created['channel']); pending=mobile.wait('pending')['requests']
             assert len(pending)==1 and pending[0]['id']==joined_guest and len(pending[0]['words'].split())==24
             mobile.send(action='approve',channel=created['channel'],request=joined_guest); mobile.wait('approved')
-            assert b'active=true' in guest.cli('channel','list').stdout
+            assert json.loads(guest.cli('channel','list','--json').stdout)['channels'][0]['member'] is True
             mobile.send(action='rotate',channel=created['channel']); assert mobile.wait('rotated')['psk']!=created['psk']
             mobile.send(action='revoke',channel=created['channel'],device=guest.id); mobile.wait('revoked')
-            assert b'active=false' in guest.cli('channel','list').stdout
+            assert json.loads(guest.cli('channel','list','--json').stdout)['channels'][0]['member'] is False
             mobile.send(action='leave',channel=created['channel']); mobile.wait('left')
             a.cli('channel', 'create', 'withdraw-test', '--psk-file', psk)
-            withdrawal_invite = a.cli('channel', 'invite', 'withdraw-test').stdout.decode().strip()
-            mobile.send(action='join', invite=withdrawal_invite, psk=psk.read_text())
+            withdrawal_invite = a.cli('channel', 'invite', 'withdraw-test', '--psk-file', psk).stdout.decode().strip()
+            mobile.send(action='join', invite=withdrawal_invite, psk='')
             withdrawal = mobile.wait('joined')
             mobile.send(action='pairing_status', channel=withdrawal['channel'], request=withdrawal['request'])
             assert mobile.wait('pairing_status')['state'] == 'Pending'

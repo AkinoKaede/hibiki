@@ -169,8 +169,9 @@ actionlint .github/workflows/build.yml
    connections. **Get started** saves only a successfully authenticated server
    URL, including the detected protocol. Each probe has a 15-second limit (up to
    30 seconds for both protocols); failed setup keeps the address editable.
-2. Create a channel, or paste a `hibiki-v1:` / `hibiki-init-v1:` invitation and
-   enter the separately shared PSK.
+2. Create a channel, or paste a `hibiki-psk-v1:` invitation containing its PSK.
+   Older `hibiki-v1:` / `hibiki-init-v1:` invitations ask for the separately shared PSK.
+   Sharing an existing channel asks for its PSK again; the app does not save it.
 3. For member invitations, compare **all 24 public-key words and the request ID**
    on an existing member before approving. The words are public identity data,
    not a recovery phrase. Pending requests remain until approved or invalidated; they have no time limit.
@@ -340,7 +341,7 @@ Hardware release checklist (must run on an actual iPhone and YubiKey):
 
 ## Server policy and pending requests
 
-The app uses protocol `hibiki/1`; the server and clients must use matching builds.
+The app uses protocol `hibiki/2`; the server and clients must use matching builds.
 The Channels screen shows Create only when the connected server permits client channel
 creation. Otherwise, obtain an initialization invitation from the administrator.
 
@@ -349,3 +350,73 @@ The pending request ID is saved locally so this remains available after reopenin
 the app. Approval, rejection, withdrawal or PSK rotation ends the waiting state.
 An active member can reject a request from its verification screen; rejection
 removes only that request and permits a later new application.
+
+## Members, Ping and card prompts
+
+Tap a row in a channel's Members list to view the device's full ID, online status,
+channel and all 24 verification words. Details follow the grouped peer-information
+layout of sing-box-for-apple's Tailscale views. Ping lives in this detail page and
+shows four encrypted round trips, connection setup time and measurement time.
+Stop or leave the page to cancel its separate session. Offline, revoked and self
+devices cannot be pinged. Revoke is a separate destructive confirmation identifying
+the full device ID; refreshed membership cannot redirect it to another member.
+Settings can rename this device without changing its identity or verification words.
+
+Leave a security-key registration name blank to use its public OpenPGP cardholder
+name (when present), with a serial-based fallback. This is cardholder data, not a
+PGP user ID fetched from a key server. Card number is `manufacturer serial`, such
+as `0006 20473185`; the complete AID remains visible and is used for matching.
+GnuPG insertion dialogs may format a YubiKey serial as `20 473 185` instead.
+
+Every enabled candidate prepares independently. A USB-only target requires an
+actually inserted, matching card; confirmation without it repeats the prompt.
+NFC-capable targets may confirm first, then enter a PIN and tap. Matching USB takes
+precedence at preparation time for dual-interface targets. The chosen transport
+is retained during the operation. Wrong-card taps are rejected before PIN VERIFY.
+The USB PIN description can read live Number, Holder, signature Counter and low
+remaining-attempt counts. NFC does not present stale counters before the tap.
+Neither confirmation nor a registered public key is proof of USB readiness.
+
+All mobile and desktop components must be upgraded together to `hibiki/2`.
+
+### Approval-chain authority
+
+Approval records form a directed chain from the channel founder. An active member
+can revoke its direct or indirect descendants immediately. After **30 days since
+its current admission**, it may also revoke its own approver or another ancestor.
+Leaving and joining again restarts that waiting period. Other branches and
+self-revocation remain disallowed; use Leave for self-removal. The relay checks
+its own clock as well as the signed event; backdated admissions cannot accelerate
+the waiting period.
+
+Revocation affects **only the named device by default**. Use
+`hibiki channel revoke NAME DEVICE_ID --subtree` to explicitly remove that device
+and its approval subtree. Subtree revocation is restricted to descendants so it
+cannot accidentally include the caller. Revoked identities cannot rejoin. An
+ordinary revocation leaves descendants active, and ancestry remains verifiable
+through departed intermediaries. Readmission must not reverse ancestry or create
+a cycle.
+
+iOS and TUI offer separate actions for one device and an entire subtree. The
+confirmation lists all affected active devices with full IDs and defaults to
+cancel. A changed membership revision invalidates the confirmation; submission
+never retries automatically against a changed tree. Ancestor details display the
+date when reverse revocation becomes available. JSON includes `approved_by`,
+`approver_name`, `can_revoke`, `reverse_revoke_available_at`, `revocation_subtree`
+and `revoked_by_server`.
+
+The local server administrator can revoke **any** device, including the founder,
+without approval-chain or age restrictions:
+
+```sh
+hibiki-server channel revoke NAME DEVICE_ID
+hibiki-server channel revoke NAME DEVICE_ID --subtree
+```
+
+This is a persistent relay access revocation, independent of member-signed history.
+It blocks routing, announcements, admission and management mutations, cancels
+related queued operations atomically, and disconnects affected executors within
+the one-second administration watcher interval. Other members see “Revoked by
+server”. The administrator does not possess members’ signing keys and does not
+rewrite their signed history. Local operations while disconnected remain available;
+server revocation cannot erase another machine’s offline keys or cached history.

@@ -11,10 +11,12 @@ import sys
 import time
 
 base = Path(sys.argv[1])
-card = json.loads((base / 'card.json').read_text())
+card = json.loads((base / 'card.json').read_text()) if (base / 'card.json').exists() else {'present': False, 'serial': 'D2760001240100000000000000000000', 'keys': []}
 marker = base / ('scdaemon-%s' % os.getpid())
 marker.write_text('started')
 data = b''
+# Opaque stand-in for scdaemon's process-key-wrapped PIN, never an actual PIN.
+pin_cache = {}
 
 def emit(line):
     sys.stdout.buffer.write(line + b'\n')
@@ -48,7 +50,17 @@ def selected_key(args):
             return key
     return None
 
-def pin():
+def pin(ref):
+    if card.get('pin_cache') and ref in pin_cache:
+        emit(('INQUIRE PINCACHE_GET 0/openpgp/' + ref).encode())
+        chunks = []
+        for raw in sys.stdin.buffer:
+            line = raw.rstrip(b'\r\n')
+            if line in (b'END', b'CAN'): break
+            if line.startswith(b'D '): chunks.append(unesc(line[2:]))
+        if b''.join(chunks) == pin_cache[ref]:
+            with (base/'card-cache-events').open('a') as log: log.write('hit\n')
+            return True
     emit(b'INQUIRE NEEDPIN ||Please enter the PIN')
     chunks = []
     for raw in sys.stdin.buffer:
@@ -63,6 +75,10 @@ def pin():
     if b''.join(chunks).rstrip(b'\0') != b'123456':
         emit(b'ERR 87 Bad PIN')
         return False
+    if card.get('pin_cache'):
+        pin_cache[ref] = os.urandom(24).hex().encode()
+        emit(b'S PINCACHE_PUT 0/openpgp/' + ref.encode() + b' ' + pin_cache[ref])
+        with (base/'card-cache-events').open('a') as log: log.write('put\n')
     return True
 
 def attributes():
@@ -85,6 +101,7 @@ try:
     for raw in sys.stdin.buffer:
         text = raw.rstrip(b'\r\n').decode()
         command, _, args = text.partition(' ')
+        if (base / 'card.json').exists(): card = json.loads((base / 'card.json').read_text())
         with (base / 'card-commands.log').open('a') as f:
             f.write(command + (' '+args if command in ('SERIALNO','LEARN','READKEY','GETATTR','KEYINFO') else '') + '\n')
         if command == 'SERIALNO':
@@ -138,7 +155,7 @@ try:
             if key is None:
                 emit(b'ERR 17 No key')
                 continue
-            if not pin():
+            if not pin("1" if command == "PKSIGN" else "2"):
                 continue
             n, d = int(key['n'],16), int(key['d'],16)
             width = (n.bit_length()+7)//8
@@ -152,6 +169,7 @@ try:
                 send(padded[padded.index(b'\0',2)+1:])
         elif command in ('RESET','RESTART'):
             data = b''
+            if command == 'RESET': pin_cache.clear()
         elif command == 'BYE':
             emit(b'OK')
             break

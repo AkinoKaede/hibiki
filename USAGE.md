@@ -125,26 +125,26 @@ Channel creation is reserved for the server administrator by default. On the rel
 hibiki-server channel create personal --server wss://hibiki.example.com/hibiki
 ```
 
-Keep the printed PSK and single-use `hibiki-init-v1:...` invitation. Share them separately through trusted channels with the first device's owner. For Docker, run the same command with `docker exec` and `--config /etc/hibiki/server.toml` as described in [Docker relay](#docker-relay).
+Keep the single-use `hibiki-psk-v1:...` initialization invitation. The invitation contains the PSK; share it only with the intended recipient through a trusted channel. For Docker, run the same command with `docker exec` and `--config /etc/hibiki/server.toml` as described in [Docker relay](#docker-relay).
 
 On the first device (`--name` is optional and defaults to the system hostname), claim the channel and produce a member invitation:
 
 ```sh
 hibiki init --server wss://hibiki.example.com/hibiki --name laptop
-hibiki channel join 'hibiki-init-v1:...'
+hibiki channel join 'hibiki-psk-v1:...'
 hibiki channel invite personal
 ```
 
-`join` prompts for the administrator-provided PSK; this first claim does not need member approval. Share the new `hibiki-v1:...` member invitation and PSK separately through trusted channels. If the administrator explicitly sets `allow_client_channel_creation = true`, the first device can instead run `hibiki channel create personal` followed by `hibiki channel invite personal`.
+`join` uses the embedded PSK; this first claim does not need member approval. Reuse the generated invitation when sharing. To generate a new one, `channel invite` asks for the PSK again because Hibiki does not persist it (use `--psk-file` or `--prompt-psk` when creating a channel to choose a PSK you can retain), then emits one new `hibiki-psk-v1:...` member invitation on stdout. If the administrator explicitly sets `allow_client_channel_creation = true`, the first device can instead run `hibiki channel create personal` followed by `hibiki channel invite personal`.
 
 On each additional device:
 
 ```sh
 hibiki init --server wss://hibiki.example.com/hibiki --name desktop
-hibiki channel join 'hibiki-v1:...'
+hibiki channel join 'hibiki-psk-v1:...'
 ```
 
-`join` prompts for the PSK and waits for approval. In another terminal on an existing member device, run:
+`join` uses the embedded PSK and waits for approval. Older `hibiki-v1:` and `hibiki-init-v1:` invitations remain accepted and prompt for a PSK. An external PSK with an embedded-PSK invitation is an error. In another terminal on an existing member device, run:
 
 ```sh
 hibiki channel approve personal
@@ -297,7 +297,7 @@ hibiki-server channel list
 hibiki-server channel delete personal
 ```
 
-Server-side creation prints a single-use `hibiki-init-v1:...` invitation and a PSK. The first device claims it with `hibiki channel join`; later devices use ordinary invitations. A running relay checks for administrator deletions every second and closes affected sessions. Recreating a channel name produces a new channel ID.
+Server-side creation prints a single-use `hibiki-psk-v1:...` initialization invitation containing the PSK. The first device claims it with `hibiki channel join`; later devices use ordinary invitations. A running relay checks for administrator deletions every second and closes affected sessions. Recreating a channel name produces a new channel ID.
 
 ## Docker relay
 
@@ -428,3 +428,108 @@ Check the independent test workflow, draft files and prerelease setting, then cl
 Publish release when ready. The repository must permit the workflows'
 `GITHUB_TOKEN` to write releases and GHCR packages. GHCR package visibility is
 managed separately from repository visibility.
+
+## Interactive terminal management
+
+Run `hibiki tui` in an interactive terminal. Bare `hibiki` still shows help.
+Overview, Channels, Devices, Requests and Settings share the CLI management API.
+Use arrows or `j`/`k`, `Tab` to change regions, `Enter` for details, `/` to filter,
+`a` for the explicit action menu, `r` to refresh, `?` for help, and `q` or Ctrl-C to
+quit. Narrow terminals switch between list and detail; IDs are complete in detail
+and confirmations. Approval requires checking the full request ID and all 24 words.
+Destructive actions default to Cancel and always identify the affected record.
+
+Management remains usable without a daemon. When the relay is unreachable, cached
+information is timestamped and online mutations are disabled; local settings and
+the default channel can still be changed. Refresh and reconnect are asynchronous.
+Settings show saved and running values. External edits require reloading before
+saving; changes to programs, service switches or timeouts require manually
+restarting the daemon. Changing the default channel affects new adapter sessions.
+The TUI does not install or restart system services.
+
+New invitations always include the PSK; there is no `--include-psk` switch.
+Sharing an existing channel prompts for its PSK, or accepts `--psk-file PATH`.
+The TUI masks secret input, clears secrets on closing their view, and exports only
+on an explicit action to a file with mode 0600. Overwriting requires confirmation.
+Invitations are credentials, while the 24 verification words are public identity.
+
+```sh
+hibiki device rename 'Work laptop'
+hibiki ping DEVICE_ID --channel personal --count 4
+# Equivalent: hibiki device ping DEVICE_ID --channel personal --count 4
+hibiki device ping DEVICE_ID --channel personal --count 4 --json
+hibiki channel pending personal --json
+hibiki channel list --json
+hibiki device list --json
+hibiki status --json
+hibiki doctor --json
+hibiki-server channel list --json
+```
+
+Rename applies to this device only and preserves its ID, keys and verification
+words. Restart a running desktop daemon to update its local displayed name.
+Ping uses the running daemon's connection and never opens a card or PIN prompt.
+It reports encrypted session setup separately from each RTT and sample timeouts.
+JSON queries emit `schema_version: 1`, without colors or prose on stdout. Human
+lists adapt to terminal width without truncating detailed IDs; untrusted control
+characters are escaped. `NO_COLOR` and redirected output are supported.
+
+Desktop card-insertion dialogs belong to the scdaemon service even when password
+sharing is disabled. Confirming without the matching card repeats the dialog.
+With the relay unavailable, local discovery, insertion prompts, sign/decrypt,
+password entry and reset remain available using saved channel membership.
+
+Continuous desktop USB signing keeps native scdaemon alive and preserves the
+gpg-agent PINCACHE exchange. Card rediscovery and RESTART do not discard the
+backend; explicit RESET or card removal can require PIN entry again. Card policies
+requiring verification for every signature remain in effect. Hibiki adds no
+plaintext PIN cache.
+
+CLI ID arguments accept unique hexadecimal prefixes of at least **6 characters**:
+channel selectors (including `use` and `--channel`), approval/rejection request IDs,
+revoked device IDs, Ping targets and server channel deletion. Exact channel names
+still work. Ambiguous prefixes list the matching full IDs and do nothing; use more
+characters to disambiguate. Approval details and results always use the full ID.
+For example: `hibiki device ping a1b2c3 --channel personal`.
+
+### Approval-chain authority
+
+Approval records form a directed chain from the channel founder. An active member
+can revoke its direct or indirect descendants immediately. After **30 days since
+its current admission**, it may also revoke its own approver or another ancestor.
+Leaving and joining again restarts that waiting period. Other branches and
+self-revocation remain disallowed; use Leave for self-removal. The relay checks
+its own clock as well as the signed event; backdated admissions cannot accelerate
+the waiting period.
+
+Revocation affects **only the named device by default**. Use
+`hibiki channel revoke NAME DEVICE_ID --subtree` to explicitly remove that device
+and its approval subtree. Subtree revocation is restricted to descendants so it
+cannot accidentally include the caller. Revoked identities cannot rejoin. An
+ordinary revocation leaves descendants active, and ancestry remains verifiable
+through departed intermediaries. Readmission must not reverse ancestry or create
+a cycle.
+
+iOS and TUI offer separate actions for one device and an entire subtree. The
+confirmation lists all affected active devices with full IDs and defaults to
+cancel. A changed membership revision invalidates the confirmation; submission
+never retries automatically against a changed tree. Ancestor details display the
+date when reverse revocation becomes available. JSON includes `approved_by`,
+`approver_name`, `can_revoke`, `reverse_revoke_available_at`, `revocation_subtree`
+and `revoked_by_server`.
+
+The local server administrator can revoke **any** device, including the founder,
+without approval-chain or age restrictions:
+
+```sh
+hibiki-server channel revoke NAME DEVICE_ID
+hibiki-server channel revoke NAME DEVICE_ID --subtree
+```
+
+This is a persistent relay access revocation, independent of member-signed history.
+It blocks routing, announcements, admission and management mutations, cancels
+related queued operations atomically, and disconnects affected executors within
+the one-second administration watcher interval. Other members see “Revoked by
+server”. The administrator does not possess members’ signing keys and does not
+rewrite their signed history. Local operations while disconnected remain available;
+server revocation cannot erase another machine’s offline keys or cached history.

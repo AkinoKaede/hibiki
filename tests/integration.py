@@ -186,8 +186,10 @@ def concurrent_agent_sessions(device):
         assert socket_path.parent.stat().st_mode & 0o777 == 0o700
         assert first.command(b'SCD NOP')[-1] == b'OK'
         assert second.command(b'SCD NOP')[-1] == b'OK'
-        # Card discovery still works while the first client holds its session.
-        assert b'D276' in device.gpg('--card-status').stdout
+        # Eager candidate pools retain their card leases. A later session must
+        # not steal the child from either existing adapter session.
+        busy = device.gpg('--card-status', ok=False)
+        assert b'not available' in busy.stderr
     with SocketAssuan(socket_path) as extra:
         assert b'D 2.4.0' in extra.command(b'GETINFO version')
         device.kill_agent()
@@ -251,15 +253,15 @@ def test_all():
             a.cli('channel','create','forbidden','--psk-file',psk,ok=False)
             created=run([SERVER,'--config',config,'channel','create','test','--server',url,'--psk-file',psk]).stdout.decode().splitlines()
             bootstrap=created[1].split()[1]
-            a.cli('channel','join',bootstrap,'--psk-file',psk)
-            b.cli('channel','join',bootstrap,'--psk-file',psk,ok=False)
-            invite=a.cli('channel','invite','test').stdout.decode().strip()
+            a.cli('channel','join',bootstrap)
+            b.cli('channel','join',bootstrap,ok=False)
+            invite=a.cli('channel','invite','test','--psk-file',psk).stdout.decode().strip()
             # Removing a request terminates the waiting CLI without admitting it.
-            waiting = subprocess.Popen([str(CLIENT), 'channel', 'join', invite, '--psk-file', str(psk)],
+            waiting = subprocess.Popen([str(CLIENT), 'channel', 'join', invite],
                                        env=b.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 request = waiting.stdout.readline().decode().split()[1]
-                c.cli('channel', 'join', invite, '--psk-file', psk, '--no-wait')
+                c.cli('channel', 'join', invite, '--no-wait')
                 c.cli('channel', 'leave', 'test')
                 assert request.encode() in a.cli('channel', 'pending', 'test').stdout
                 a.cli('channel', 'reject', 'test', request)
@@ -268,16 +270,16 @@ def test_all():
                 assert request.encode() not in a.cli('channel', 'pending', 'test').stdout
             finally:
                 if waiting.poll() is None: waiting.kill(); waiting.wait()
-            waiting = subprocess.Popen([str(CLIENT), 'channel', 'join', invite, '--psk-file', str(psk)],
+            waiting = subprocess.Popen([str(CLIENT), 'channel', 'join', invite],
                                        env=b.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 request = waiting.stdout.readline().decode().split()[1]
-                second = b.cli('channel', 'join', invite, '--psk-file', psk, '--no-wait').stdout.decode().split()[1]
+                second = b.cli('channel', 'join', invite, '--no-wait').stdout.decode().split()[1]
                 assert request != second
                 b.cli('channel', 'leave', 'test')
                 _, error = waiting.communicate(timeout=10)
                 assert waiting.returncode != 0 and b'rejected, withdrawn or invalidated' in error
-                assert not a.cli('channel', 'pending', 'test').stdout.strip()
+                assert not json.loads(a.cli('channel', 'pending', 'test', '--json').stdout)['requests']
                 for removed in (request, second):
                     a.cli('channel', 'approve', 'test', removed, data=b'y\n', ok=False)
                 b.cli('channel', 'leave', 'test')
@@ -285,21 +287,22 @@ def test_all():
                 if waiting.poll() is None: waiting.kill(); waiting.wait()
             print('PASS: leave cancels all own pending requests and ends waiting admission', flush=True)
             for member,approver in [(b,a),(c,b)]:
-                joined=member.cli('channel','join',invite,'--psk-file',psk,'--no-wait')
+                joined=member.cli('channel','join',invite,'--no-wait')
                 request=joined.stdout.decode().split()[1]
                 approver.cli('channel','approve','test',request,data=b'\n')
                 assert request.encode() in approver.cli('channel','pending','test').stdout
-                approver.cli('channel','approve','test',request,data=b'y\n')
+                approver.cli('channel','approve','test',request[:5],data=b'y\n',ok=False)
+                approver.cli('channel','approve','test',request[:6],data=b'y\n')
                 member.cli('channel','list')
             b.cli('use', 'test')
             b.cli('channel', 'leave', 'test')
             assert 'default_channel' not in b.config.read_text()
-            assert b'active=false' in b.cli('channel', 'list').stdout
-            assert b'active=true' in a.cli('channel', 'list').stdout
+            assert json.loads(b.cli('channel', 'list', '--json').stdout)['channels'][0]['member'] is False
+            assert json.loads(a.cli('channel', 'list', '--json').stdout)['channels'][0]['member'] is True
             b.cli('channel', 'leave', 'test')
-            request = b.cli('channel', 'join', invite, '--psk-file', psk, '--no-wait').stdout.decode().split()[1]
+            request = b.cli('channel', 'join', invite, '--no-wait').stdout.decode().split()[1]
             a.cli('channel', 'approve', 'test', request, data=b'y\n')
-            assert b'active=true' in b.cli('channel', 'list').stdout
+            assert json.loads(b.cli('channel', 'list', '--json').stdout)['channels'][0]['member'] is True
             print('PASS: the same leave command exits membership, clears the default and permits rejoining', flush=True)
             for d in devices: d.cli('channel','list');d.cli('use','test')
             fpr,public,card=make_card(b)
@@ -310,6 +313,29 @@ def test_all():
             assert b'client channel creation: false' in a.cli('doctor').stdout
             assert b'hibiki use NAME' in a.cli('setup').stderr
             print('PASS: fresh HIbiki pairing, server-only creation and independent services',flush=True)
+
+            channel_id = json.loads(a.cli('channel', 'list', '--json').stdout)['channels'][0]['id']
+            assert json.loads(a.cli('channel', 'pending', channel_id[:6], '--json').stdout)['channel']['id'] == channel_id
+            a.cli('use', channel_id[:6])
+            a.cli('channel', 'pending', channel_id[:5], '--json', ok=False)
+            # Root -> b -> c: descendants cannot revoke ancestors or siblings.
+            b.cli('channel', 'revoke', 'test', a.id[:6], ok=False)
+            c.cli('channel', 'revoke', 'test', b.id[:6], ok=False)
+            a_members = json.loads(a.cli('device', 'list', '--json').stdout)['channels'][0]['devices']
+            assert next(d for d in a_members if d['id'] == c.id)['can_revoke']
+            b_members = json.loads(b.cli('device', 'list', '--json').stdout)['channels'][0]['devices']
+            assert not next(d for d in b_members if d['id'] == a.id)['can_revoke']
+            assert next(d for d in b_members if d['id'] == c.id)['approved_by'] == b.id
+            # Ping has its own encrypted session and cannot open native services.
+            before_children = {d.id: len(list(d.root.glob('scdaemon-[0-9]*'))) + len(list(d.root.glob('pinentry-[0-9]*'))) for d in devices}
+            report = json.loads(b.cli('ping', a.id[:6], '--channel', 'test', '--count', '4', '--json').stdout)
+            assert report['schema_version'] == 1 and report['ping']['peer'] == a.id
+            assert len(report['ping']['round_trips_micros']) == 4
+            assert all(value is not None and value > 0 for value in report['ping']['round_trips_micros'])
+            assert before_children == {d.id: len(list(d.root.glob('scdaemon-[0-9]*'))) + len(list(d.root.glob('pinentry-[0-9]*'))) for d in devices}
+            b.cli('device', 'ping', b.id, '--channel', 'test', ok=False)
+            b.cli('device', 'ping', a.id, '--channel', 'test', '--count', '0', ok=False)
+            print('PASS: encrypted peer Ping with target services disabled opens no native process', flush=True)
 
             # Freeze relay replies: local startup, results and selected-card commands
             # must not depend on queue registration, peer discovery or completion ACKs.
@@ -329,6 +355,18 @@ def test_all():
                         assert sc.command(b'SETDATA '+b'00'*32)[-1]==b'OK'
                         assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode(),
                                           lambda _: [b'D 123456',b'END'])[-1]==b'OK'
+                        assert sc.command(b'RESET')[-1] == b'OK'
+                        assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
+                        assert sc.command(b'SETDATA '+b'11'*32)[-1] == b'OK'
+                        assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode(), lambda _: [b'D 123456',b'END'])[-1] == b'OK'
+                        key = card['keys'][1]
+                        width = (int(key['n'], 16).bit_length()+7)//8
+                        clear = b'local offline secret'
+                        padded = b'\x00\x02' + b'\x55'*(width-len(clear)-3) + b'\x00' + clear
+                        encrypted = pow(int.from_bytes(padded, 'big'), int(key['e'], 16), int(key['n'], 16)).to_bytes(width,'big')
+                        assert sc.command(b'SETDATA '+encrypted.hex().encode())[-1] == b'OK'
+                        result = sc.command(('PKDECRYPT '+key['grip']).encode(), lambda _: [b'D 123456',b'END'])
+                        assert result[-1] == b'OK' and any(clear in line for line in result)
                     assert time.monotonic()-started < 3, 'local service waited for stalled relay'
                     wait_for(lambda:a.idle() and a.idle('scdaemon'))
                 a.stop()
@@ -340,6 +378,29 @@ def test_all():
             time.sleep(.5)
             assert counts==[len(list(d.root.glob('pinentry-[0-9]*'))) for d in (b,c)]
             print('PASS: local input and signing bypass stalled relay, including cold daemon startup',flush=True)
+
+            # Every enabled provider starts with no card, even with password sharing disabled.
+            a.services(scdaemon=True); a.mode(delay=10); a.restart()
+            b.services(scdaemon=True); b.mode(delay=10); b.restart()
+            for device in (a,b): (device.root/'card.json').write_text(json.dumps(dict(card,present=False)))
+            with Assuan(a, 'scdaemon') as sc:
+                wait_for(lambda: not a.idle('scdaemon') and not b.idle('scdaemon'))
+                wait_for(lambda: a.waiting() and b.waiting())
+                children = [len(list(d.root.glob('scdaemon-[0-9]*'))) for d in (a,b)]
+                (a.root/'card.json').write_text(json.dumps(card))
+                assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
+                assert sc.command(b'SETDATA '+b'00'*32)[-1] == b'OK'
+                assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode(), lambda _: [b'D 123456',b'END'])[-1] == b'OK'
+                wait_for(lambda: a.idle() and b.idle())
+                assert not a.idle('scdaemon') and not b.idle('scdaemon'), 'losing candidate process was closed'
+                assert children == [len(list(d.root.glob('scdaemon-[0-9]*'))) for d in (a,b)]
+                assert sc.command(b'RESET')[-1] == b'OK'
+                assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
+                assert children == [len(list(d.root.glob('scdaemon-[0-9]*'))) for d in (a,b)]
+            wait_for(lambda: a.idle('scdaemon') and b.idle('scdaemon'))
+            (b.root/'card.json').write_text(json.dumps(card))
+            a.services(); a.restart(); b.services(scdaemon=True,pinentry=True); b.mode(); b.restart()
+            print('PASS: all no-card providers prompt independently of password sharing; winner cancels prompts and RESET retains processes', flush=True)
 
             concurrent_agent_sessions(a)
             print('PASS: simultaneous GnuPG clients use independent scdaemon connections', flush=True)
@@ -369,11 +430,11 @@ def test_all():
 
             b.stop()
             with Assuan(a,'scdaemon') as sc:
-                sc.send(('SERIALNO --demand='+card['serial']).encode());wait_for(queued);b.start()
+                sc.send(('SERIALNO --demand='+card['serial']).encode());time.sleep(.3);assert not queued();b.start()
                 assert sc.result()[-1]==b'OK'
                 assert sc.command(b'SETDATA '+b'00'*32)[-1]==b'OK'
                 count=b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN')
-                b.stop();sc.send(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode());wait_for(queued);b.start()
+                b.stop();sc.send(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode());time.sleep(.3);b.start()
                 assert sc.result(lambda _: [b'D 123456',b'END'])[-1]==b'OK'
                 assert b.root.joinpath('card-commands.log').read_text().splitlines().count('PKSIGN')==count+1
             print('PASS: offline card discovery and pinned card preparation restore; signature executes once',flush=True)
@@ -450,6 +511,32 @@ def test_all():
             run(['git','commit','--allow-empty','-S','-m','remote card'],cwd=git,env=a.env)
             run(['git','verify-commit','HEAD'],cwd=git,env=a.env)
             print('PASS: real GnuPG card learning, RSA signing/decryption and native Git signing; A calls, B holds card, C enters PIN',flush=True)
+
+            # Native scdaemon's wrapped PIN cache belongs to its persistent process.
+            # Real gpg-agent must return the opaque value, without another pinentry.
+            (b.root/'card.json').write_text(json.dumps(dict(card, pin_cache=True)))
+            attempts = c.root/'pinentry-attempts'
+            attempts.write_text('0')
+            c.mode(sequence=['123456'])
+            before = set(b.root.glob('scdaemon-*'))
+            a.gpg('--batch','--local-user',fpr,'--detach-sign',data=b'cache first')
+            after_first = int(attempts.read_text())
+            assert after_first == 1, after_first
+            a.gpg('--batch','--local-user',fpr,'--detach-sign',data=b'cache second')
+            assert int(attempts.read_text()) == after_first, 'continuous signing asked for PIN again'
+            assert set(b.root.glob('scdaemon-*')) == before, 'continuous signing restarted scdaemon'
+            assert 'hit' in (b.root/'card-cache-events').read_text()
+            # Public rediscovery must preserve cache; explicit RESET invalidates it.
+            a.gpg('--card-status')
+            assert int(attempts.read_text()) == after_first
+            run(['gpg-connect-agent', '--homedir', a.native, 'SCD RESET', '/bye'], env=a.env)
+            a.gpg('--batch','--local-user',fpr,'--detach-sign',data=b'cache after reset')
+            assert int(attempts.read_text()) == after_first + 1
+            (b.root/'card.json').write_text(json.dumps(card))
+            attempts.write_text('0')
+            c.mode(password='123456')
+            print('PASS: real gpg-agent PINCACHE round trip avoids a second PIN prompt and reuses native scdaemon',flush=True)
+
 
             # A software private key stays in A; native agent retries the bad remote password.
             a.gpg('--batch','--pinentry-mode','loopback','--passphrase','integration-passphrase','--quick-generate-key','Local Test <local@example.test>','rsa2048','sign','0')
