@@ -397,7 +397,8 @@ closes other input candidates. The **×** closes only this device's candidate wh
 USB is absent; with USB inserted, it also cancels the whole operation. USB presence
 is refreshed when × is tapped. A canceled or dismissed card preparation is not
 reopened by metadata queries or target refinement; RESET/RESTART or a new request
-session permits another attempt.
+session permits another attempt. Desktop insertion and PIN dialogs always cancel
+the whole operation when Cancel is clicked, including when no key is inserted.
 
 When replacing an unpublished Postcard build, upgrade all components to the
 Protobuf `hibiki/2` baseline once. Later same-major releases support separate

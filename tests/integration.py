@@ -409,6 +409,21 @@ def test_all():
                 assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
                 assert children == [len(list(d.root.glob('scdaemon-[0-9]*'))) for d in (a,b)]
             wait_for(lambda: a.idle('scdaemon') and b.idle('scdaemon'))
+            # Canceling either Mac's insertion dialog terminates discovery immediately.
+            for cancelling in (a, b):
+                for device in (a, b):
+                    device.card(dict(card, present=False))
+                    device.mode(delay=.1 if device is cancelling else 10,
+                                cancel=device is cancelling)
+                started = time.monotonic()
+                with Assuan(a, 'scdaemon') as sc:
+                    result = sc.command(b'SERIALNO')
+                    assert result[-1].startswith(b'ERR 99 '), result
+                    assert time.monotonic() - started < 3, 'insertion Cancel waited for timeout'
+                    assert sc.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR')
+                wait_for(lambda: a.idle() and b.idle())
+            a.mode(delay=10); b.mode(delay=10)
+            print('PASS: local or remote Mac insertion Cancel ends discovery without a key', flush=True)
             # The requester stays cardless while the target card arrives remotely.
             for device in (a,b): device.card(dict(card,present=False))
             with Assuan(a, 'scdaemon') as sc:
@@ -492,9 +507,9 @@ def test_all():
             b.mode(delay=.05,cancel=True);c.mode(delay=.2,password='remote answer')
             with Assuan(a,'pinentry') as pe:
                 assert pe.command(b'SETDESC Test remote input')[-1]==b'OK'
-                answer=pe.command(b'GETPIN');assert b'D remote answer' in answer,answer
+                answer=pe.command(b'GETPIN');assert answer == [b'ERR 198 operation canceled by user'],answer
             wait_for(lambda: all(d.idle() for d in devices))
-            print('PASS: requester with both services disabled, single cancellation does not cancel peers',flush=True)
+            print('PASS: requester with both services disabled, single cancellation terminates all peers',flush=True)
 
             b.mode(fully_cancel=True,delay=.05);c.mode(password='must not win',delay=3)
             with Assuan(a,'pinentry') as pe:
@@ -525,15 +540,15 @@ def test_all():
             with Assuan(a,'pinentry') as pe: assert b'D local' in pe.command(b'GETPIN')
             wait_for(lambda: all(d.idle() for d in devices))
             a.mode(cancel=True,delay=.01);c.mode(password='remote after local cancel',delay=.2)
-            with Assuan(a,'pinentry') as pe: assert b'D remote after local cancel' in pe.command(b'GETPIN')
+            with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN') == [b'ERR 198 operation canceled by user']
             a.mode(delay=3);c.mode(password='remote wins',delay=.05)
             with Assuan(a,'pinentry') as pe: assert b'D remote wins' in pe.command(b'GETPIN')
             wait_for(lambda: all(d.idle() for d in devices))
             a.services();a.restart();b.mode(cancel=True);c.mode(cancel=True)
-            with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN')==[b'ERR 83886179 canceled']
+            with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN')==[b'ERR 198 operation canceled by user']
             print('PASS: local participation, all-cancel and losing process cleanup',flush=True)
 
-            b.mode(cancel=True);c.mode(confirm=True)
+            b.mode(confirm=True);c.mode(confirm=True)
             with Assuan(a,'pinentry') as pe:
                 assert pe.command(b'SETDESC Confirm remote operation')[-1]==b'OK'
                 assert pe.command(b'CONFIRM')==[b'OK']
@@ -541,7 +556,9 @@ def test_all():
             wait_for(lambda: all(d.idle() for d in devices))
             print('PASS: remote confirmation and message dialogs complete without password data',flush=True)
 
-            b.mode(cancel=True);c.mode(password='123456',delay=.1)
+            # B supplies only the card; C supplies PINs. Cancel is no longer a way to opt out.
+            b.services(scdaemon=True);b.mode(confirm=True);b.restart()
+            c.mode(password='123456',delay=.1)
             a.configure_agent()
             status=a.gpg('--card-status')
             assert b'00001234' in status.stdout or b'HIbiki test card' in status.stdout,status.stdout
@@ -612,6 +629,8 @@ def test_all():
 
             # The fastest present card is not necessarily the requested card.
             other={'serial':'D2760001240103040005000099990000','keys':[]}
+            # Leave the wrong-card insertion prompt unanswered; Cancel would now end discovery.
+            c.mode(delay=10)
             c.card(other);c.services(scdaemon=True,pinentry=True);c.restart()
             card['delay']=.15;b.card(card)
             with Assuan(a,'scdaemon') as sc:
@@ -636,7 +655,7 @@ def test_all():
             with Assuan(a,'pinentry') as pe: assert b'D local only' in pe.command(b'GETPIN')
             a.mode(cancel=True)
             with Assuan(a,'pinentry') as pe:
-                assert pe.command(b'GETPIN')==[b'ERR 83886179 canceled'], 'disabled peers changed cancellation into a failure'
+                assert pe.command(b'GETPIN')==[b'ERR 198 operation canceled by user'], 'disabled peers changed cancellation into a failure'
             a.mode(partial_error=True)
             with Assuan(a,'pinentry') as pe:
                 assert pe.command(b'GETPIN')==[b'ERR 1 failed'], 'failed candidate leaked partial data or changed the native error'

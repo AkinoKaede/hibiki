@@ -55,6 +55,26 @@ struct NativePreparation {
     prompt_stop: PromptGuard,
     prompt: Option<tokio::task::JoinHandle<Result<bool>>>,
 }
+impl NativePreparation {
+    fn prompt_result(
+        &mut self,
+        result: Result<Result<bool>, tokio::task::JoinError>,
+    ) -> Result<()> {
+        match result {
+            Ok(Ok(true)) => self.prompt = None,
+            Ok(Ok(false)) => return Err(hibiki_core::provider::PreparationRejected.into()),
+            // A missing graphical pinentry must not prevent card detection.
+            _ => {
+                let token = self.prompt_stop.0.clone();
+                self.prompt = Some(tokio::spawn(async move {
+                    token.cancelled().await;
+                    Ok(false)
+                }));
+            }
+        }
+        Ok(())
+    }
+}
 impl hibiki_core::provider::Preparation for NativePreparation {
     fn poll<'a>(
         &'a mut self,
@@ -66,9 +86,18 @@ impl hibiki_core::provider::Preparation for NativePreparation {
                 if pause.is_cancelled() {
                     return Ok(None);
                 }
-                if let Some(serial) =
-                    hibiki_core::preparation::probe(endpoint, &self.target).await?
+                let serial = hibiki_core::preparation::probe(endpoint, &self.target).await?;
+                // Drain the native query, then honor any cancellation that arrived
+                // during it before publishing a ready card or pausing for a query.
+                if self
+                    .prompt
+                    .as_ref()
+                    .is_some_and(|prompt| prompt.is_finished())
                 {
+                    let result = self.prompt.take().unwrap().await;
+                    self.prompt_result(result)?;
+                }
+                if let Some(serial) = serial {
                     return Ok(Some(serial));
                 }
                 // A query may have paused us while the probe was in flight.
@@ -88,12 +117,7 @@ impl hibiki_core::provider::Preparation for NativePreparation {
                 tokio::select! {
                     _=pause.cancelled()=>return Ok(None),
                     result=self.prompt.as_mut().unwrap()=>{
-                        match result {
-                            Ok(Ok(true)) => { self.prompt = None; },
-                            Ok(Ok(false)) => return Err(hibiki_core::provider::PreparationDeclined.into()),
-                            // A missing graphical pinentry must not prevent card detection.
-                            _ => { let token = self.prompt_stop.0.clone(); self.prompt = Some(tokio::spawn(async move { token.cancelled().await; Ok(false) })); }
-                        }
+                        self.prompt_result(result)?;
                     },
                     _=tokio::time::sleep(Duration::from_millis(250))=>{},
                 }
@@ -344,6 +368,15 @@ pub async fn open(
                         if let Response::Data(d) = r {
                             assuan::unescape(d)?;
                         }
+                        // Desktop Cancel always ends the whole input operation. Mobile
+                        // dismissal keeps its distinct, device-local CANCELED semantics.
+                        let line = if service == ServiceKind::Pinentry
+                            && matches!(r, Response::Err(code) if code & 0xffff == assuan::CANCELED)
+                        {
+                            assuan::error(assuan::FULLY_CANCELED, "operation canceled by user")
+                        } else {
+                            line
+                        };
                         outputs.send(SessionOutput::Line { request, line }).await?;
                         if inquire {
                             loop {
@@ -799,6 +832,76 @@ done
     }
 
     #[tokio::test]
+    async fn inserted_card_is_recognized_after_confirmation_even_during_public_query() {
+        for public_query in [false, true] {
+            let fixture = WaitingFixture::new();
+            let mut ep = fixture.endpoint().await;
+            let id = fixture
+                .start(
+                    &mut ep,
+                    CardTarget {
+                        serial: Some("AABB".into()),
+                        key: None,
+                    },
+                )
+                .await;
+            until(|| fixture.prompts().len() == 1).await;
+            let pid = fixture.prompts()[0];
+            if public_query {
+                ep.command("GETATTR BLOCK".into()).await.unwrap();
+                until(|| fixture.root.path().join("querying").exists()).await;
+            } else {
+                fixture.write("block-probe", "");
+                until(|| fixture.root.path().join("probing").exists()).await;
+            }
+            // Insert first, then confirm the existing prompt while probing is paused.
+            fixture.write("card", "AABB");
+            fixture.write("answer", "OK");
+            until(|| !alive(pid)).await;
+            if public_query {
+                fixture.write("release", "");
+                let result = crate::proxy::collect(&mut ep, None).await.unwrap();
+                assert_eq!(
+                    result.lines.iter().map(|line| &**line).collect::<Vec<_>>(),
+                    [b"D public-result".as_slice(), b"OK"]
+                );
+            } else {
+                std::fs::remove_file(fixture.root.path().join("block-probe")).unwrap();
+            }
+            assert!(
+                matches!(prepared(&mut ep, &id).await, CardPreparation::Ready { serial } if serial == "AABB")
+            );
+            assert_eq!(
+                fixture.prompts().len(),
+                1,
+                "confirmation reopened the prompt"
+            );
+            ep.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn insertion_cancel_wins_over_card_arriving_during_probe() {
+        let fixture = WaitingFixture::new();
+        let mut ep = fixture.endpoint().await;
+        let id = fixture.start(&mut ep, CardTarget::default()).await;
+        until(|| fixture.prompts().len() == 1).await;
+        let pid = fixture.prompts()[0];
+        fixture.write("block-probe", "");
+        until(|| fixture.root.path().join("probing").exists()).await;
+        fixture.write("answer", "ERR 99 canceled");
+        until(|| !alive(pid)).await;
+        fixture.write("card", "AABB");
+        std::fs::remove_file(fixture.root.path().join("block-probe")).unwrap();
+        assert!(matches!(
+            prepared(&mut ep, &id).await,
+            CardPreparation::Rejected
+        ));
+        assert_eq!(fixture.prompts().len(), 1);
+        ep.close().await;
+    }
+
+    #[tokio::test]
     async fn confirmation_and_cancellation_during_public_query_are_retained() {
         for accepted in [true, false] {
             let fixture = WaitingFixture::new();
@@ -831,7 +934,7 @@ done
             } else {
                 assert!(matches!(
                     prepared(&mut ep, &id).await,
-                    CardPreparation::Unavailable
+                    CardPreparation::Rejected
                 ));
                 let repeated = random_id();
                 ep.prepare(repeated.clone(), CardTarget::default())
@@ -839,7 +942,7 @@ done
                     .unwrap();
                 assert!(matches!(
                     prepared(&mut ep, &repeated).await,
-                    CardPreparation::Unavailable
+                    CardPreparation::Rejected
                 ));
                 for _ in 0..4 {
                     assert!(!query(&mut ep, "SERIALNO").await.success());
@@ -861,7 +964,7 @@ done
                 .unwrap();
                 assert!(matches!(
                     prepared(&mut ep, &refined).await,
-                    CardPreparation::Unavailable
+                    CardPreparation::Rejected
                 ));
                 assert_eq!(
                     fixture.prompts().len(),
