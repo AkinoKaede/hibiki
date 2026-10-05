@@ -39,7 +39,7 @@ on:
       prereleased:
         description: 'Mark the draft as a prerelease'
         required: true
-        default: true
+        default: false
         type: boolean
 permissions:
   contents: read

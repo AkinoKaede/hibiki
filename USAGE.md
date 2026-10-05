@@ -404,8 +404,8 @@ There are three GitHub Actions workflows:
   and pull requests, and
   uploads the archives as Actions artifacts. To prepare a release, start it from
   Actions → build → Run workflow, select the source branch/tag, enter a `version`
-  without a `v` prefix (for example `0.2.0`), and set the
-  `prereleased` checkbox. Manual runs also create a **draft** GitHub Release with
+  without a `v` prefix (for example `0.2.0`), and check
+  `prereleased` only for a prerelease (it defaults to unchecked). Manual runs also create a **draft** GitHub Release with
   the archives and `SHA256SUMS`. The Git tag is automatically `vVERSION`; desktop
   binary/package versions and the iOS version follow the input. Versions are
   applied only in the CI checkout, including its Cargo lockfile. An existing tag must point to the selected
