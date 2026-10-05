@@ -1,4 +1,5 @@
 use super::*;
+use hibiki_core::storage::read_private;
 
 fn client(root: &std::path::Path) -> Arc<MobileClient> {
     let core = MobileClient::new(
@@ -22,8 +23,6 @@ fn seed(client: &MobileClient) {
                 keys: vec![],
             },
             serial.into(),
-            true,
-            true,
         );
     }
     client.save_registry(registry).unwrap();
@@ -48,11 +47,7 @@ async fn unavailable_nfc_cannot_open_native_reader_or_register_a_card() {
             .await
             .is_err()
     );
-    assert!(
-        core.register_card(CardTransport::Nfc, "new".into(), false, true)
-            .await
-            .is_err()
-    );
+    assert!(core.register_card("new".into()).await.is_err());
     assert!(
         tokio::time::timeout(Duration::from_millis(20), core.next_event())
             .await
@@ -62,46 +57,27 @@ async fn unavailable_nfc_cannot_open_native_reader_or_register_a_card() {
 }
 
 #[tokio::test]
-async fn edits_preserve_all_public_data_and_persist_connection_changes() {
+async fn name_edits_preserve_all_public_data_and_persist() {
     let root = tempfile::tempdir().unwrap();
     let core = client(root.path());
     seed(&core);
     let original = encode(&core.registered_cards()[0].card).unwrap();
-    core.update_card("first".into(), "  Renamed  ".into(), false, true)
+    core.update_card("first".into(), "  Renamed  ".into())
         .await
         .unwrap();
     assert_eq!(core.registered_cards()[1].card.serial, "selected");
     assert_eq!(encode(&core.registered_cards()[0].card).unwrap(), original);
     assert_eq!(core.registered_cards()[0].name, "Renamed");
-    assert!(core.registered_cards()[1].usb_enabled);
-    core.update_card("selected".into(), "USB only".into(), true, false)
-        .await
-        .unwrap();
-    assert!(!core.registered_cards()[1].nfc_enabled);
-    core.update_card("selected".into(), "NFC only".into(), false, true)
-        .await
-        .unwrap();
-    assert!(!core.registered_cards()[1].usb_enabled);
-    assert!(core.registered_cards()[1].nfc_enabled);
     let before = read_private(&core.registry_path()).unwrap();
-    for (serial, name, usb, nfc) in [
-        ("selected", " \n ", true, true),
-        ("selected", "Invalid", false, false),
-        ("unknown", "Missing", true, true),
-    ] {
-        assert!(
-            core.update_card(serial.into(), name.into(), usb, nfc)
-                .await
-                .is_err()
-        );
+    for (serial, name) in [("selected", " \n "), ("unknown", "Missing")] {
+        assert!(core.update_card(serial.into(), name.into()).await.is_err());
         assert_eq!(read_private(&core.registry_path()).unwrap(), before);
     }
     drop(core);
     let reopened = client(root.path());
     assert_eq!(reopened.registered_cards()[0].name, "Renamed");
     assert_eq!(reopened.registered_cards()[1].card.serial, "selected");
-    assert!(!reopened.registered_cards()[1].usb_enabled);
-    assert_eq!(reopened.registered_cards()[1].name, "NFC only");
+    assert_eq!(reopened.registered_cards()[1].name, "selected");
 }
 
 // An empty OpenPGP card is enough to verify the production public-read path.
@@ -119,56 +95,39 @@ fn application_data() -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn usb_registration_without_nfc_preserves_existing_hidden_capability() {
-    for existing in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let core = client(root.path());
-        core.set_nfc_available(false);
-        if existing {
-            let mut registry = registry::Registry::default();
-            registry.upsert(
-                CardInfo {
-                    serial: "D2760001240103040005000012340000".into(),
-                    transport: CardTransport::Nfc,
-                    keys: vec![],
-                },
-                "Existing".into(),
-                true,
-                true,
-            );
-            core.save_registry(registry).unwrap();
-        }
-        let reader = core.clone();
-        let task = tokio::spawn(async move {
-            reader
-                .register_card(CardTransport::Usb, "Renamed".into(), true, false)
-                .await
-        });
-        loop {
-            match next(&core).await {
-                NativeEvent::CardOpen { token, .. } => {
-                    core.respond(token, vec![], true).unwrap();
-                }
-                NativeEvent::CardTransmit { token, command, .. } => {
-                    let response = match (command[1], command[3]) {
-                        (0xA4, _) => vec![0x90, 0],
-                        (0xCA, 0x6E) => application_data(),
-                        (0xCA, 0x65) => vec![0x6A, 0x88], // Optional cardholder name.
-                        _ => panic!("registration must only read public data"),
-                    };
-                    core.respond(token, response, true).unwrap();
-                }
-                NativeEvent::CardClose { .. } => break,
-                NativeEvent::Cancelled { .. } => {}
-                _ => panic!("unexpected registration event"),
+async fn registration_only_reads_nfc_public_data() {
+    let root = tempfile::tempdir().unwrap();
+    let core = client(root.path());
+    let reader = core.clone();
+    let task = tokio::spawn(async move { reader.register_card("My NFC key".into()).await });
+    loop {
+        match next(&core).await {
+            NativeEvent::CardOpen {
+                token, transport, ..
+            } => {
+                assert_eq!(transport, CardTransport::Nfc);
+                core.respond(token, vec![], true).unwrap();
             }
+            NativeEvent::CardTransmit { token, command, .. } => {
+                let response = match (command[1], command[3]) {
+                    (0xA4, _) => vec![0x90, 0],
+                    (0xCA, 0x6E) => application_data(),
+                    (0xCA, 0x65) => vec![0x6A, 0x88],
+                    _ => panic!("registration must only read public data"),
+                };
+                core.respond(token, response, true).unwrap();
+            }
+            NativeEvent::CardClose { .. } => break,
+            NativeEvent::Cancelled { .. } => {}
+            _ => panic!("unexpected registration event"),
         }
-        task.await.unwrap().unwrap();
-        let cards = core.registered_cards();
-        assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].nfc_enabled, existing);
-        assert!(cards[0].usb_enabled);
     }
+    task.await.unwrap().unwrap();
+    let cards = core.registered_cards();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0].card.transport, CardTransport::Nfc);
+    assert_eq!(cards[0].name, "My NFC key");
+    assert_eq!(client(root.path()).registered_cards()[0].name, "My NFC key");
 }
 
 #[tokio::test]
@@ -242,7 +201,7 @@ async fn inspection_cancellation_releases_hardware_and_rejects_late_responses() 
             .is_err()
     );
     assert!(
-        core.update_card("selected".into(), "Busy".into(), true, false)
+        core.update_card("selected".into(), "Busy".into())
             .await
             .is_err()
     );
@@ -262,7 +221,7 @@ async fn inspection_cancellation_releases_hardware_and_rejects_late_responses() 
         core.inspect_card(CardTransport::Usb, cancellation).await,
         Err(MobileError::Cancelled)
     ));
-    core.update_card("selected".into(), "After cancellation".into(), true, false)
+    core.update_card("selected".into(), "After cancellation".into())
         .await
         .unwrap();
 }

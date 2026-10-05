@@ -90,8 +90,6 @@ pub struct CardInfo {
 pub struct RegisteredCard {
     pub card: CardInfo,
     pub name: String,
-    pub usb_enabled: bool,
-    pub nfc_enabled: bool,
 }
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum PromptKind {

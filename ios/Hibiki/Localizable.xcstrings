@@ -449,16 +449,6 @@
         }
       }
     },
-    "NFC Support": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "NFC支持"
-          }
-        }
-      }
-    },
     "NFC: tap once to register public information. For signing or decryption, enter the PIN first, then tap the same security key again.": {
       "extractionState": "stale",
       "localizations": {
@@ -486,16 +476,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "暂无待审批请求"
-          }
-        }
-      }
-    },
-    "No Security Keys Registered": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "尚未注册安全密钥"
           }
         }
       }
@@ -540,12 +520,12 @@
         }
       }
     },
-    "OpenPGP Card": {
+    "Scdaemon": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "OpenPGP卡"
+            "value": "Scdaemon"
           }
         }
       }
@@ -650,16 +630,6 @@
         }
       }
     },
-    "Register Security Key": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "注册安全密钥"
-          }
-        }
-      }
-    },
     "Register your security key": {
       "extractionState": "stale",
       "localizations": {
@@ -677,16 +647,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "请在“安全密钥”标签页注册你的安全密钥。"
-          }
-        }
-      }
-    },
-    "Registered Security Keys": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "已注册的安全密钥"
           }
         }
       }
@@ -914,16 +874,6 @@
         }
       }
     },
-    "Supported Connections": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "支持的连接方式"
-          }
-        }
-      }
-    },
     "The entries do not match.": {
       "extractionState": "stale",
       "localizations": {
@@ -1002,16 +952,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "已检测到USB连接，继续以输入PIN。"
-          }
-        }
-      }
-    },
-    "USB Connection Support": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "USB支持"
           }
         }
       }
@@ -1336,16 +1276,6 @@
         }
       }
     },
-    "Register once to save public information. Private keys always stay on your security key.": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "注册仅保存公钥信息，私钥始终留在安全密钥硬件中。"
-          }
-        }
-      }
-    },
     "Selected security key": {
       "localizations": {
         "zh-Hans": {
@@ -1362,16 +1292,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "USB与NFC共用公钥信息。仅当前选中的安全密钥提供卡服务。"
-          }
-        }
-      }
-    },
-    "Turn this off if your key does not support both USB and NFC. Key identity is verified again during use.": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "若密钥不同时支持USB与NFC，请关闭此项。使用时会再次校验密钥身份。"
           }
         }
       }
@@ -1526,26 +1446,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Pinentry"
-          }
-        }
-      }
-    },
-    "Register via USB": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "通过USB注册"
-          }
-        }
-      }
-    },
-    "Register via NFC": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "通过NFC注册"
           }
         }
       }
@@ -1726,26 +1626,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "请输入安全密钥名称。"
-          }
-        }
-      }
-    },
-    "Enable at least one connection.": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请至少启用一种连接方式。"
-          }
-        }
-      }
-    },
-    "Choose the connections this key supports. Saving does not read or change the physical key.": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "请选择密钥支持的连接方式。保存不会读取或修改实体密钥。"
           }
         }
       }
@@ -2391,23 +2271,6 @@
         }
       }
     },
-    "Unavailable on This Device": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在本机不可用"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "在此裝置上無法使用"
-          }
-        }
-      },
-      "extractionState": "manual"
-    },
     "Current RTT": {
       "localizations": {
         "zh-Hans": {
@@ -2485,6 +2348,76 @@
           "stringUnit": {
             "state": "translated",
             "value": "已选择"
+          }
+        }
+      }
+    },
+    "NFC Security Key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "NFC 安全密钥"
+          }
+        }
+      }
+    },
+    "No NFC Keys Registered": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未注册 NFC 密钥"
+          }
+        }
+      }
+    },
+    "Register NFC Key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "注册 NFC 密钥"
+          }
+        }
+      }
+    },
+    "Register NFC keys to use them without a USB connection.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "注册 NFC 密钥，以便在未连接 USB 时使用。"
+          }
+        }
+      }
+    },
+    "Registered NFC Keys": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已注册的 NFC 密钥"
+          }
+        }
+      }
+    },
+    "Saving the name does not read or change the physical key.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存名称不会读取或更改实体密钥。"
+          }
+        }
+      }
+    },
+    "Security key is not connected.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未连接安全密钥。"
           }
         }
       }

@@ -1,6 +1,6 @@
 //! TEST ONLY: a line-oriented bridge for the isolated APDU emulator in tests/mobile.py.
 //! Never connect this diagnostic harness to real cards or production channels.
-use hibiki_mobile::{CardTransport, MobileClient, NativeEvent, check_relay, create_identity};
+use hibiki_mobile::{MobileClient, NativeEvent, check_relay, create_identity};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -45,8 +45,12 @@ async fn main() -> anyhow::Result<()> {
                 } => {
                     json!({"kind":"open","token":token,"connection":connection,"transport":format!("{transport:?}")})
                 }
-                NativeEvent::CardTransmit { token, command, .. } => {
-                    json!({"kind":"apdu","token":token,"command":hex::encode(command)})
+                NativeEvent::CardTransmit {
+                    token,
+                    connection,
+                    command,
+                } => {
+                    json!({"kind":"apdu","connection":connection,"token":token,"command":hex::encode(command)})
                 }
                 NativeEvent::CardClose { .. } => json!({"kind":"close"}),
                 NativeEvent::CardChanged { card } => json!({"kind":"card","serial":card.serial}),
@@ -80,14 +84,7 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
             emit(json!({"kind":"nfc-capability"}));
         }
         "update_card" => {
-            client
-                .update_card(
-                    text("serial"),
-                    "Fixture".into(),
-                    v["usb"].as_bool().unwrap_or(false),
-                    v["nfc"].as_bool().unwrap_or(false),
-                )
-                .await?;
+            client.update_card(text("serial"), "Fixture".into()).await?;
             emit(json!({"kind":"card-updated"}));
         }
         "remove_card" => {
@@ -159,18 +156,8 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
             emit(json!({"kind":"joined","request":joined.request,"channel":joined.channel}));
         }
         "register" => {
-            let transport = if v["transport"] == "usb" {
-                CardTransport::Usb
-            } else {
-                CardTransport::Nfc
-            };
             let card = client
-                .register_card(
-                    transport,
-                    v["name"].as_str().unwrap_or("Test key").into(),
-                    v["usb_supported"].as_bool().unwrap_or(true),
-                    v["nfc_supported"].as_bool().unwrap_or(true),
-                )
+                .register_card(v["name"].as_str().unwrap_or("Test key").into())
                 .await?;
             client.usb_present(v["present"].as_bool().unwrap_or(false));
             client.set_services(true, true);
@@ -184,6 +171,9 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
                 hex::decode(text("data"))?,
                 v["accepted"].as_bool().unwrap_or(true),
             );
+        }
+        "card_not_present" => {
+            let _ = client.card_not_present(text("token"));
         }
         "cancel_request" => {
             let _ = client.cancel_request(text("token"));

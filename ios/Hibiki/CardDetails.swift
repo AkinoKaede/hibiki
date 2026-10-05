@@ -93,8 +93,6 @@ struct EditRegisteredCardView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var name: String
-    @State private var usbSupported: Bool
-    @State private var nfcSupported: Bool
     @State private var saving = false
     @State private var error: String?
 
@@ -102,12 +100,10 @@ struct EditRegisteredCardView: View {
         self.entry = entry
         self.model = model
         _name = State(initialValue: entry.name)
-        _usbSupported = State(initialValue: entry.usbEnabled)
-        _nfcSupported = State(initialValue: entry.nfcEnabled)
     }
 
     private var valid: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && (usbSupported || nfcSupported)
+        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -115,19 +111,14 @@ struct EditRegisteredCardView: View {
             Form {
                 Section("Security Key") {
                     TextField("Name", text: $name).accessibilityIdentifier("securityKeyName")
-                    Toggle("USB", isOn: $usbSupported).accessibilityIdentifier("securityKeyUSB")
-                    if model.nfcAvailable { Toggle("NFC", isOn: $nfcSupported).accessibilityIdentifier("securityKeyNFC") }
                 }.disabled(saving)
                 Section {
                     if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                         Text("Enter a security key name.").foregroundStyle(.red)
                     }
-                    if !usbSupported && !nfcSupported {
-                        Text("Enable at least one connection.").foregroundStyle(.red)
-                    }
                     if let error { Text(verbatim: error).foregroundStyle(.red) }
                 } footer: {
-                    Text("Choose the connections this key supports. Saving does not read or change the physical key.")
+                    Text("Saving the name does not read or change the physical key.")
                 }
             }
             .navigationTitle("Edit Security Key")
@@ -142,7 +133,7 @@ struct EditRegisteredCardView: View {
                         Task {
                             defer { saving = false }
                             do {
-                                try await model.updateCard(entry.id, name: name, usbSupported: usbSupported, nfcSupported: nfcSupported)
+                                try await model.updateCard(entry.id, name: name)
                                 dismiss()
                             } catch {
                                 if case MobileError.Failed(let message) = error {

@@ -96,52 +96,12 @@ fn cardholder_name(raw: &str) -> String {
     formatted.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Read live USB prompt metadata without verifying a PIN. NFC is deliberately
-/// not opened before PIN entry and must not display stale counters or retries.
-pub fn pin_description(
-    broker: Arc<Broker>,
-    stop: CancellationToken,
-    info: &CardInfo,
-    key: &CardKey,
-    signing: bool,
-) -> Result<String> {
-    let mut description = format!(
+/// PIN entry identifies the target; reader selection happens after the reply.
+pub fn pin_description(info: &CardInfo) -> String {
+    format!(
         "Please enter the PIN\n\nNumber: {}",
         hibiki_lib::card_prompt::card_number(&info.serial)
-    );
-    if info.transport == CardTransport::Usb {
-        let backend = NativeCard::open(broker, stop, CardTransport::Usb)?;
-        let mut card =
-            OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
-        let mut tx = card.transaction()?;
-        let current = snapshot(&mut tx, CardTransport::Usb)?;
-        if current.serial != info.serial
-            || !current.keys.iter().any(|k| {
-                k.slot == key.slot && k.keygrip == key.keygrip && k.fingerprint == key.fingerprint
-            })
-        {
-            bail!("different card or key; operation canceled");
-        }
-        if let Ok(holder) = tx.cardholder_related_data() {
-            let name = holder
-                .name()
-                .map(|n| cardholder_name(&String::from_utf8_lossy(n)))
-                .unwrap_or_default();
-            description.push_str(&format!("\nHolder: {name}"));
-        }
-        if signing
-            && key.slot == 1
-            && let Ok(counter) = tx.security_support_template()
-        {
-            description.push_str(&format!("\nCounter: {}", counter.signature_count()));
-        }
-        if let Ok(status) = tx.application_related_data()?.pw_status_bytes()
-            && status.err_count_pw1() < 3
-        {
-            description.push_str(&format!("\nRemaining attempts: {}", status.err_count_pw1()));
-        }
-    }
-    Ok(description)
+    )
 }
 fn ok_data(data: &[u8]) -> AssuanResult {
     let mut lines = assuan::data_lines(data);
@@ -404,6 +364,35 @@ impl CardSession {
     }
 }
 
+fn verified_card(
+    broker: Arc<Broker>,
+    stop: CancellationToken,
+    transport: CardTransport,
+    info: &CardInfo,
+    key: &CardKey,
+) -> Result<Option<OpenPGP>> {
+    let backend = match NativeCard::open(broker, stop, transport.clone()) {
+        Ok(card) => card,
+        Err(error)
+            if transport == CardTransport::Usb && error.is::<crate::broker::CardNotPresent>() =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut card =
+        OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
+    let current = snapshot(&mut card.transaction()?, transport)?;
+    if current.serial != info.serial
+        || !current.keys.iter().any(|k| {
+            k.slot == key.slot && k.keygrip == key.keygrip && k.fingerprint == key.fingerprint
+        })
+    {
+        return Ok(None);
+    }
+    Ok(Some(card))
+}
+
 #[allow(clippy::too_many_arguments)] // One immutable, bounded card operation across the blocking boundary.
 pub fn private_operation(
     broker: Arc<Broker>,
@@ -414,19 +403,23 @@ pub fn private_operation(
     hash: String,
     mut input: Zeroizing<Vec<u8>>,
     mut pin: Zeroizing<Vec<u8>>,
+    nfc_available: bool,
 ) -> Result<AssuanResult> {
-    let backend = NativeCard::open(broker, stop, info.transport.clone())?;
-    let mut card =
-        OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
+    // USB is probed now, even if the last UI presence notification was stale.
+    // Keep the verified connection through VERIFY and signing/decryption.
+    let mut card = match verified_card(
+        broker.clone(),
+        stop.clone(),
+        CardTransport::Usb,
+        &info,
+        &key,
+    )? {
+        Some(card) => card,
+        None if nfc_available => verified_card(broker, stop, CardTransport::Nfc, &info, &key)?
+            .context("different NFC card or key; operation canceled")?,
+        None => return Err(crate::broker::CardNotPresent.into()),
+    };
     let mut tx = card.transaction()?;
-    let current = snapshot(&mut tx, info.transport)?;
-    if current.serial != info.serial
-        || !current.keys.iter().any(|k| {
-            k.slot == key.slot && k.keygrip == key.keygrip && k.fingerprint == key.fingerprint
-        })
-    {
-        bail!("different card or key; operation canceled");
-    }
     // gpg-agent sends a fixed-size NUL-padded inquiry buffer, not just a terminator.
     if let Some(end) = pin.iter().position(|b| *b == 0) {
         if pin[end..].iter().any(|b| *b != 0) {
@@ -538,6 +531,9 @@ pub fn operation_error(error: &anyhow::Error) -> AssuanResult {
         || error.is::<crate::broker::OperationCancelled>()
     {
         return AssuanResult::error(assuan::CANCELED, "operation canceled by user");
+    }
+    if error.is::<crate::broker::CardNotPresent>() {
+        return AssuanResult::error(assuan::CARD_NOT_PRESENT, "Card not present");
     }
     match error.downcast_ref::<Error>() {
         Some(Error::CardStatus(StatusBytes::PasswordNotChecked(left))) => {

@@ -7,22 +7,21 @@ final class CardInspectionTests: XCTestCase {
     func testCapabilityChangesHideNFCWithoutChangingRegistrations() async throws {
         var available = false
         let model = AppModel(nfcCapability: { available })
-        let entry = RegisteredCard(card: card("NFC only", .nfc), name: "NFC key", usbEnabled: false, nfcEnabled: true)
+        let entry = RegisteredCard(card: card("NFC only", .nfc), name: "NFC key")
         model.registeredCards = [entry]
         model.refreshHardwareCapabilities()
-        XCTAssertTrue(model.usableCards.isEmpty)
+        XCTAssertTrue(model.nfcCards.isEmpty)
         model.cardInspection.select(.nfc)
         XCTAssertEqual(model.cardInspection.transport, .usb)
         available = true
         model.refreshHardwareCapabilities()
-        XCTAssertEqual(model.usableCards.count, 1)
+        XCTAssertEqual(model.nfcCards.count, 1)
         model.cardInspection.select(.nfc)
         XCTAssertEqual(model.cardInspection.transport, .nfc)
         available = false
         model.refreshHardwareCapabilities()
         XCTAssertEqual(model.cardInspection.transport, .usb)
-        XCTAssertTrue(model.registeredCards[0].nfcEnabled)
-        XCTAssertEqual(entry.connections(nfcAvailable: false), String(localized: "Unavailable on This Device"))
+        XCTAssertEqual(model.registeredCards, [entry])
     }
 
     func testNFCSelectionIsOptionalExclusiveAndNotPersisted() throws {
@@ -31,8 +30,8 @@ final class CardInspectionTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         var available = true
         let model = AppModel(defaults: defaults, nfcCapability: { available })
-        let first = RegisteredCard(card: card("one", .nfc), name: "One", usbEnabled: true, nfcEnabled: true)
-        let second = RegisteredCard(card: card("two", .nfc), name: "Two", usbEnabled: true, nfcEnabled: true)
+        let first = RegisteredCard(card: card("one", .nfc), name: "One")
+        let second = RegisteredCard(card: card("two", .nfc), name: "Two")
         model.registeredCards = [first, second]
         XCTAssertNil(model.selectedNFCCard)
         model.selectNFCCard("one")
@@ -187,7 +186,7 @@ final class CardInspectionTests: XCTestCase {
         let info = CardInfo(serial: "D2760001240103040005000012340000", transport: .usb, keys: [
             CardKey(slot: 1, algorithm: "rsa4096", fingerprint: String(repeating: "A1", count: 20), keygrip: String(repeating: "B2", count: 20), publicKey: Data(), createdAt: 1_700_000_000)
         ])
-        let entry = RegisteredCard(card: info, name: "Daily security key", usbEnabled: true, nfcEnabled: true)
+        let entry = RegisteredCard(card: info, name: "Daily security key")
         model.registeredCards = [entry]
         model.device = DeviceInfo(id: "test-device", name: "iPhone", words: "public verification words", online: false, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
         for language in ["en", "zh-Hans"] {

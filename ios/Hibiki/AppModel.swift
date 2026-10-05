@@ -96,13 +96,7 @@ final class AppModel {
     }
 
     var currentPrompt: PinPrompt? { prompts.first }
-    var usableCards: [RegisteredCard] {
-        registeredCards.filter { $0.usbEnabled || ($0.nfcEnabled && nfcAvailable) }
-    }
-    var usbSupported: Bool { registeredCards.contains { $0.usbEnabled } }
-    var usbAvailable: Bool { usbPresent && usbSupported }
-    var nfcSupported: Bool { nfcAvailable && registeredCards.contains { $0.nfcEnabled } }
-    var nfcCards: [RegisteredCard] { nfcAvailable ? registeredCards.filter { $0.nfcEnabled } : [] }
+    var nfcCards: [RegisteredCard] { nfcAvailable ? registeredCards : [] }
     func selectNFCCard(_ serial: String?) {
         let selected = serial.flatMap { serial in nfcCards.first { $0.card.serial == serial }?.card.serial }
         do {
@@ -337,13 +331,13 @@ final class AppModel {
         defaults.set(pinEnabled, forKey: "pinEnabled")
         defaults.set(cardEnabled, forKey: "cardEnabled")
     }
-    func register(_ transport: CardTransport, name: String, usbSupported: Bool, nfcSupported: Bool) async -> Bool {
+    func register(name: String) async -> Bool {
         busy = true
         defer { busy = false }
         do {
             guard let client else { return false }
-            guard transport != .nfc || nfcAvailable else { throw HardwareError.unavailable }
-            _ = try await client.registerCard(transport: transport, name: name, usbSupported: usbSupported, nfcSupported: nfcAvailable && nfcSupported)
+            guard nfcAvailable else { throw HardwareError.unavailable }
+            _ = try await client.registerCard(name: name)
             registeredCards = client.registeredCards()
             return true
         } catch { show(error); return false }
@@ -359,11 +353,11 @@ final class AppModel {
             } onCancel: { cancellation.cancel() }
         }
     }
-    func updateCard(_ serial: String, name: String, usbSupported: Bool, nfcSupported: Bool) async throws {
+    func updateCard(_ serial: String, name: String) async throws {
         guard !busy, let client else { throw CancellationError() }
         busy = true
         defer { busy = false }
-        try await client.updateCard(serial: serial, name: name, usbSupported: usbSupported, nfcSupported: nfcSupported)
+        try await client.updateCard(serial: serial, name: name)
         registeredCards = client.registeredCards()
     }
     func removeCard(_ serial: String) async {
@@ -414,6 +408,10 @@ final class AppModel {
                 try core.respond(token: token, data: response, accepted: true)
             } catch {
                 if core.requestIsPending(token: token) {
+                    if case HardwareError.cardNotPresent = error {
+                        try? core.cardNotPresent(token: token)
+                        return
+                    }
                     if !cardInspection.isReading {
                         if case HardwareError.unavailable = error { show(error) }
                         if case HardwareError.multipleCards = error { show(error) }

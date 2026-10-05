@@ -58,8 +58,6 @@ fn fixture() -> (
     client.provider.cards.lock().unwrap().push(RegisteredCard {
         card: card.clone(),
         name: "test".into(),
-        usb_enabled: true,
-        nfc_enabled: true,
     });
     (root, client, context, card)
 }
@@ -163,9 +161,9 @@ async fn preparation_cancel_interrupts_pending_usb_probe() {
 }
 
 #[tokio::test]
-async fn private_operation_preserves_native_cancellation_at_open_and_transmit() {
+async fn private_operation_stops_on_native_cancellation_or_fault_without_fallback() {
     for transport in [CardTransport::Nfc, CardTransport::Usb] {
-        for transmit in [false, true] {
+        for (transmit, canceled) in [(false, false), (false, true), (true, false), (true, true)] {
             let (_root, client, context, mut card) = fixture();
             card.transport = transport.clone();
             client.usb_present(transport == CardTransport::Usb);
@@ -181,24 +179,46 @@ async fn private_operation_preserves_native_cancellation_at_open_and_transmit() 
                 .await
                 .unwrap();
             // Bind the same prepared card that the acquisition controller would supply.
-            *client.provider.sessions.lock().unwrap()[&context.session]
+            client.provider.sessions.lock().unwrap()[&context.session]
                 .upgrade()
                 .unwrap()
                 .lock()
-                .unwrap() = Some(card);
+                .unwrap()
+                .prepared = Some(card);
             ep.command("SETDATA 01".into()).await.unwrap();
             assert_eq!(&*ep.next().await.unwrap(), b"OK");
             ep.command("PKSIGN --hash=sha256 OPENPGP.1".into())
                 .await
                 .unwrap();
-            if transport == CardTransport::Nfc {
-                assert!(ep.next().await.unwrap().starts_with(b"INQUIRE NEEDPIN"));
-                ep.answer("D 123456".into()).await.unwrap();
-                ep.answer("END".into()).await.unwrap();
-            }
-            let NativeEvent::CardOpen { mut token, .. } = next(&client).await else {
+            assert!(ep.next().await.unwrap().starts_with(b"INQUIRE NEEDPIN"));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), client.next_event())
+                    .await
+                    .is_err()
+            );
+            ep.answer("D 123456".into()).await.unwrap();
+            ep.answer("END".into()).await.unwrap();
+            let NativeEvent::CardOpen {
+                mut token,
+                transport: actual,
+                ..
+            } = next(&client).await
+            else {
                 panic!()
             };
+            assert_eq!(actual, CardTransport::Usb);
+            if transport == CardTransport::Nfc {
+                client.card_not_present(token).unwrap();
+                token = loop {
+                    if let NativeEvent::CardOpen {
+                        token, transport, ..
+                    } = next(&client).await
+                    {
+                        assert_eq!(transport, CardTransport::Nfc);
+                        break token;
+                    }
+                };
+            }
             if transmit {
                 client.respond(token, vec![], true).unwrap();
                 token = loop {
@@ -208,7 +228,7 @@ async fn private_operation_preserves_native_cancellation_at_open_and_transmit() 
                 };
             }
             client
-                .fail_native_request(token, "user canceled".into(), true)
+                .fail_native_request(token, "reader error".into(), canceled)
                 .unwrap();
             let line = tokio::time::timeout(Duration::from_secs(1), ep.next())
                 .await
@@ -217,7 +237,7 @@ async fn private_operation_preserves_native_cancellation_at_open_and_transmit() 
             assert!(
                 matches!(
                     assuan::parse_response(&line).unwrap(),
-                    assuan::Response::Err(assuan::CANCELED)
+                    assuan::Response::Err(code) if code == if canceled { assuan::CANCELED } else { assuan::GENERAL }
                 ),
                 "{line:?}"
             );
@@ -228,9 +248,11 @@ async fn private_operation_preserves_native_cancellation_at_open_and_transmit() 
 
 #[tokio::test]
 async fn serial_queries_require_usb_or_an_explicit_registered_nfc_demand() {
-    for (nfc_enabled, nfc_available) in [(true, true), (true, false), (false, true)] {
+    for (registered, nfc_available) in [(true, true), (true, false), (false, true)] {
         let (_root, client, context, card) = fixture();
-        client.provider.cards.lock().unwrap()[0].nfc_enabled = nfc_enabled;
+        if !registered {
+            client.provider.cards.lock().unwrap().clear();
+        }
         client.set_nfc_available(nfc_available);
         let mut ep = client
             .provider
@@ -258,7 +280,7 @@ async fn serial_queries_require_usb_or_an_explicit_registered_nfc_demand() {
                 .is_err()
         );
         let command: Line = format!("SERIALNO --demand={}", card.serial).as_str().into();
-        if nfc_enabled && nfc_available {
+        if registered && nfc_available {
             for accept in [true, false] {
                 ep.command(command.clone()).await.unwrap();
                 let NativeEvent::Prompt { prompt } = next(&client).await else {
@@ -309,7 +331,6 @@ async fn selected_nfc_is_volatile_optional_and_cleared_when_unavailable() {
     let (root, client, context, card) = fixture();
     let mut registry = crate::registry::Registry {
         cards: client.provider.cards.lock().unwrap().clone(),
-        selected: None,
     };
     let mut second = registry.cards[0].clone();
     second.card.serial = "D2760001240103040000000000020000".into();
@@ -354,10 +375,7 @@ async fn selected_nfc_is_volatile_optional_and_cleared_when_unavailable() {
     client.set_nfc_available(true);
     assert!(client.selected_nfc_card().is_none());
     client.select_nfc_card(Some(card.serial.clone())).unwrap();
-    client
-        .update_card(card.serial.clone(), "USB only".into(), true, false)
-        .await
-        .unwrap();
+    client.remove_card(card.serial.clone()).await.unwrap();
     assert!(client.selected_nfc_card().is_none());
     client
         .select_nfc_card(Some(second.card.serial.clone()))
@@ -370,8 +388,67 @@ async fn selected_nfc_is_volatile_optional_and_cleared_when_unavailable() {
     )
     .unwrap();
     restored.set_nfc_available(true);
-    assert_eq!(restored.registered_cards().len(), 2);
+    assert_eq!(restored.registered_cards().len(), 1);
     assert!(restored.selected_nfc_card().is_none());
     client.remove_card(second.card.serial).await.unwrap();
     assert!(client.selected_nfc_card().is_none());
+}
+
+#[tokio::test]
+async fn selected_or_demand_confirmed_nfc_prepares_without_another_prompt() {
+    for selected in [true, false] {
+        let (_root, client, context, card) = fixture();
+        let mut ep = client
+            .provider
+            .open(
+                client.app.clone(),
+                ServiceKind::Scdaemon,
+                client.slots.clone(),
+                CancellationToken::new(),
+                context.clone(),
+            )
+            .await
+            .unwrap();
+        if selected {
+            client.select_nfc_card(Some(card.serial.clone())).unwrap();
+        } else {
+            ep.command(format!("SERIALNO --demand={}", card.serial).as_str().into())
+                .await
+                .unwrap();
+            let NativeEvent::Prompt { prompt } = next(&client).await else {
+                panic!()
+            };
+            client.respond(prompt.token, vec![], true).unwrap();
+            assert!(ep.next().await.unwrap().starts_with(b"S SERIALNO"));
+            assert_eq!(&*ep.next().await.unwrap(), b"OK");
+            assert!(matches!(next(&client).await, NativeEvent::Cancelled { .. }));
+        }
+        let mut preparation = client
+            .provider
+            .prepare(
+                client.app.clone(),
+                CardTarget {
+                    serial: Some(card.serial.clone()),
+                    key: Some(card.keys[0].keygrip.clone()),
+                },
+                context,
+            )
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                preparation.poll(&mut ep, CancellationToken::new())
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            Some(card.serial)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), client.next_event())
+                .await
+                .is_err()
+        );
+        ep.close().await;
+    }
 }

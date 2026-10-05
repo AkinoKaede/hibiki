@@ -24,7 +24,7 @@ struct HibikiApp: App {
             model.initialized = true
             model.prompts = [PinPrompt(token: "ui-pin", session: "ui-session", request: 1, channel: "UI Test Channel", deviceName: "Work Mac", deviceId: String(repeating: "b", count: 64), kind: .pin, title: "Hibiki Request", description: "Please enter the PIN for your security key.", label: "PIN", error: "", repeat: "", repeatError: "", ok: "OK", cancel: "", notOk: "", timeoutSeconds: 120)]
             if CommandLine.arguments.contains("--ui-nfc") {
-                model.registeredCards = [RegisteredCard(card: CardInfo(serial: "D2760001240103040005000012340000", transport: .nfc, keys: []), name: "Fixture Security Key", usbEnabled: true, nfcEnabled: true)]
+                model.registeredCards = [RegisteredCard(card: CardInfo(serial: "D2760001240103040005000012340000", transport: .nfc, keys: []), name: "Fixture Security Key")]
             }
             if CommandLine.arguments.contains("--ui-confirm") {
                 model.prompts[0].kind = .confirm
@@ -36,9 +36,9 @@ struct HibikiApp: App {
             let model = AppModel(defaults: UserDefaults(suiteName: "hibiki-ui-members-fixture")!, nfcCapability: { CommandLine.arguments.contains("--ui-nfc") })
             let isOnline = CommandLine.arguments.contains("--ui-members-online")
             if CommandLine.arguments.contains("--ui-cards-fixture") {
-                model.registeredCards = [RegisteredCard(card: CardInfo(serial: "D2760001240103040005000012340000", transport: .usb, keys: []), name: "Fixture Security Key", usbEnabled: true, nfcEnabled: true)]
+                model.registeredCards = [RegisteredCard(card: CardInfo(serial: "D2760001240103040005000012340000", transport: .nfc, keys: []), name: "Fixture Security Key")]
                 if CommandLine.arguments.contains("--ui-multiple-nfc") {
-                    model.registeredCards.append(RegisteredCard(card: CardInfo(serial: "D2760001240100000006120808620000", transport: .nfc, keys: []), name: "Second Security Key", usbEnabled: true, nfcEnabled: true))
+                    model.registeredCards.append(RegisteredCard(card: CardInfo(serial: "D2760001240100000006120808620000", transport: .nfc, keys: []), name: "Second Security Key"))
                 }
             }
             let words = (1...24).map { String(format: "word%02d", $0) }.joined(separator: " ")

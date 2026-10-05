@@ -86,7 +86,7 @@ struct StatusView: View {
             }
             Section("Provider Services") {
                 Toggle("Pinentry", isOn: $model.pinEnabled).onChange(of: model.pinEnabled) { _, _ in model.updateServices() }
-                Toggle("OpenPGP Card", isOn: $model.cardEnabled).onChange(of: model.cardEnabled) { _, _ in model.updateServices() }
+                Toggle("Scdaemon", isOn: $model.cardEnabled).onChange(of: model.cardEnabled) { _, _ in model.updateServices() }
             }
             if !model.nfcCards.isEmpty {
                 Section("NFC Key") { NFCKeyRows(model: model) }
@@ -544,24 +544,20 @@ struct ApprovalView: View {
 
 extension RegisteredCard: Identifiable {
     public var id: String { card.serial }
-    func connections(nfcAvailable: Bool) -> String {
-        let values = [usbEnabled ? "USB" : nil, nfcEnabled && nfcAvailable ? "NFC" : nil].compactMap { $0 }
-        return values.isEmpty ? String(localized: "Unavailable on This Device") : values.joined(separator: " · ")
-    }
 }
 
 struct CardView: View {
     @Bindable var model: AppModel
-    @State private var registrationTransport: CardTransport?
+    @State private var registering = false
     var body: some View {
         List {
             CardInspectionView(model: model)
             Section {
                 if model.registeredCards.isEmpty {
                     ContentUnavailableView(
-                        "No Security Keys Registered",
+                        "No NFC Keys Registered",
                         systemImage: "key.horizontal",
-                        description: Text("Register once to save public information. Private keys always stay on your security key.")
+                        description: Text("Register NFC keys to use them without a USB connection.")
                     )
                 }
                 ForEach(model.registeredCards) { entry in
@@ -571,14 +567,13 @@ struct CardView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(verbatim: entry.name).font(.headline)
                                 Text(verbatim: entry.card.serial).font(.caption.monospaced()).lineLimit(1).truncationMode(.middle)
-                                Text(verbatim: entry.connections(nfcAvailable: model.nfcAvailable)).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
                         }.padding(.vertical, 4)
                     }
                 }
             } header: {
-                Text("Registered Security Keys")
+                Text("Registered NFC Keys")
             }
         }
         .navigationTitle("Security Keys")
@@ -586,56 +581,40 @@ struct CardView: View {
         .onDisappear { model.cardInspection.disappear() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button { registrationTransport = .usb } label: {
-                        Label("Register via USB", systemImage: "cable.connector")
+                if model.nfcAvailable {
+                    Button { registering = true } label: {
+                        Label("Register NFC Key", systemImage: "plus").labelStyle(.iconOnly)
                     }
-                    .accessibilityIdentifier("registerUSB")
-                    if model.nfcAvailable {
-                        Button { registrationTransport = .nfc } label: {
-                            Label("Register via NFC", systemImage: "wave.3.right")
-                        }.accessibilityIdentifier("registerNFC")
-                    }
-                } label: {
-                    Label("Register Security Key", systemImage: "plus").labelStyle(.iconOnly)
+                    .disabled(model.busy || model.cardInspection.isReading)
+                    .accessibilityIdentifier("registerSecurityKey")
                 }
-                .disabled(model.busy || model.cardInspection.isReading)
-                .accessibilityIdentifier("registerSecurityKey")
             }
         }
-        .navigationDestination(item: $registrationTransport) { transport in
-            RegisterCardView(transport: transport, model: model)
+        .navigationDestination(isPresented: $registering) {
+            RegisterCardView(model: model)
         }
     }
 }
 
 struct RegisterCardView: View {
-    let transport: CardTransport
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
-    @State private var otherSupported = true
     var body: some View {
         Form {
-            Section {
+            Section("NFC Security Key") {
                 TextField("Name (read from card if blank)", text: $name)
-                LabeledContent("Read using", value: transport == .usb ? String(localized: "USB") : "NFC")
-                if model.nfcAvailable {
-                    Toggle(transport == .usb ? "NFC Support" : "USB Connection Support", isOn: $otherSupported)
-                }
-            } header: { Text("Security Key") } footer: {
-                if model.nfcAvailable { Text("Turn this off if your key does not support both USB and NFC. Key identity is verified again during use.") }
             }
             Section {
                 Button {
-                    Task { if await model.register(transport, name: name, usbSupported: transport == .usb || otherSupported, nfcSupported: model.nfcAvailable && (transport == .nfc || otherSupported)) { dismiss() } }
+                    Task { if await model.register(name: name) { dismiss() } }
                 } label: {
                     HStack { Text("Read and Register"); Spacer(); if model.busy { ProgressView() } }
-                }.disabled(model.busy || (transport == .usb && !model.usbPresent) || (transport == .nfc && !model.nfcAvailable))
+                }.disabled(model.busy || !model.nfcAvailable)
             } footer: {
-                Text(transport == .usb ? "Insert your security key to read public information. No PIN needed." : "Tap your security key to read public information. No PIN needed.")
+                Text("Tap your security key to read public information. No PIN needed.")
             }
-        }.navigationTitle("Register Security Key")
+        }.navigationTitle("Register NFC Key")
     }
 }
 
@@ -652,8 +631,6 @@ struct RegisteredCardView: View {
                 Section("Security Key") {
                     LabeledContent("Name", value: entry.name)
                     CardIdentityFields(info: entry.card)
-                    LabeledContent("Supported Connections", value: entry.connections(nfcAvailable: model.nfcAvailable))
-
                 }
                 Section("OpenPGP Keys") {
                     CardPublicKeyRows(keys: entry.card.keys)

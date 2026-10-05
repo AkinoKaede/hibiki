@@ -3,9 +3,10 @@ import Foundation
 @preconcurrency import CoreNFC
 
 enum HardwareError: LocalizedError {
-    case unavailable, disconnected, multipleCards, invalidResponse
+    case cardNotPresent, unavailable, disconnected, multipleCards, invalidResponse
     var errorDescription: String? {
         switch self {
+        case .cardNotPresent: return String(localized: "Security key is not connected.")
         case .unavailable:
             return String(localized: "Security key reader is unavailable. Check permissions and try again.")
         case .disconnected: return String(localized: "Security key disconnected or operation canceled.")
@@ -43,7 +44,7 @@ actor CardHardware {
                 guard let manager = TKSmartCardSlotManager.default else { throw HardwareError.unavailable }
                 let slots = manager.slotNames.compactMap { manager.slotNamed($0) }.filter { $0.state == .validCard }
                 guard slots.count <= 1 else { throw HardwareError.multipleCards }
-                guard let card = slots.first?.makeSmartCard() else { throw HardwareError.unavailable }
+                guard let card = slots.first?.makeSmartCard() else { throw HardwareError.cardNotPresent }
                 card.isSensitive = true
                 usb = card
                 try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in

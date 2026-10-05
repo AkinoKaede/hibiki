@@ -18,6 +18,10 @@ pub struct RequestCancelled;
 #[error("operation canceled by user")]
 pub struct OperationCancelled;
 
+#[derive(Debug, thiserror::Error)]
+#[error("card not present")]
+pub struct CardNotPresent;
+
 type Answer = Result<Zeroizing<Vec<u8>>>;
 pub struct Broker {
     tx: mpsc::Sender<NativeEvent>,
@@ -64,6 +68,9 @@ impl Broker {
                 anyhow::anyhow!(message)
             }),
         )
+    }
+    pub fn card_not_present(&self, token: &str) -> Result<()> {
+        self.answer(token, Err(CardNotPresent.into()))
     }
     pub fn cancel(&self, token: &str) -> Result<()> {
         self.answer(token, Err(OperationCancelled.into()))
