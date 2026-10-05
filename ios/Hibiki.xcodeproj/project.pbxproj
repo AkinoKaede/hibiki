@@ -215,7 +215,7 @@
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
 				"SWIFT_STRICT_CONCURRENCY" = "complete";
 				"ENABLE_APP_SANDBOX" = "YES";
-				"MARKETING_VERSION" = "0.1.0";
+				"MARKETING_VERSION" = "0.2.0";
 				"CURRENT_PROJECT_VERSION" = "1";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
@@ -248,7 +248,7 @@
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
 				"SWIFT_STRICT_CONCURRENCY" = "complete";
 				"ENABLE_APP_SANDBOX" = "YES";
-				"MARKETING_VERSION" = "0.1.0";
+				"MARKETING_VERSION" = "0.2.0";
 				"CURRENT_PROJECT_VERSION" = "1";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
@@ -346,7 +346,7 @@
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
 				"SWIFT_STRICT_CONCURRENCY" = "complete";
 				"ENABLE_APP_SANDBOX" = "YES";
-				"MARKETING_VERSION" = "0.1.0";
+				"MARKETING_VERSION" = "0.2.0";
 				"CURRENT_PROJECT_VERSION" = "1";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
@@ -376,7 +376,7 @@
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
 				"SWIFT_STRICT_CONCURRENCY" = "complete";
 				"ENABLE_APP_SANDBOX" = "YES";
-				"MARKETING_VERSION" = "0.1.0";
+				"MARKETING_VERSION" = "0.2.0";
 				"CURRENT_PROJECT_VERSION" = "1";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
@@ -463,7 +463,7 @@
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
 				"SWIFT_STRICT_CONCURRENCY" = "complete";
 				"ENABLE_APP_SANDBOX" = "YES";
-				"MARKETING_VERSION" = "0.1.0";
+				"MARKETING_VERSION" = "0.2.0";
 				"CURRENT_PROJECT_VERSION" = "1";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
@@ -489,7 +489,7 @@
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
 				"SWIFT_STRICT_CONCURRENCY" = "complete";
 				"ENABLE_APP_SANDBOX" = "YES";
-				"MARKETING_VERSION" = "0.1.0";
+				"MARKETING_VERSION" = "0.2.0";
 				"CURRENT_PROJECT_VERSION" = "1";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
 				"PRODUCT_NAME" = "$(TARGET_NAME)";
@@ -555,7 +555,7 @@
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
 				"SWIFT_STRICT_CONCURRENCY" = "complete";
 				"ENABLE_APP_SANDBOX" = "YES";
-				"MARKETING_VERSION" = "0.1.0";
+				"MARKETING_VERSION" = "0.2.0";
 				"CURRENT_PROJECT_VERSION" = "1";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
 				"ENABLE_TESTABILITY" = "YES";
@@ -579,7 +579,7 @@
 				"SWIFT_EMIT_LOC_STRINGS" = "YES";
 				"SWIFT_STRICT_CONCURRENCY" = "complete";
 				"ENABLE_APP_SANDBOX" = "YES";
-				"MARKETING_VERSION" = "0.1.0";
+				"MARKETING_VERSION" = "0.2.0";
 				"CURRENT_PROJECT_VERSION" = "1";
 				"SUPPORTED_PLATFORMS" = "iphoneos iphonesimulator";
 				"ENABLE_TESTABILITY" = "YES";

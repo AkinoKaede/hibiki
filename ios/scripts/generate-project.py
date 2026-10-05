@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Reproducible Xcode project without a project-generator dependency."""
 from pathlib import Path
-import hashlib, json, plistlib
+import hashlib, json, plistlib, tomllib
 ROOT=Path(__file__).resolve().parents[1]
+VERSION=tomllib.loads((ROOT.parent/'Cargo.toml').read_text())['workspace']['package']['version']
 project=ROOT/'Hibiki.xcodeproj'; project.mkdir(exist_ok=True)
 objects={}
 def uid(name):return hashlib.sha256(name.encode()).hexdigest()[:24].upper()
@@ -26,7 +27,7 @@ settings={
     'SDKROOT':'iphoneos','IPHONEOS_DEPLOYMENT_TARGET':'18.0','SWIFT_VERSION':'5.0','CLANG_ENABLE_MODULES':'YES','ENABLE_USER_SCRIPT_SANDBOXING':'NO',
     'TARGETED_DEVICE_FAMILY':'1,2','CODE_SIGN_STYLE':'Automatic','SWIFT_EMIT_LOC_STRINGS':'YES','SWIFT_STRICT_CONCURRENCY':'complete',
     'ENABLE_APP_SANDBOX':'YES',
-    'MARKETING_VERSION':'0.1.0','CURRENT_PROJECT_VERSION':'1','SUPPORTED_PLATFORMS':'iphoneos iphonesimulator',
+    'MARKETING_VERSION':VERSION,'CURRENT_PROJECT_VERSION':'1','SUPPORTED_PLATFORMS':'iphoneos iphonesimulator',
 }
 def configs(name,extra):
     entries=[]
