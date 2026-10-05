@@ -99,8 +99,9 @@ its required signing metadata.
 3. Set the required `version` input to a three-component numeric version such as
    `0.1.0`, without `v`. It controls the iOS marketing version, Rust binary
    versions, and package filenames. Desktop releases automatically use Git tag
-   `v0.1.0`; iOS-only runs do not create a tag. The input does not have to match
-   the checked-in Cargo version. Prerelease suffixes are not accepted; the
+   `v0.1.0`; iOS-only runs do not create a tag. The input must match the committed
+   Cargo workspace version and lockfile. Developers must manually bump and commit
+   both before releasing. Prerelease suffixes are not accepted; the
    desktop `prereleased` checkbox marks the GitHub Release and does not affect iOS.
 4. Normally leave `ios_build_number` empty: the job queries every ASC build for
    that iOS marketing version and uses the highest integer plus one, starting

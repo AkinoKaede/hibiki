@@ -7,7 +7,7 @@ on:
       - Cargo.lock
       - .cargo/**
       - scripts/package.py
-      - scripts/set-version.py
+      - scripts/check-version.py
       - packaging/**
       - examples/**
       - tests/server.py
@@ -29,7 +29,7 @@ on:
           - desktop
           - ios
       version:
-        description: 'Release version without v (e.g. 0.1.0); Git tag is generated automatically'
+        description: 'Version matching Cargo.toml, without v (e.g. 0.1.0); tag adds v automatically'
         required: true
         type: string
       ios_build_number:
@@ -62,7 +62,7 @@ jobs:
           python3 - <<'PYCODE'
           import os, subprocess
           version = os.environ['RELEASE_VERSION']
-          subprocess.run(['python3', 'scripts/set-version.py', version, '--check'], check=True)
+          subprocess.run(['python3', 'scripts/check-version.py', version], check=True)
           if os.environ['BUILD'] == 'ios':
               raise SystemExit(0)
           tag = f'v{version}'
@@ -100,11 +100,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Apply workflow version
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: python3 scripts/set-version.py "$RELEASE_VERSION"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: '. -> target/packages'
@@ -199,11 +194,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Apply workflow version
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-        run: python3 scripts/set-version.py "$RELEASE_VERSION"
       - uses: Swatinem/rust-cache@v2
         with:
           key: ios-release-xcode-26.3
