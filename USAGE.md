@@ -481,7 +481,7 @@ saving; changes to programs, service switches or timeouts require manually
 restarting the daemon. Changing the default channel affects new adapter sessions.
 The TUI does not install or restart system services.
 
-In TUI Channels, press `i` or choose Generate invitation from the actions menu. Press `v` in the result to switch text/QR views; `e` exports text or a PNG when the filename ends in `.png`. To reopen your pending verification code, select your request in Requests and choose Show verification QR / text. Every focused pane has a cyan double border and a `*` title marker. A QR that cannot fit the terminal is never clipped.
+In TUI Channels, press `i` or choose Generate invitation from the actions menu. Press `v` in the result to switch text/QR views; `e` exports text or a PNG when the filename ends in `.png`. After joining, the TUI displays the complete request ID and all 24 verification words for comparison with the approving device. To reopen them, select your request in Requests and choose Show verification words / QR. Press `v` to switch between words and the request-bound verification QR; exports retain the verification payload for scanning or importing. Every focused pane has a cyan double border and a `*` title marker. A QR that cannot fit the terminal is never clipped.
 
 Ghostty, Kitty and Warp can show centered image QRs, including in an 80×24 window
 when the font's pixel size permits. Images use up to 12 pixels per module and

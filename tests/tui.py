@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real PTY lifecycle checks, using only isolated configuration and no relay."""
 import fcntl
+import json
 import os
 import pty
 import re
@@ -165,6 +166,8 @@ def check_invitation(root):
             check_waiting_verification(guest)
             guest.cli('channel', 'leave', 'PTY invitations')
             guest.cli('channel', 'join', text, '--no-wait', ok=False)
+            invitation = founder.cli('channel', 'invite', 'PTY invitations').stdout.decode().strip()
+            check_waiting_verification(guest, invitation)
             os.write(master, b'q')
             read_until(master, b'\x1b[?1049l', output)
             process.wait(timeout=5)
@@ -176,18 +179,50 @@ def check_invitation(root):
             server.send_signal(signal.SIGINT); server.wait(timeout=10)
 
 
-def check_waiting_verification(device):
+def check_waiting_verification(device, invitation=None):
     master, slave = pty.openpty()
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 70, 120, 0, 0))
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', 50, 120, 0, 0))
     process = subprocess.Popen([str(CLIENT), 'tui'], env=dict(device.env, TERM='xterm-256color'), stdin=slave, stdout=slave, stderr=slave)
     try:
         output = read_until(master, b'server online', b'')
-        os.write(master, b'4a')
-        output = read_until(master, b'Show verification QR / text', output)
-        os.write(master, b'\r')
-        output = read_until(master, b'public verification code', output)
+        if invitation is not None:
+            os.write(master, b'2a')
+            output = read_until(master, b'Join a channel', output)
+            os.write(master, b'\r')
+            output = read_until(master, b'Invitation', output)
+            os.write(master, invitation.encode() + b'\r\r')
+            output = read_until(master, b'compare these verification words', output)
+        else:
+            os.write(master, b'4a')
+            output = read_until(master, b'Show verification words / QR', output)
+            os.write(master, b'\r')
+        output = read_until(master, b'Compare the complete request ID', output)
+        snapshot = json.loads(device.cli('device', 'list', '--json').stdout)
+        pending = next(p for c in snapshot['channels'] for p in c['pending'] if p['own'])
+        words = pending['device']['verification_words'].split()
+        assert len(words) == 24
+        def check_words():
+            screen = '\n'.join(line[7:113] for line in terminal_text(output).splitlines())
+            assert pending['id'] in screen
+            displayed = screen.split('Verification words:', 1)[1].split('Compare the complete', 1)[0]
+            # Strip the modal border, then compare every word in order.
+            assert re.findall(r'[a-z]+', displayed) == words, displayed
+            assert 'hibiki-verify-v1:' not in screen
+        check_words()
         os.write(master, b'v')
-        output = read_until(master, b'hibiki-verify-v1:', output)
+        output = read_until(master, b'e export (.png) \xc2\xb7 Esc clear', output)
+        assert 'Verification words:' not in terminal_text(output)
+        os.write(master, b'v')
+        output = read_until(master, b'Compare the complete request ID', output)
+        check_words()
+        # Export still carries the request-bound payload used by QR scanners.
+        os.write(master, b'e')
+        output = read_until(master, b'Export secret (0600)', output)
+        exported = device.root / 'verification.txt'
+        exported.unlink(missing_ok=True)
+        os.write(master, str(exported).encode() + b'\r\r')
+        output = read_until(master, b'Secret exported', output)
+        assert exported.read_text() == pending['verification']
         os.write(master, b'\x03')
         read_until(master, b'\x1b[?1049l', output)
         process.wait(timeout=5)

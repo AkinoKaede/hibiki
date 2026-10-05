@@ -56,7 +56,7 @@ enum Action {
 }
 enum Update {
     Snapshot(Box<Snapshot>),
-    Done(String, Option<Zeroizing<String>>),
+    Done(String, Option<QrContent>),
     Error(String),
     Offline(String),
 }
@@ -107,6 +107,31 @@ enum FormKind {
     Settings(Box<Config>, Vec<u8>),
     Export(Zeroizing<String>),
 }
+#[derive(Clone)]
+struct QrContent {
+    payload: Zeroizing<String>,
+    verification_text: Option<String>,
+}
+impl QrContent {
+    fn verification(payload: String, request: &str, words: &str) -> Self {
+        Self {
+            payload: Zeroizing::new(payload),
+            verification_text: Some(format!(
+                "Request ID: {}\n\nVerification words:\n{}\n\nCompare the complete request ID and all 24 words with the approving device.",
+                safe(request),
+                presentation::words(&safe(words)),
+            )),
+        }
+    }
+}
+impl From<Zeroizing<String>> for QrContent {
+    fn from(payload: Zeroizing<String>) -> Self {
+        Self {
+            payload,
+            verification_text: None,
+        }
+    }
+}
 enum Modal {
     Menu {
         choices: Vec<(String, ActionChoice)>,
@@ -130,7 +155,7 @@ enum Modal {
     Secret {
         qr: bool,
         title: String,
-        text: Zeroizing<String>,
+        content: QrContent,
         scroll: u16,
     },
     Result {
@@ -143,7 +168,7 @@ enum Modal {
 enum ActionChoice {
     Execute(Action),
     Form(FormKind),
-    Verification(String),
+    Verification(QrContent),
 }
 struct Row {
     id: String,
@@ -483,8 +508,12 @@ impl Ui {
             {
                 if p.own {
                     choices.push((
-                        "Show verification QR / text".into(),
-                        ActionChoice::Verification(p.verification.clone()),
+                        "Show verification words / QR".into(),
+                        ActionChoice::Verification(QrContent::verification(
+                            p.verification.clone(),
+                            &p.id,
+                            &p.device.verification_words,
+                        )),
                     ));
                     choices.push((
                         "Withdraw own request".into(),
@@ -519,11 +548,11 @@ impl Ui {
     fn choose(&mut self, choice: ActionChoice, tx: &mpsc::Sender<Action>) {
         match choice {
             ActionChoice::Form(kind) => self.form(kind),
-            ActionChoice::Verification(text) => {
+            ActionChoice::Verification(content) => {
                 self.modal = Some(Modal::Secret {
-                    qr: true,
-                    title: "Waiting for approval · public verification code".into(),
-                    text: Zeroizing::new(text),
+                    qr: false,
+                    title: "Waiting for approval · verification words".into(),
+                    content,
                     scroll: 0,
                 });
             }
@@ -655,14 +684,17 @@ impl Ui {
             match &mut modal {
                 Modal::Help => {}
                 Modal::Secret {
-                    text, scroll, qr, ..
+                    content,
+                    scroll,
+                    qr,
+                    ..
                 } => match key.code {
                     KeyCode::Char('v') => {
                         *qr = !*qr;
                         *scroll = 0;
                     }
                     KeyCode::Char('e') => {
-                        self.form(FormKind::Export(text.clone()));
+                        self.form(FormKind::Export(content.payload.clone()));
                         return false;
                     }
                     KeyCode::Down | KeyCode::Char('j') => *scroll = scroll.saturating_add(1),
@@ -1014,19 +1046,20 @@ impl Ui {
                     let text=format!("{}\n\n{}\n{}",details,if *approval{if *verified{"[x] Identity verified (Space to change)"}else{"[ ] I compared the request ID and all 24 words (Space)"}}else{""},if *affirmative{"  Cancel     [ Confirm ]"}else{"[ Cancel ]     Confirm"});
                     f.render_widget(Paragraph::new(text).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(Block::default().borders(Borders::ALL).title(format!("{title} · ↑↓ scroll · Tab choose · Enter submit · Esc cancel"))),rect);
                 },
-                Modal::Secret{title,text,scroll,qr}=> {
+                Modal::Secret{title,content,scroll,qr}=> {
+                    let toggle = if content.verification_text.is_some() { "v QR/words" } else { "v QR/text" };
                     if *qr {
                         let block = Block::default().borders(Borders::ALL).title(safe(title));
                         let inner = block.inner(rect);
                         f.render_widget(block, rect);
                         let body = Rect { height: inner.height.saturating_sub(1), ..inner };
-                        self.qr_view.draw(f, text, body);
+                        self.qr_view.draw(f, &content.payload, body);
                         if inner.height > 0 {
-                            f.render_widget(Paragraph::new("v QR/text · e export (.png) · Esc clear"), Rect::new(inner.x, inner.bottom() - 1, inner.width, 1));
+                            f.render_widget(Paragraph::new(format!("{toggle} · e export (.png) · Esc clear")), Rect::new(inner.x, inner.bottom() - 1, inner.width, 1));
                         }
                     } else {
-                        let block = Block::default().borders(Borders::ALL).title(format!("{title} · v QR/text · e export (.png for image) · Esc clear"));
-                        f.render_widget(Paragraph::new(safe(text)).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(block),rect);
+                        let block = Block::default().borders(Borders::ALL).title(format!("{title} · {toggle} · e export (.png for image) · Esc clear"));
+                        f.render_widget(Paragraph::new(content.verification_text.clone().unwrap_or_else(|| safe(&content.payload))).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(block),rect);
                     }
                 },
                 Modal::Result{text,scroll}=>f.render_widget(Paragraph::new(text.as_str()).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(Block::default().borders(Borders::ALL).title("Result · ↑↓ scroll · Esc close")),rect),
@@ -1059,7 +1092,7 @@ fn pane(title: impl Into<String>, focused: bool) -> Block<'static> {
 async fn execute_action(
     manager: &mut Manager,
     action: Action,
-) -> Result<(String, Option<Zeroizing<String>>)> {
+) -> Result<(String, Option<QrContent>)> {
     match action {
         Action::Ping(channel, peer) => {
             let report = crate::diagnostics::ping(&manager.app, channel, peer, 4).await?;
@@ -1094,7 +1127,7 @@ async fn execute_action(
         }
         Action::Invite(c) => Ok((
             "One-use invitation · expires in 24 hours".into(),
-            Some(manager.invitation(&c).await?),
+            Some(manager.invitation(&c).await?.into()),
         )),
         Action::Join(text) => {
             let result = manager.join(text.to_string()).await?;
@@ -1102,18 +1135,25 @@ async fn execute_action(
                 format!(
                     "{}: {}",
                     if result.request.is_some() {
-                        "Waiting for approval · show this verification code"
+                        "Waiting for approval · compare these verification words"
                     } else {
                         "Joined"
                     },
                     safe(&result.name)
                 ),
-                (!result.verification.is_empty()).then(|| Zeroizing::new(result.verification)),
+                match &result.request {
+                    Some(request) => Some(QrContent::verification(
+                        result.verification,
+                        request,
+                        &manager.app.identity.device.public_key_words()?,
+                    )),
+                    None => None,
+                },
             ))
         }
         Action::Create(name) => Ok((
             "Channel created · one-use invitation · expires in 24 hours".into(),
-            Some(manager.create(name).await?),
+            Some(manager.create(name).await?.into()),
         )),
         _ => bail!("unsupported online action"),
     }
@@ -1331,7 +1371,7 @@ pub async fn run(explicit: Option<PathBuf>) -> Result<()> {
                 _=tokio::signal::ctrl_c()=>break,
                 update=output.recv()=>match update {
                     Some(Update::Snapshot(snapshot))=>ui.apply_snapshot(*snapshot),
-                    Some(Update::Done(message,secret))=>{ui.busy=false;ui.message=message.clone();if let Some(text)=secret{ui.modal=Some(Modal::Secret{title:message,text,scroll:0,qr:false});}else if message.contains('\n'){ui.modal=Some(Modal::Result{text:message,scroll:0});}},
+                    Some(Update::Done(message,secret))=>{ui.busy=false;ui.message=message.clone();if let Some(content)=secret{ui.modal=Some(Modal::Secret{title:message,content,scroll:0,qr:false});}else if message.contains('\n'){ui.modal=Some(Modal::Result{text:message,scroll:0});}},
                     Some(Update::Error(message))=>{ui.busy=false;ui.message=message.clone();ui.modal=Some(Modal::Result{text:message,scroll:0});},
                     Some(Update::Offline(message))=>{ui.message=message;if let Some(s)=&mut ui.snapshot{s.relay_connected=false;}},
                     None=>bail!("management worker stopped"),
