@@ -9,6 +9,7 @@ import time
 base = Path(sys.argv[1])
 marker = base / ('pinentry-%s' % os.getpid())
 marker.write_text('started')
+replayed = []
 
 def emit(line):
     sys.stdout.buffer.write(line + b'\n')
@@ -23,7 +24,15 @@ try:
         if raw.startswith(b'SETDESC '):
             (base/'pinentry-description.txt').write_bytes(raw)
         command = raw.rstrip(b'\r\n').split(b' ', 1)[0]
+        # Opt-in compatibility trace: command/option names only, never values,
+        # passwords, inquiry replies or dialog text.
+        if command == b'OPTION':
+            replayed.append('OPTION ' + raw.rstrip(b'\r\n').partition(b' ')[2].split(b'=', 1)[0].decode())
+        elif command.startswith(b'SET'):
+            replayed.append(command.decode())
         if command in (b'GETPIN', b'CONFIRM', b'MESSAGE'):
+            if (base/'pinentry-record-commands').exists():
+                (base/('pinentry-replay-%s.json' % os.getpid())).write_text(json.dumps(replayed))
             mode = json.loads((base / 'pinentry-mode.json').read_text())
             marker.write_text('waiting')
             time.sleep(mode.get('delay', 0))

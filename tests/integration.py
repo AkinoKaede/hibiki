@@ -241,6 +241,65 @@ def make_card(device, algorithm="rsa2048"):
     device.card(card);(device.root/'card.json').chmod(0o600)
     return fpr,device.gpg('--export',fpr).stdout,card
 
+def pinentry_compatibility(requester, provider):
+    """Exercise replay through the adapter, using only synthetic dialog text."""
+    record = provider.root/'pinentry-record-commands'
+    record.touch()
+    def dialog(pe, command):
+        before = set(provider.root.glob('pinentry-replay-*.json'))
+        answer = pe.command(command)
+        paths = wait_for(lambda: set(provider.root.glob('pinentry-replay-*.json')) - before)
+        assert len(paths) == 1, paths
+        replay = json.loads(paths.pop().read_text())
+        if requester is not provider:
+            # The native provider initializes its own terminal before replaying
+            # requester settings; these are not forwarded remote TTY options.
+            native = ['OPTION '+key for key, env in [('ttyname', 'GPG_TTY'), ('ttytype', 'TERM')]
+                      if env in provider.env]
+            assert replay[:len(native)] == native, replay
+            replay = replay[len(native):]
+        wait_for(provider.idle)
+        return answer, replay
+    try:
+        provider.mode(confirm=True, delay=.01)
+        with Assuan(requester, 'pinentry') as pe:
+            assert pe.command(b'OPTION pinentry-user-data=test')[0].startswith(b'ERR 174 ')
+            for line in [b'OPTION ttyname=/dev/test-compatibility', b'OPTION default-ok=Proceed',
+                         b'OPTION constraints-enforce', b'SETTIMEOUT 5', b'SETDESC Temporary',
+                         b'OPTION formatted-passphrase', b'OPTION formatted-passphrase-hint=Temporary',
+                         b'SETREPEAT Again', b'SETQUALITYBAR Quality', b'SETKEYINFO test']:
+                assert pe.command(line) == [b'OK']
+            assert pe.command(b'RESET') == [b'OK']
+            answer, replay = dialog(pe, b'GETPIN')
+            assert answer[-1] == b'OK'
+            expected = {'OPTION default-ok', 'OPTION constraints-enforce', 'SETTIMEOUT'}
+            if requester is provider: expected.add('OPTION ttyname')
+            assert set(replay) == expected, replay
+
+        for command in [b'GETPIN', b'CONFIRM', b'MESSAGE']:
+            for mode in [{}, {'cancel': True}, {'partial_error': True}]:
+                provider.mode(confirm=True, delay=.01, **mode)
+                with Assuan(requester, 'pinentry') as pe:
+                    for line in [b'SETERROR Retry', b'SETREPEAT Again', b'SETQUALITYBAR Quality',
+                                 b'SETREPEATERROR Mismatch', b'SETQUALITYBAR_TT Hint', b'SETDESC Persistent']:
+                        assert pe.command(line) == [b'OK']
+                    answer, replay = dialog(pe, command)
+                    assert { 'SETERROR', 'SETREPEAT', 'SETQUALITYBAR' }.issubset(replay), replay
+                    assert answer[-1].startswith(b'ERR' if mode else b'OK'), answer
+                    provider.mode(confirm=True, delay=.01)
+                    answer, replay = dialog(pe, b'GETPIN')
+                    assert answer[-1] == b'OK'
+                    expected = {'SETREPEATERROR', 'SETQUALITYBAR_TT', 'SETDESC'}
+                    if command != b'GETPIN': expected.add('SETREPEAT')
+                    assert set(replay) == expected, (command, mode, replay)
+                    if command != b'GETPIN':
+                        _, replay = dialog(pe, b'GETPIN')
+                        assert 'SETREPEAT' not in replay, replay
+    finally:
+        record.unlink()
+        provider.mode()
+
+
 def test_all():
     with tempfile.TemporaryDirectory(prefix='hi-',dir='/tmp') as temp:
         root=Path(temp);server_data=root/'server';server_data.mkdir(mode=0o700)
@@ -356,6 +415,10 @@ def test_all():
                         assert b'D local fast' in pe.command(b'GETPIN')
                         assert pe.command(b'MESSAGE')[-1]==b'OK'
                     with Assuan(a,'scdaemon') as sc:
+                        assert sc.command(b'GETINFO cmd_has_option SERIALNO all') == [b'OK']
+                        assert sc.command(b'GETINFO cmd_has_option SERIALNO unknown')[0].startswith(b'ERR 256 ')
+                        assert sc.command(b'GETINFO cmd_has_option')[0].startswith(b'ERR 128 ')
+                        assert sc.command(b'GETINFO cmd_has_option SERIALNO')[0].startswith(b'ERR 128 ')
                         assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1]==b'OK'
                         assert sc.command(b'SETDATA '+b'00'*32)[-1]==b'OK'
                         assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode(),
@@ -566,8 +629,18 @@ def test_all():
 
             # B supplies only the card; C supplies PINs. Cancel is no longer a way to opt out.
             b.services(scdaemon=True);b.mode(confirm=True);b.restart()
+            pinentry_compatibility(a, c)
+            print('PASS: remote pinentry preserves RESET options and consumes one-shot settings on success/cancel/failure', flush=True)
             c.mode(password='123456',delay=.1)
             a.configure_agent()
+            # The agent tolerates UNKNOWN_OPTION for this optional extension.
+            result = run(['gpg-connect-agent', '--homedir', a.native,
+                          'OPTION putenv=PINENTRY_USER_DATA=compatibility-test',
+                          'GET_PASSPHRASE --data compatibility-cache X Prompt Description',
+                          '/bye'], env=a.env)
+            assert b'D 123456' in result.stdout and b'ERR ' not in result.stdout, result.stdout
+            a.kill_agent()
+            print('PASS: real gpg-agent accepts an unsupported PINENTRY_USER_DATA option', flush=True)
             status=a.gpg('--card-status')
             assert b'00001234' in status.stdout or b'HIbiki test card' in status.stdout,status.stdout
             a.gpg('--batch','--local-user',fpr,'--armor','--detach-sign',data=b'card message')
@@ -635,6 +708,17 @@ def test_all():
             wait_for(lambda:b.idle('scdaemon'))
             print('PASS: stdio-only capabilities, card binding, backend busy, reset and management restrictions',flush=True)
 
+            # A first failed public query must neither bind nor poison the session.
+            with Assuan(a, 'scdaemon') as sc:
+                started = time.monotonic()
+                assert sc.command(b'READKEY OPENPGP.99') == [b'ERR 17 No key']
+                assert time.monotonic() - started < 3, 'definitive error retried until deadline'
+                assert sc.command(b'READKEY OPENPGP.1')[-1] == b'OK'
+                assert sc.command(b'READKEY OPENPGP.99') == [b'ERR 17 No key']
+                assert sc.command(b'GETATTR SERIALNO')[-1] == b'OK'
+            wait_for(lambda:b.idle('scdaemon'))
+            print('PASS: first and selected missing-key queries preserve native errors without requiring RESET', flush=True)
+
             # The fastest present card is not necessarily the requested card.
             other={'serial':'D2760001240103040005000099990000','keys':[]}
             # Leave the wrong-card insertion prompt unanswered; Cancel would now end discovery.
@@ -656,11 +740,28 @@ def test_all():
             wait_for(lambda:b.idle('scdaemon') and c.idle('scdaemon'))
             print('PASS: serial/keygrip matching excludes faster wrong cards; lost bindings require explicit reset',flush=True)
 
+            # Preserve a definitive error at the deadline while another eligible
+            # card provider is offline, then allow another query without RESET.
+            a.services(timeout=2); a.restart(); c.stop()
+            try:
+                with Assuan(a, 'scdaemon') as sc:
+                    before = (b.root/'card-commands.log').read_text().count('READKEY OPENPGP.99\n')
+                    started = time.monotonic()
+                    assert sc.command(b'READKEY OPENPGP.99') == [b'ERR 17 No key']
+                    assert 1.5 <= time.monotonic() - started < 4
+                    assert (b.root/'card-commands.log').read_text().count('READKEY OPENPGP.99\n') == before + 1
+                    assert sc.command(b'READKEY OPENPGP.1')[-1] == b'OK'
+            finally:
+                c.start()
+            print('PASS: offline candidates retain the deadline without masking or retrying a native No key error', flush=True)
+
             # Only local pinentry remains available.
             a.services(pinentry=True);b.services(scdaemon=True);c.services()
             a.mode(password='local only')
             for d in devices:d.restart()
             with Assuan(a,'pinentry') as pe: assert b'D local only' in pe.command(b'GETPIN')
+            pinentry_compatibility(a, a)
+            print('PASS: local pinentry preserves RESET options and consumes one-shot settings on success/cancel/failure', flush=True)
             a.mode(cancel=True)
             with Assuan(a,'pinentry') as pe:
                 assert pe.command(b'GETPIN')==[b'ERR 83886179 canceled'], 'disabled peers changed cancellation into a failure'
@@ -672,7 +773,22 @@ def test_all():
                 assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1]==b'OK'
                 time.sleep(1.2)
                 assert sc.command(b'GETATTR SERIALNO')[-1]==b'OK', 'idle session consumed the next command deadline'
-            with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN')[-1].startswith(b'ERR')
+            with Assuan(a,'pinentry') as pe:
+                for line in [b'SETERROR Retry', b'SETREPEAT Again', b'SETQUALITYBAR Quality']:
+                    assert pe.command(line) == [b'OK']
+                assert pe.command(b'GETPIN')[-1].startswith(b'ERR')
+                wait_for(c.idle)
+                c.mode(delay=.01)
+                record = c.root/'pinentry-record-commands'; record.touch()
+                try:
+                    before = set(c.root.glob('pinentry-replay-*.json'))
+                    assert pe.command(b'GETPIN')[-1] == b'OK'
+                    paths = wait_for(lambda: set(c.root.glob('pinentry-replay-*.json')) - before)
+                    assert len(paths) == 1
+                    replay = json.loads(paths.pop().read_text())
+                    assert not {'SETERROR', 'SETREPEAT', 'SETQUALITYBAR'}.intersection(replay), replay
+                finally:
+                    record.unlink()
             wait_for(lambda:c.idle())
             print('PASS: all service switch combinations, local-only input and active-command timeout',flush=True)
 

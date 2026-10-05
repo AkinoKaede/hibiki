@@ -29,8 +29,43 @@ impl Settings {
     fn remove(&mut self, key: &str) {
         self.0.retain(|(k, _)| k != key);
     }
-    fn clear(&mut self) {
-        self.0.clear();
+    fn reset(&mut self) {
+        // pinentry_reset preserves these process options, not every OPTION.
+        // In particular, formatted-passphrase and its hint are dialog state.
+        self.0.retain(|(key, _)| {
+            matches!(
+                key.as_str(),
+                "SETTIMEOUT"
+                    | "OPTION grab"
+                    | "OPTION no-grab"
+                    | "OPTION ttyname"
+                    | "OPTION ttytype"
+                    | "OPTION lc-ctype"
+                    | "OPTION lc-messages"
+                    | "OPTION display"
+                    | "OPTION owner"
+                    | "OPTION default-ok"
+                    | "OPTION default-cancel"
+                    | "OPTION default-prompt"
+                    | "OPTION default-pwmngr"
+                    | "OPTION default-cf-visi"
+                    | "OPTION default-tt-visi"
+                    | "OPTION default-tt-hide"
+                    | "OPTION default-capshint"
+                    | "OPTION constraints-enforce"
+                    | "OPTION constraints-hint-short"
+                    | "OPTION constraints-hint-long"
+                    | "OPTION constraints-error-title"
+                    | "OPTION invisible-char"
+            )
+        });
+    }
+    fn finish_dialog(&mut self, command: &str) {
+        self.remove("SETERROR");
+        self.remove("SETQUALITYBAR");
+        if command == "GETPIN" {
+            self.remove("SETREPEAT");
+        }
     }
     fn len(&self) -> usize {
         self.0.len()
@@ -276,6 +311,18 @@ async fn password_remote(
 }
 
 fn local_info(service: ServiceKind, args: &str, pid: u32) -> AssuanResult {
+    let mut words = args.split_ascii_whitespace();
+    if service == ServiceKind::Scdaemon && words.next() == Some("cmd_has_option") {
+        let (Some(command), Some(option)) = (words.next(), words.next()) else {
+            return AssuanResult::error(assuan::MISSING_VALUE, "command and option required");
+        };
+        // GnuPG 2.4's capability table advertises only SERIALNO's all option.
+        return if command == "SERIALNO" && option == "all" && words.next().is_none() {
+            AssuanResult::ok()
+        } else {
+            AssuanResult::error(assuan::FALSE, "command option not advertised")
+        };
+    }
     let value = match args {
         "pid" => pid.to_string(),
         "version" => if service == ServiceKind::Scdaemon {
@@ -306,7 +353,8 @@ impl CardState {
     fn observe_serial(&mut self, command: &str, result: &AssuanResult) {
         // Inventory responses may contain several cards. Enumerating them must
         // not silently bind the next private operation to the first one.
-        if !matches!(command, "SERIALNO" | "SWITCHCARD" | "LEARN" | "GETATTR") {
+        if !result.success() || !matches!(command, "SERIALNO" | "SWITCHCARD" | "LEARN" | "GETATTR")
+        {
             return;
         }
         if let Some(serial) = result.lines.iter().find_map(|line| {
@@ -392,17 +440,25 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
             if assuan::validate_command(open.service, &line).is_err() {
                 write_line(
                     &mut writer,
-                    &assuan::error(assuan::NOT_SUPPORTED, "unsupported service command"),
+                    &assuan::error(
+                        if open.service == ServiceKind::Pinentry && cmd == "OPTION" {
+                            assuan::UNKNOWN_OPTION
+                        } else {
+                            assuan::NOT_SUPPORTED
+                        },
+                        "unsupported service command",
+                    ),
                 )
                 .await?;
                 continue;
             }
             let started = std::time::Instant::now();
+            let mut query_failures = crate::card_pool::QueryFailures::default();
             let operation = async {
                 if cmd == "GETINFO"
                     && (open.service == ServiceKind::Pinentry
                         || matches!(args, "pid" | "version" | "socket_name" | "deny_admin")
-                        || args.starts_with("cmd_has_option "))
+                        || args.split_ascii_whitespace().next() == Some("cmd_has_option"))
                 {
                     return Ok::<_, anyhow::Error>(local_info(open.service, args, open.pid));
                 }
@@ -411,11 +467,11 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                 }
                 if open.service == ServiceKind::Pinentry {
                     if cmd == "RESET" {
-                        settings.clear();
+                        settings.reset();
                         return Ok(AssuanResult::ok());
                     }
                     if matches!(cmd, "GETPIN" | "CONFIRM" | "MESSAGE") {
-                        let result = password_race(
+                        return password_race(
                             hub.clone(),
                             &open,
                             &settings,
@@ -425,9 +481,6 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                             &mut inputs,
                         )
                         .await;
-                        // Native pinentry consumes SETERROR on each dialog, including canceled dialogs.
-                        settings.remove("SETERROR");
-                        return result;
                     }
                     if cmd == "OPTION"
                         && matches!(
@@ -538,8 +591,10 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                     return Ok(result);
                 }
                 let result = if card_state.public_source.is_empty() {
-                    let (peer, result) = pool.query(line.clone()).await?;
-                    card_state.public_source = peer;
+                    let (peer, result) = pool.query(line.clone(), &mut query_failures).await?;
+                    if result.success() {
+                        card_state.public_source = peer;
+                    }
                     result
                 } else {
                     pool.query_from(&card_state.public_source, line.clone())
@@ -556,10 +611,24 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                 operation,
             )
             .await;
+            // Consume dialog state even when the outer deadline drops the race.
+            if open.service == ServiceKind::Pinentry
+                && matches!(cmd, "GETPIN" | "CONFIRM" | "MESSAGE")
+            {
+                settings.finish_dialog(cmd);
+            }
             let unknown = matches!(&outcome, Ok(Err(error)) if error.to_string().contains("execution result unknown"));
             let rejected = matches!(&outcome, Ok(Err(error)) if error.is::<hibiki_core::provider::PreparationRejected>());
             let result = match outcome {
                 Ok(Ok(result)) => result,
+                Err(_) if !query_failures.is_empty() => {
+                    if let Some(pool) = &pool {
+                        pool.cancel_prompts();
+                    }
+                    // A definitive public-query error is a normal Assuan result,
+                    // not a broken session or a generic transport timeout.
+                    query_failures.take_first().unwrap().1
+                }
                 _ => {
                     if let Some(pool) = &pool {
                         // The command deadline also ends its acquisition UI, even
@@ -603,6 +672,144 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
 #[cfg(test)]
 mod card_state_tests {
     use super::*;
+    fn settings(lines: &[&str]) -> Settings {
+        let mut settings = Settings::default();
+        for line in lines {
+            let (command, args) = assuan::command(line.as_bytes()).unwrap();
+            let key = if command == "OPTION" {
+                format!("OPTION {}", args.split('=').next().unwrap())
+            } else {
+                command.to_owned()
+            };
+            settings.insert(key, (*line).into());
+        }
+        settings
+    }
+
+    #[test]
+    fn reset_preserves_native_process_options_but_clears_dialog_state() {
+        let persistent = [
+            "OPTION ttyname=/dev/tty",
+            "OPTION ttytype=xterm",
+            "OPTION display=:0",
+            "OPTION lc-ctype=en_US.UTF-8",
+            "OPTION lc-messages=en_US.UTF-8",
+            "OPTION owner=1/1 host",
+            "OPTION grab",
+            "OPTION no-grab",
+            "OPTION default-ok=Proceed",
+            "OPTION default-cancel=Cancel",
+            "OPTION default-prompt=PIN",
+            "OPTION default-pwmngr=Save",
+            "OPTION default-cf-visi=Show",
+            "OPTION default-tt-visi=Show",
+            "OPTION default-tt-hide=Hide",
+            "OPTION default-capshint=Caps",
+            "OPTION constraints-enforce",
+            "OPTION constraints-hint-short=Short",
+            "OPTION constraints-hint-long=Long",
+            "OPTION constraints-error-title=Error",
+            "OPTION invisible-char=*",
+            "SETTIMEOUT 12",
+        ];
+        let temporary = [
+            "SETDESC Description",
+            "SETPROMPT Prompt",
+            "SETTITLE Title",
+            "SETOK OK",
+            "SETCANCEL Cancel",
+            "SETNOTOK No",
+            "SETERROR Error",
+            "SETREPEAT Again",
+            "SETREPEATERROR Mismatch",
+            "SETREPEATOK Match",
+            "SETQUALITYBAR Quality",
+            "SETQUALITYBAR_TT Hint",
+            "SETGENPIN Generate",
+            "SETGENPIN_TT Random",
+            "SETKEYINFO key",
+            "OPTION formatted-passphrase",
+            "OPTION formatted-passphrase-hint=Format",
+            "OPTION default-title=Title",
+            "OPTION default-tt-save=Save",
+        ];
+        let mut settings = settings(&[persistent.as_slice(), temporary.as_slice()].concat());
+        settings.reset();
+        let actual: Vec<_> = settings.values().map(|line| &**line).collect();
+        assert_eq!(actual, persistent.map(str::as_bytes));
+    }
+
+    #[test]
+    fn dialogs_consume_only_their_native_one_shot_settings() {
+        let mut settings = settings(&[
+            "SETERROR Retry",
+            "SETREPEAT Again",
+            "SETQUALITYBAR Quality",
+            "SETQUALITYBAR_TT Hint",
+            "SETREPEATERROR Mismatch",
+            "SETREPEATOK Match",
+            "SETDESC Description",
+        ]);
+        for command in ["CONFIRM", "MESSAGE"] {
+            let mut copy = settings.clone();
+            copy.finish_dialog(command);
+            assert!(copy.0.iter().any(|(key, _)| key == "SETREPEAT"));
+            assert!(
+                !copy
+                    .0
+                    .iter()
+                    .any(|(key, _)| matches!(key.as_str(), "SETERROR" | "SETQUALITYBAR"))
+            );
+        }
+        settings.finish_dialog("GETPIN");
+        let keys: Vec<_> = settings.0.iter().map(|(key, _)| key.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "SETQUALITYBAR_TT",
+                "SETREPEATERROR",
+                "SETREPEATOK",
+                "SETDESC"
+            ]
+        );
+    }
+
+    #[test]
+    fn native_capability_query_reports_support_false_and_missing_values() {
+        for (args, code) in [
+            ("cmd_has_option SERIALNO all", None),
+            ("cmd_has_option\tSERIALNO\tall", None),
+            ("cmd_has_option", Some(128)),
+            ("cmd_has_option SERIALNO", Some(128)),
+            ("cmd_has_option SERIALNO unknown", Some(256)),
+            ("cmd_has_option UNKNOWN all", Some(256)),
+            ("cmd_has_option SERIALNO all extra", Some(256)),
+        ] {
+            let line = format!("GETINFO {args}");
+            assuan::validate_command(ServiceKind::Scdaemon, line.as_bytes()).unwrap();
+            let result = local_info(ServiceKind::Scdaemon, args, 1);
+            assert_eq!(
+                assuan::parse_response(result.lines.last().unwrap()).unwrap(),
+                code.map(Response::Err).unwrap_or(Response::Ok)
+            );
+        }
+    }
+
+    #[test]
+    fn failed_public_response_does_not_change_card_identity() {
+        let mut state = CardState {
+            serial: "original".into(),
+            ..CardState::default()
+        };
+        state.observe_serial(
+            "SERIALNO",
+            &AssuanResult {
+                lines: vec!["S SERIALNO other".into(), "ERR 17 No key".into()],
+            },
+        );
+        assert_eq!(state.serial, "original");
+    }
+
     #[tokio::test]
     async fn ignore_discards_partial_pin_and_does_not_become_an_assuan_result() {
         use hibiki_lib::protocol::SessionOutput;

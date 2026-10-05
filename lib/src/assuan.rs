@@ -11,6 +11,9 @@ pub const CANCELED: u32 = 99;
 pub const FULLY_CANCELED: u32 = 198;
 pub const GENERAL: u32 = 1;
 pub const NOT_SUPPORTED: u32 = 60;
+pub const UNKNOWN_OPTION: u32 = 174;
+pub const MISSING_VALUE: u32 = 128;
+pub const FALSE: u32 = 256;
 pub const NO_DATA: u32 = 58;
 pub const BUSY: u32 = 137;
 
@@ -275,7 +278,7 @@ pub fn validate_command(service: ServiceKind, line: &[u8]) -> Result<()> {
                         | "deny_admin"
                         | "active_apps"
                         | "all_active_apps"
-                ) || args.starts_with("cmd_has_option ")
+                ) || args.split_ascii_whitespace().next() == Some("cmd_has_option")
                     || args.starts_with("manufacturer ")
             }
             _ => false,

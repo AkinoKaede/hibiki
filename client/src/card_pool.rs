@@ -7,12 +7,12 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{
-    assuan::{AssuanResult, Line},
+    assuan::{self, AssuanResult, Line, Response},
     protocol::{CardPreparation, CardTarget, ServiceKind},
     random_id,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -26,6 +26,14 @@ struct Command {
     inquiries: Option<mpsc::Sender<Inquiry>>,
     reply: oneshot::Sender<Result<AssuanResult>>,
 }
+#[derive(Debug)]
+struct ServiceDisabled;
+impl std::fmt::Display for ServiceDisabled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("scdaemon disabled on candidate")
+    }
+}
+impl std::error::Error for ServiceDisabled {}
 #[derive(Clone)]
 struct Candidate {
     tx: mpsc::Sender<Command>,
@@ -35,6 +43,42 @@ struct Candidate {
 struct Target {
     generation: u64,
     card: Option<CardTarget>,
+}
+/// Kept by the caller across its command deadline so a waiting/offline peer
+/// cannot hide a definitive error already returned by another candidate.
+#[derive(Default)]
+pub(crate) struct QueryFailures(BTreeMap<String, AssuanResult>);
+impl QueryFailures {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn take_first(&mut self) -> Option<(String, AssuanResult)> {
+        self.0.pop_first()
+    }
+}
+
+fn retryable_query_result(result: &AssuanResult) -> bool {
+    let Some(Response::Err(code)) = result
+        .lines
+        .last()
+        .and_then(|line| assuan::parse_response(line).ok())
+    else {
+        return false;
+    };
+    // Compare libgpg-error codes without their source. Keep this list narrow:
+    // missing keys, invalid parameters and unsupported commands are final.
+    matches!(
+        code & 0xffff,
+        108 // CARD (also used by readers reporting no card)
+            | 109 // CARD_RESET
+            | 110 // CARD_REMOVED
+            | 112 // CARD_NOT_PRESENT
+            | 119 // NO_SCDAEMON
+            | 173 // LOCKED
+            | 32774 // EAGAIN
+            | 32787 // EBUSY
+            | 32848 // ENODEV
+    )
 }
 pub struct Pool {
     candidates: Arc<Mutex<BTreeMap<String, Candidate>>>,
@@ -155,51 +199,97 @@ impl Pool {
         .await?;
         rx.await?
     }
-    pub async fn query(&self, line: Line) -> Result<(String, AssuanResult)> {
+    pub async fn query(
+        &self,
+        line: Line,
+        failures: &mut QueryFailures,
+    ) -> Result<(String, AssuanResult)> {
         tokio::select! {
             biased;
             _ = self.rejected() => Err(hibiki_core::provider::PreparationRejected.into()),
-            result = self.query_candidates(line) => result,
+            result = self.query_candidates(line, failures) => result,
         }
     }
-    async fn query_candidates(&self, line: Line) -> Result<(String, AssuanResult)> {
+    async fn query_candidates(
+        &self,
+        line: Line,
+        failures: &mut QueryFailures,
+    ) -> Result<(String, AssuanResult)> {
+        let mut queries = tokio::task::JoinSet::new();
+        let mut running = HashSet::new();
+        let mut disabled = HashSet::new();
         loop {
-            let peers: Vec<_> = self.candidates.lock().unwrap().keys().cloned().collect();
-            let mut queries = tokio::task::JoinSet::new();
-            for peer in peers {
-                let tx = self.candidates.lock().unwrap()[&peer].tx.clone();
+            let peers: Vec<_> = self
+                .candidates
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(peer, candidate)| (peer.clone(), candidate.tx.clone()))
+                .collect();
+            for (peer, tx) in peers {
+                if failures.0.contains_key(&peer)
+                    || disabled.contains(&peer)
+                    || !running.insert(peer.clone())
+                {
+                    continue;
+                }
                 let line = line.clone();
                 queries.spawn(async move {
                     loop {
                         let (reply, rx) = oneshot::channel();
-                        tx.send(Command {
-                            line: line.clone(),
-                            preparation: None,
-                            operation: None,
-                            inquiries: None,
-                            reply,
-                        })
-                        .await?;
-                        // A candidate can reconnect while other cardless peers are
-                        // still waiting. Keep discovery alive for that candidate;
-                        // this retry path never carries private commands.
-                        if let Ok(Ok(result)) = rx.await
-                            && result.success()
-                        {
-                            return Ok::<_, anyhow::Error>((peer, result));
+                        let sent = tx
+                            .send(Command {
+                                line: line.clone(),
+                                preparation: None,
+                                operation: None,
+                                inquiries: None,
+                                reply,
+                            })
+                            .await;
+                        // Transport/card-availability failures can recover. A
+                        // definitive native ERR must not be retried indefinitely.
+                        // This path never carries private commands.
+                        if sent.is_ok() {
+                            match rx.await {
+                                Ok(Ok(result)) if !retryable_query_result(&result) => {
+                                    return (peer, Some(result));
+                                }
+                                Ok(Err(error)) if error.is::<ServiceDisabled>() => {
+                                    return (peer, None);
+                                }
+                                _ => {}
+                            }
                         }
                         tokio::time::sleep(Duration::from_millis(250)).await;
                     }
                 });
             }
-            while let Some(result) = queries.join_next().await {
-                if let Ok(Ok((peer, result))) = result
-                    && result.success()
-                {
-                    return Ok((peer, result));
-                }
+            if queries.is_empty()
+                && let Some(failure) = failures.take_first()
+            {
+                return Ok(failure);
             }
-            tokio::select! { _=self.stop.cancelled()=>bail!("card pool closed"), _=tokio::time::sleep(Duration::from_millis(250))=>{} }
+            if queries.is_empty() && !disabled.is_empty() {
+                bail!("no scdaemon providers");
+            }
+            tokio::select! {
+                biased;
+                _=self.stop.cancelled()=>bail!("card pool closed"),
+                completed=queries.join_next(), if !queries.is_empty()=>{
+                    let (peer, result) = completed.context("query task missing")??;
+                    running.remove(&peer);
+                    let Some(result) = result else {
+                        disabled.insert(peer);
+                        continue;
+                    };
+                    if result.success() || result.canceled() {
+                        return Ok((peer, result));
+                    }
+                    failures.0.insert(peer, result);
+                },
+                // Pick up candidates added while earlier peers are reconnecting.
+                _=tokio::time::sleep(Duration::from_millis(250))=>{},
+            }
         }
     }
     pub async fn ready(&self) -> Result<String> {
@@ -340,6 +430,24 @@ async fn candidate(
             };
             tokio::select! { _=stop.cancelled()=>{}, _=run=>{} }
             ep.close().await;
+        } else if matches!(result, Ok(None)) {
+            // A peer that explicitly disabled this service is different from
+            // an offline peer. Do not keep its queries queued until timeout.
+            state.send_replace((None, CardPreparation::Unavailable));
+            changed.notify_waiters();
+            let retry = tokio::time::sleep(Duration::from_secs(2));
+            tokio::pin!(retry);
+            loop {
+                tokio::select! {
+                    _=stop.cancelled()=>return,
+                    _=&mut retry=>break,
+                    command=commands.recv()=>{
+                        let Some(command) = command else { return; };
+                        let _ = command.reply.send(Err(ServiceDisabled.into()));
+                    },
+                }
+            }
+            continue;
         }
         state.send_replace((None, CardPreparation::Unavailable));
         changed.notify_waiters();
@@ -350,6 +458,232 @@ async fn candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn query_pool(peers: &[&str]) -> (Pool, Vec<mpsc::Receiver<Command>>) {
+        let (target, _) = watch::channel(Target {
+            generation: 0,
+            card: None,
+        });
+        let mut candidates = BTreeMap::new();
+        let mut receivers = Vec::new();
+        for peer in peers {
+            let (tx, rx) = mpsc::channel(8);
+            let (_, state) = watch::channel((None, CardPreparation::Unavailable));
+            candidates.insert((*peer).to_owned(), Candidate { tx, state });
+            receivers.push(rx);
+        }
+        (
+            Pool {
+                candidates: Arc::new(Mutex::new(candidates)),
+                target,
+                stop: CancellationToken::new(),
+                changed: Arc::new(tokio::sync::Notify::new()),
+            },
+            receivers,
+        )
+    }
+
+    #[test]
+    fn only_availability_errors_are_retried_regardless_of_source() {
+        for source in [0, 6 << 24] {
+            for code in [108, 109, 110, 112, 119, 173, 32774, 32787, 32848] {
+                assert!(retryable_query_result(&AssuanResult::error(
+                    source | code,
+                    "unavailable"
+                )));
+            }
+            for code in [1, 17, 27, 60, 99, 128, 137, 174, 198, 256, 280] {
+                assert!(!retryable_query_result(&AssuanResult::error(
+                    source | code,
+                    "final"
+                )));
+            }
+        }
+        assert!(!retryable_query_result(&AssuanResult::ok()));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn definitive_failures_finish_without_retry_and_preserve_the_first_peer_result() {
+        let (pool, mut receivers) = query_pool(&["a", "b"]);
+        let mut b = receivers.pop().unwrap();
+        let mut a = receivers.pop().unwrap();
+        let replies = tokio::spawn(async move {
+            let ca = a.recv().await.unwrap();
+            let cb = b.recv().await.unwrap();
+            cb.reply
+                .send(Ok(AssuanResult::error(27, "not found")))
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            ca.reply
+                .send(Ok(AssuanResult {
+                    lines: vec!["S TEST diagnostic".into(), "ERR 100663313 No key".into()],
+                }))
+                .unwrap();
+            (a, b)
+        });
+        let mut failures = QueryFailures::default();
+        let (peer, result) = tokio::time::timeout(
+            Duration::from_secs(1),
+            pool.query("READKEY OPENPGP.1".into(), &mut failures),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(peer, "a");
+        assert_eq!(&*result.lines[0], b"S TEST diagnostic");
+        assert_eq!(&*result.lines[1], b"ERR 100663313 No key");
+        let (mut a, mut b) = replies.await.unwrap();
+        assert!(a.try_recv().is_err());
+        assert!(b.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn slower_success_wins_over_a_definitive_failure() {
+        let (pool, mut receivers) = query_pool(&["a", "b"]);
+        let mut b = receivers.pop().unwrap();
+        let mut a = receivers.pop().unwrap();
+        let replies = tokio::spawn(async move {
+            a.recv()
+                .await
+                .unwrap()
+                .reply
+                .send(Ok(AssuanResult::error(17, "No key")))
+                .unwrap();
+            let command = b.recv().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            command.reply.send(Ok(AssuanResult::ok())).unwrap();
+            a
+        });
+        let (peer, result) = pool
+            .query("READKEY OPENPGP.1".into(), &mut QueryFailures::default())
+            .await
+            .unwrap();
+        assert_eq!(peer, "b");
+        assert!(result.success());
+        assert!(replies.await.unwrap().try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabled_candidate_does_not_mask_or_delay_a_native_error() {
+        let (pool, mut receivers) = query_pool(&["disabled", "native"]);
+        let mut native = receivers.pop().unwrap();
+        let mut disabled = receivers.pop().unwrap();
+        let replies = tokio::spawn(async move {
+            disabled
+                .recv()
+                .await
+                .unwrap()
+                .reply
+                .send(Err(ServiceDisabled.into()))
+                .unwrap();
+            native
+                .recv()
+                .await
+                .unwrap()
+                .reply
+                .send(Ok(AssuanResult::error(100663313, "No key")))
+                .unwrap();
+        });
+        let (peer, result) = tokio::time::timeout(
+            Duration::from_secs(1),
+            pool.query("READKEY OPENPGP.1".into(), &mut QueryFailures::default()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(peer, "native");
+        assert_eq!(&*result.lines[0], b"ERR 100663313 No key");
+        replies.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deadline_keeps_native_failure_while_an_offline_candidate_waits() {
+        let (pool, mut receivers) = query_pool(&["a", "offline"]);
+        let mut offline = receivers.pop().unwrap();
+        let mut a = receivers.pop().unwrap();
+        let replies = tokio::spawn(async move {
+            a.recv()
+                .await
+                .unwrap()
+                .reply
+                .send(Ok(AssuanResult::error(100663313, "No key")))
+                .unwrap();
+            // An offline candidate retains the queued command until it reconnects.
+            (a, offline.recv().await.unwrap())
+        });
+        let mut failures = QueryFailures::default();
+        let started = tokio::time::Instant::now();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                pool.query("READKEY OPENPGP.1".into(), &mut failures)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        assert_eq!(
+            &*failures.take_first().unwrap().1.lines[0],
+            b"ERR 100663313 No key"
+        );
+        let (mut a, _pending) = replies.await.unwrap();
+        assert!(a.try_recv().is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_and_card_availability_errors_can_recover() {
+        let (pool, mut receivers) = query_pool(&["a"]);
+        let mut a = receivers.pop().unwrap();
+        let replies = tokio::spawn(async move {
+            drop(a.recv().await.unwrap().reply);
+            a.recv()
+                .await
+                .unwrap()
+                .reply
+                .send(Ok(AssuanResult::error(100663408, "Card not present")))
+                .unwrap();
+            a.recv()
+                .await
+                .unwrap()
+                .reply
+                .send(Ok(AssuanResult::ok()))
+                .unwrap();
+        });
+        let (_, result) = pool
+            .query("SERIALNO".into(), &mut QueryFailures::default())
+            .await
+            .unwrap();
+        assert!(result.success());
+        replies.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn native_cancellation_takes_priority_over_saved_query_errors() {
+        let (pool, mut receivers) = query_pool(&["a", "b"]);
+        let mut b = receivers.pop().unwrap();
+        let mut a = receivers.pop().unwrap();
+        let replies = tokio::spawn(async move {
+            a.recv()
+                .await
+                .unwrap()
+                .reply
+                .send(Ok(AssuanResult::error(17, "No key")))
+                .unwrap();
+            let command = b.recv().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            command
+                .reply
+                .send(Ok(AssuanResult::error(100663395, "canceled")))
+                .unwrap();
+        });
+        let (peer, result) = pool
+            .query("READKEY OPENPGP.1".into(), &mut QueryFailures::default())
+            .await
+            .unwrap();
+        assert_eq!(peer, "b");
+        assert_eq!(&*result.lines[0], b"ERR 100663395 canceled");
+        replies.await.unwrap();
+    }
 
     #[tokio::test]
     async fn explicit_rejection_wins_over_ready_candidates_and_reset_invalidates_it() {
@@ -387,7 +721,7 @@ mod tests {
                 .is::<hibiki_core::provider::PreparationRejected>()
         );
         assert!(
-            pool.query("SERIALNO".into())
+            pool.query("SERIALNO".into(), &mut QueryFailures::default())
                 .await
                 .unwrap_err()
                 .is::<hibiki_core::provider::PreparationRejected>()
