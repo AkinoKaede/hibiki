@@ -45,6 +45,16 @@ struct HibikiApp: App {
                 model.prompts[0].description = "Allow this operation?"
             }
             if CommandLine.arguments.contains("--ui-message") { model.prompts[0].kind = .message }
+            if CommandLine.arguments.contains("--ui-operation-notification") {
+                let core = InvitationFixtureClient(noHandle: .init())
+                core.fixtureTokens = ["ui-pin", "ui-selected-pin"]
+                model.client = core
+                var selected = model.prompts[0]
+                selected.token = "ui-selected-pin"
+                selected.title = "Selected Notification Request"
+                model.prompts.append(selected)
+                model.receiveNotification(.operation(CommandLine.arguments.contains("--ui-expired-notification") ? "expired" : selected.token))
+            }
             return model
         }
         if CommandLine.arguments.contains("--ui-members-fixture") {
@@ -69,6 +79,11 @@ struct HibikiApp: App {
             if CommandLine.arguments.contains("--ui-invitations-fixture") {
                 let client = InvitationFixtureClient(noHandle: .init())
                 client.fixtureChannels = model.channels
+                if CommandLine.arguments.contains("--ui-join-notification") {
+                    client.fixturePending = [PendingInfo(id: "notification-request-id", channel: model.channels[0].id, device: remote)]
+                    if CommandLine.arguments.contains("--ui-expired-notification") { client.fixturePending = [] }
+                    model.receiveNotification(.join(channel: model.channels[0].id, request: "notification-request-id"))
+                }
                 client.creationAllowed = !CommandLine.arguments.contains("--ui-creation-denied")
                 client.approveOnRefresh = CommandLine.arguments.contains("--ui-approve-pending")
                 model.client = client
@@ -89,6 +104,9 @@ private final class InvitationFixtureClient: MobileClient, @unchecked Sendable {
     var creationAllowed = true
     var approveOnRefresh = false
     var fixtureChannels: [ChannelInfo] = []
+    var fixturePending: [PendingInfo] = []
+    var fixtureTokens: Set<String> = []
+    override func requestIsPending(token: String) -> Bool { fixtureTokens.contains(token) }
     private var refreshCount = 0
     private var withdrawn = false
     override func allowsChannelCreation() async throws -> Bool { creationAllowed }
@@ -108,7 +126,7 @@ private final class InvitationFixtureClient: MobileClient, @unchecked Sendable {
     override func withdrawJoin(channel: String, requestId: String) async throws {
         lock.withLock { withdrawn = true }
     }
-    override func pending(channel: String) async throws -> [PendingInfo] { [] }
+    override func pending(channel: String) async throws -> [PendingInfo] { fixturePending.filter { $0.channel == channel } }
     override func nfcCard() -> CardInfo? { nil }
     override func createChannel(name: String) async throws -> Invitation {
         guard creationAllowed else { throw MobileError.Failed(message: "Channel creation disabled") }

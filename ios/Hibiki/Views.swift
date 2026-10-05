@@ -11,11 +11,24 @@ struct RootView: View {
     var body: some View {
         Group {
             if model.initialized {
-                TabView {
-                    NavigationStack { StatusView(model: model) }.tabItem { Label("Status", systemImage: "waveform") }
-                    NavigationStack { ChannelsView(model: model) }.tabItem { Label("Channels", systemImage: "person.2") }
-                    NavigationStack { CardView(model: model) }.tabItem { Label("Security Keys", systemImage: "key.horizontal") }
-                    NavigationStack { SettingsView(model: model) }.tabItem { Label("Settings", systemImage: "gearshape") }
+                TabView(selection: $model.selectedTab) {
+                    NavigationStack { StatusView(model: model) }.tabItem { Label("Status", systemImage: "waveform") }.tag("status")
+                    NavigationStack(path: $model.channelPath) {
+                        ChannelsView(model: model)
+                            .navigationDestination(for: ChannelRoute.self) { route in
+                                switch route {
+                                case .channel(let id): ChannelView(channelID: id, model: model)
+                                case .approval(let channel, let id):
+                                    if let request = model.pendingJoins[channel]?.first(where: { $0.id == id }) {
+                                        ApprovalView(request: request, model: model)
+                                    } else {
+                                        ContentUnavailableView("Request Unavailable", systemImage: "clock.badge.xmark", description: Text("This request is no longer pending."))
+                                    }
+                                }
+                            }
+                    }.tabItem { Label("Channels", systemImage: "person.2") }.tag("channels")
+                    NavigationStack { CardView(model: model) }.tabItem { Label("Security Keys", systemImage: "key.horizontal") }.tag("cards")
+                    NavigationStack { SettingsView(model: model) }.tabItem { Label("Settings", systemImage: "gearshape") }.tag("settings")
                 }
             } else { NavigationStack { SetupView(model: model) } }
         }
@@ -28,9 +41,8 @@ struct RootView: View {
             }
         }
         .tint(.indigo)
-        .sheet(item: Binding(get: { model.currentPrompt }, set: { value in
-            if value == nil, let prompt = model.currentPrompt { model.cancelPrompt(prompt) }
-        })) { prompt in
+        // Buttons explicitly answer/cancel. A lifecycle-driven dismissal must not cancel.
+        .sheet(item: Binding(get: { model.currentPrompt }, set: { _ in })) { prompt in
             PinView(prompt: prompt, model: model).id(prompt.token).interactiveDismissDisabled()
         }
         .alert("Unable to Complete", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
@@ -72,6 +84,9 @@ struct StatusView: View {
     @Bindable var model: AppModel
     var body: some View {
         List {
+            if case .operation = model.unavailableNotification {
+                UnavailableNotificationSection(model: model)
+            }
             Section {
                 HStack(spacing: 16) {
                     Image(systemName: model.connection == "online" ? "checkmark.shield.fill" : "network.slash").font(.largeTitle).foregroundStyle(model.connection == "online" ? .green : .secondary)
@@ -97,6 +112,17 @@ struct StatusView: View {
                 PendingJoinSection(pairing: pairing, model: model)
             }
         }.navigationTitle("Hibiki").refreshable { await model.refresh() }
+    }
+}
+
+struct UnavailableNotificationSection: View {
+    @Bindable var model: AppModel
+    var body: some View {
+        Section("Request Unavailable") {
+            Label("This request is no longer pending.", systemImage: "clock.badge.xmark")
+            Button("OK") { model.unavailableNotification = nil }
+                .accessibilityIdentifier("dismissUnavailableNotice")
+        }
     }
 }
 
@@ -371,7 +397,7 @@ struct ChannelView: View {
     @ScaledMetric private var deviceIconWidth = 28.0
     let channelID: String
     @Bindable var model: AppModel
-    @State private var pending: [PendingInfo] = []
+    private var pending: [PendingInfo] { model.pendingJoins[channelID] ?? [] }
     @State private var invitation: Invitation?
     @State private var sharing = false
     @State private var leaving = false
@@ -383,6 +409,9 @@ struct ChannelView: View {
     var body: some View {
         let iconWidth = deviceIconWidth
         List {
+            if case .join(let channel, _) = model.unavailableNotification, channel == channelID {
+                UnavailableNotificationSection(model: model)
+            }
             if let pairing {
                 PendingJoinSection(pairing: pairing, model: model)
             } else if channel?.active != true {
@@ -460,7 +489,6 @@ struct ChannelView: View {
     }
     private func load() async {
         await model.refresh()
-        if channel?.active == true { do { pending = try await model.client?.pending(channel: channelID) ?? [] } catch { model.show(error) } }
     }
 }
 
@@ -667,8 +695,17 @@ struct SettingsView: View {
                 Button("Disconnect", role: .destructive) { confirmDisconnect = true }
                     .disabled(model.busy).accessibilityIdentifier("disconnectServer")
             }
+            Section {
+                LabeledContent("Notifications", value: model.notificationAuthorization.label)
+                Button("Open Notification Settings") {
+                    if let url = URL(string: UIApplication.openNotificationSettingsURLString) { UIApplication.shared.open(url) }
+                }
+            } header: { Text("Background Requests") } footer: {
+                Text("Hibiki keeps the connection while iOS allows background execution. Notifications require permission and cannot arrive after the app is suspended.")
+            }
             Section("About") { LabeledContent("Hibiki", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") }
         }.navigationTitle("Settings")
+        .task { await model.refreshNotificationAuthorization() }
         .alert("Rename This Device", isPresented: $renaming) {
             TextField("Device Name", text: $newName)
             Button("Cancel", role: .cancel) {}
@@ -752,6 +789,9 @@ struct PinView: View {
             }
             .onAppear { focused = asksPin }
             .onDisappear { pin = "" }
+            .onChange(of: model.foreground) { _, active in
+                if !active { pin = ""; focused = false }
+            }
             .privacySensitive()
         }
     }

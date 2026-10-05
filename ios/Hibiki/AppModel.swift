@@ -2,6 +2,11 @@ import DeviceKit
 import SwiftUI
 import Observation
 
+enum ChannelRoute: Hashable {
+    case channel(String)
+    case approval(channel: String, request: String)
+}
+
 @MainActor @Observable
 final class AppModel {
     var client: MobileClient?
@@ -13,6 +18,7 @@ final class AppModel {
     @ObservationIgnored private var nfcReadCancellation: CardReadCancellation?
     var connection = "offline"
     var error: String?
+    var unavailableNotification: RequestNoticeTarget?
     var busy = false
     var prompts: [PinPrompt] = []
     var usbPresent = false
@@ -26,17 +32,36 @@ final class AppModel {
     var initialized = false
     var pairing: JoinInfo?
     var allowChannelCreation: Bool?
-    private let hardware = CardHardware()
+    private let hardware: any CardHardwareAccess
     private var eventTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
     private var nativeTasks: [String: Task<Void, Never>] = [:]
     private var lifecycleTask: Task<Void, Never>?
     private var disconnecting = false
+    @ObservationIgnored private let backgroundRuntime: BackgroundRuntime
+    @ObservationIgnored private let notifications: RequestNotifications
+    private var backgroundIdentifier: Int?
+    private var lifecycleGeneration = 0
+    private var backgroundExpired = false
+    private var hardwareReady = true
+    private var deferredCardOpens: [String: NativeEvent] = [:]
+    private var notifiedOperations: Set<String> = []
+    private var seenJoins: [String: Set<String>] = [:]
+    private var requestRefreshGeneration = 0
+    private var pendingNotification: RequestNoticeTarget?
+    private var notificationRouteGeneration = 0
+    private(set) var notificationAuthorization: NoticeAuthorization = .notDetermined
+    private(set) var pendingJoins: [String: [PendingInfo]] = [:]
+    var selectedTab = "status"
+    var channelPath: [ChannelRoute] = []
 
     private let defaults: UserDefaults
     private let resetRelayStorage: () throws -> Void
 
-    init(defaults: UserDefaults = .standard, resetRelayStorage: @escaping () throws -> Void = SecureStorage.resetRelay, nfcCapability: @escaping () -> Bool = { CardHardware.nfcReadingAvailable }) {
+    init(defaults: UserDefaults = .standard, resetRelayStorage: @escaping () throws -> Void = SecureStorage.resetRelay, nfcCapability: @escaping () -> Bool = { CardHardware.nfcReadingAvailable }, backgroundRuntime: BackgroundRuntime? = nil, notifications: RequestNotifications? = nil, hardware: any CardHardwareAccess = CardHardware()) {
+        self.hardware = hardware
+        self.backgroundRuntime = backgroundRuntime ?? SystemBackgroundRuntime()
+        self.notifications = notifications ?? SystemRequestNotifications()
         self.readNFCCapability = nfcCapability
         self.nfcAvailable = nfcCapability()
         self.defaults = defaults
@@ -49,6 +74,7 @@ final class AppModel {
         if let channel = defaults.string(forKey: "pairingChannel"), let request = defaults.string(forKey: "pairingRequest") {
             pairing = JoinInfo(verification: defaults.string(forKey: "pairingVerification") ?? "", channel: channel, request: request)
         }
+        self.notifications.onOpen = { [weak self] target in self?.receiveNotification(target) }
     }
 
     nonisolated static func serverURLs(from input: String) throws -> [String] {
@@ -93,7 +119,10 @@ final class AppModel {
         throw NSError(domain: "Hibiki.ServerConnection", code: 1, userInfo: [NSLocalizedDescriptionKey: failures.joined(separator: "\n\n")])
     }
 
-    var currentPrompt: PinPrompt? { prompts.first }
+    var currentPrompt: PinPrompt? {
+        guard foreground, unavailableNotification == nil, selectedTab != "channels" || channelPath.isEmpty else { return nil }
+        return prompts.first
+    }
     func refreshHardwareCapabilities() {
         nfcAvailable = readNFCCapability()
         cardInspection.setNFCAvailable(nfcAvailable)
@@ -184,6 +213,18 @@ final class AppModel {
             defaults.removeObject(forKey: key)
         }
         let core = client
+        lifecycleGeneration += 1
+        endBackgroundRuntime()
+        core?.requestStop()
+        notifications.clearAll()
+        notifiedOperations.removeAll()
+        pendingNotification = nil
+        unavailableNotification = nil
+        notificationRouteGeneration += 1
+        pendingJoins.removeAll()
+        seenJoins.removeAll()
+        channelPath.removeAll()
+        requestRefreshGeneration += 1
         client = nil
         core?.setServices(pinentry: false, card: false)
         eventTask?.cancel(); eventTask = nil
@@ -211,6 +252,15 @@ final class AppModel {
     }
     private func configure(identity: Data) throws {
         let core = try MobileClient(directory: SecureStorage.directory().path, server: server, identity: identity, skipTlsCertificateValidation: skipTLSCertificateValidation)
+        lifecycleGeneration += 1
+        endBackgroundRuntime()
+        notifications.clearAll()
+        notifiedOperations.removeAll()
+        deferredCardOpens.removeAll()
+        prompts.removeAll()
+        pendingJoins.removeAll()
+        seenJoins.removeAll()
+        requestRefreshGeneration += 1
         client = core
         device = try core.device()
         refreshHardwareCapabilities()
@@ -254,65 +304,272 @@ final class AppModel {
     #endif
 
     func sceneChanged(_ phase: ScenePhase) {
-        // NFC and system sheets can make the scene inactive without backgrounding it.
+        // NFC and permission sheets can make the scene inactive without backgrounding it.
         guard phase != .inactive else { return }
+        let wasForeground = foreground
         foreground = phase == .active
-        if foreground { refreshHardwareCapabilities() }
-        else { cardInspection.setActive(false); nfcReadCancellation?.cancel() }
-        guard !disconnecting else { return }
+        guard wasForeground != foreground, !disconnecting else { return }
+        lifecycleGeneration += 1
+        let generation = lifecycleGeneration
+        if foreground {
+            endBackgroundRuntime()
+            refreshHardwareCapabilities()
+            notifications.clearOperations()
+        } else {
+            backgroundExpired = false
+            pauseHardware()
+            if let core = client {
+                backgroundIdentifier = backgroundRuntime.begin { [weak self, weak core] in
+                    guard let self, let core else { return }
+                    self.expireBackground(generation: generation, core: core)
+                }
+                if backgroundExpired { endBackgroundRuntime() }
+                else if backgroundIdentifier == nil { expireBackground(generation: generation, core: core) }
+                if !backgroundExpired {
+                    for prompt in prompts where core.requestIsPending(token: prompt.token) {
+                        notifyOperation(prompt.token, kind: RequestNoticeKind(prompt))
+                    }
+                    for token in deferredCardOpens.keys where core.requestIsPending(token: token) {
+                        notifyOperation(token, kind: .card)
+                    }
+                }
+            }
+        }
         let previous = lifecycleTask
         lifecycleTask = Task {
             await previous?.value
-            if phase == .background { await deactivate() }
-            else if foreground { await activate() }
+            // Always finish releasing old readers before a later activation can open one.
+            if phase == .background { await hardware.closeAll() }
+            guard generation == lifecycleGeneration, !disconnecting else { return }
+            if foreground { await activateConnection() }
+            else if !backgroundExpired { startPolling() }
         }
     }
+
+    private func endBackgroundRuntime() {
+        if let identifier = backgroundIdentifier {
+            backgroundIdentifier = nil
+            backgroundRuntime.end(identifier)
+        }
+    }
+
+    private func expireBackground(generation: Int, core: MobileClient) {
+        guard generation == lifecycleGeneration, !foreground, client === core, !backgroundExpired else { return }
+        backgroundExpired = true
+        // No await here: iOS may suspend us as soon as this handler returns.
+        core.requestStop()
+        pollingTask?.cancel(); pollingTask = nil
+        requestRefreshGeneration += 1
+        pauseHardware()
+        prompts.removeAll()
+        deferredCardOpens.removeAll()
+        notifiedOperations.removeAll()
+        notifications.clearOperations()
+        connection = "offline"
+        allowChannelCreation = nil
+        endBackgroundRuntime()
+        let previous = lifecycleTask
+        lifecycleTask = Task {
+            await previous?.value
+            await hardware.closeAll()
+            await core.stop()
+        }
+    }
+
+    private func pauseHardware() {
+        hardwareReady = false
+        cardInspection.setActive(false)
+        nfcReadCancellation?.cancel()
+        for (token, task) in nativeTasks {
+            try? client?.failNativeRequest(token: token, message: "App entered background", canceled: true)
+            task.cancel()
+        }
+        nativeTasks.removeAll()
+    }
+
     func activate() async {
-        guard foreground, !disconnecting, let client else { return }
-        do { try await client.start() } catch { show(error) }
-        guard foreground, !disconnecting, self.client === client else { return }
+        let previous = lifecycleTask
+        let generation = lifecycleGeneration
+        let activation = Task {
+            await previous?.value
+            guard generation == lifecycleGeneration else { return }
+            await activateConnection()
+        }
+        lifecycleTask = activation
+        await activation.value
+    }
+
+    private func activateConnection() async {
+        guard foreground, !disconnecting, let core = client else { return }
+        backgroundExpired = false
+        do { try await core.start() } catch { show(error) }
+        guard foreground, !disconnecting, client === core else {
+            if backgroundExpired || disconnecting || client !== core { core.requestStop() }
+            return
+        }
+        hardwareReady = true
         cardInspection.setActive(true)
+        prompts.removeAll { !core.requestIsPending(token: $0.token) }
+        notifiedOperations = notifiedOperations.filter { core.requestIsPending(token: $0) }
+        notifications.clearOperations()
+        await openPendingNotification()
+        guard foreground, client === core else { return }
+        let deferred = deferredCardOpens
+        deferredCardOpens.removeAll()
+        for (token, event) in deferred where core.requestIsPending(token: token) { handle(event, core: core) }
+        startPolling()
+        Task { await refreshNotificationAuthorization() }
+    }
+
+    private func startPolling() {
         pollingTask?.cancel()
+        guard let core = client else { return }
         pollingTask = Task {
-            while !Task.isCancelled {
-                await refreshUSBAvailability()
-                await refresh()
+            while !Task.isCancelled, client === core, foreground || !backgroundExpired {
+                if foreground {
+                    await refreshUSBAvailability()
+                    await refresh()
+                } else {
+                    await refreshPendingRequests()
+                }
                 try? await Task.sleep(for: .seconds(3))
             }
         }
     }
+
     func refreshUSBAvailability() async {
-        guard let client else { return }
+        guard foreground, hardwareReady, let client else { return }
         let present = await hardware.usbAvailable()
-        guard self.client === client, !Task.isCancelled else { return }
+        guard foreground, self.client === client, !Task.isCancelled else { return }
         usbPresent = present
         cardInspection.usbChanged(present)
         client.usbPresent(present: present)
     }
     func deactivate() async {
-        cardInspection.setActive(false)
+        endBackgroundRuntime()
         pollingTask?.cancel(); pollingTask = nil
+        requestRefreshGeneration += 1
+        pauseHardware()
         prompts.removeAll()
-        nativeTasks.values.forEach { $0.cancel() }; nativeTasks.removeAll()
+        deferredCardOpens.removeAll()
+        notifiedOperations.removeAll()
+        notifications.clearOperations()
         await hardware.closeAll()
         await client?.stop()
         connection = "offline"
         allowChannelCreation = nil
+    }
+
+    func refreshNotificationAuthorization() async {
+        guard foreground else { return }
+        notificationAuthorization = await notifications.authorization(requestIfNeeded: initialized && connection == "online")
+    }
+
+    private func notifyOperation(_ token: String, kind: RequestNoticeKind) {
+        guard !foreground, !backgroundExpired, notifiedOperations.insert(token).inserted else { return }
+        notifications.send(.operation(token), kind: kind)
+    }
+
+    func refreshPendingRequests(channels snapshot: [ChannelInfo]? = nil) async {
+        guard let core = client, connection == "online", foreground || !backgroundExpired else { return }
+        requestRefreshGeneration += 1
+        let generation = requestRefreshGeneration
+        do {
+            let channels: [ChannelInfo]
+            if let snapshot { channels = snapshot }
+            else { channels = try await core.channels() }
+            guard canApplyRequests(core, generation: generation) else { return }
+            let active = Set(channels.filter(\.active).map(\.id))
+            for channel in Array(pendingJoins.keys) where !active.contains(channel) {
+                for request in pendingJoins.removeValue(forKey: channel) ?? [] {
+                    notifications.remove(.join(channel: channel, request: request.id))
+                }
+                seenJoins[channel] = nil
+            }
+            for channel in channels where channel.active {
+                do {
+                    let requests = try await core.pending(channel: channel.id)
+                    guard canApplyRequests(core, generation: generation) else { return }
+                    let ids = Set(requests.map(\.id))
+                    let old = seenJoins[channel.id] ?? []
+                    for removed in old.subtracting(ids) { notifications.remove(.join(channel: channel.id, request: removed)) }
+                    if !foreground {
+                        for request in requests where !old.contains(request.id) {
+                            notifications.send(.join(channel: channel.id, request: request.id), kind: .join)
+                        }
+                    }
+                    seenJoins[channel.id] = ids
+                    pendingJoins[channel.id] = requests
+                } catch { /* A failed query must not erase a successful snapshot. */ }
+            }
+        } catch { /* Retry transient relay failures on the next poll. */ }
+    }
+
+    private func canApplyRequests(_ core: MobileClient, generation: Int) -> Bool {
+        client === core && !Task.isCancelled && generation == requestRefreshGeneration && connection == "online" && (foreground || !backgroundExpired)
+    }
+
+    func receiveNotification(_ target: RequestNoticeTarget) {
+        unavailableNotification = nil
+        notificationRouteGeneration += 1
+        pendingNotification = target
+        Task { await openPendingNotification() }
+    }
+
+    func openPendingNotification() async {
+        guard foreground, let target = pendingNotification, let core = client else { return }
+        if case .join(let channel, _) = target {
+            selectedTab = "channels"
+            channelPath = [.channel(channel)]
+            if connection != "online" { return }
+        }
+        let routeGeneration = notificationRouteGeneration
+        pendingNotification = nil
+        notifications.remove(target)
+        switch target {
+        case .operation(let token):
+            selectedTab = "status"
+            guard core.requestIsPending(token: token) else {
+                unavailableNotification = target
+                return
+            }
+            if let index = prompts.firstIndex(where: { $0.token == token }) {
+                let prompt = prompts.remove(at: index)
+                prompts.insert(prompt, at: 0)
+            }
+        case .join(let channel, let request):
+            selectedTab = "channels"
+            channelPath = [.channel(channel)]
+            do {
+                let requests = try await core.pending(channel: channel)
+                guard client === core, routeGeneration == notificationRouteGeneration else { return }
+                guard foreground else { pendingNotification = target; return }
+                requestRefreshGeneration += 1
+                pendingJoins[channel] = requests
+                if requests.contains(where: { $0.id == request }) {
+                    channelPath.append(.approval(channel: channel, request: request))
+                } else { unavailableNotification = target }
+            } catch {
+                guard client === core, routeGeneration == notificationRouteGeneration else { return }
+                guard foreground else { pendingNotification = target; return }
+                show(error)
+            }
+        }
     }
     func refresh() async {
         guard let client, foreground else { return }
         recordedNFCCard = client.nfcCard()
         do {
             let channels = try await client.channels()
-            guard self.client === client, !Task.isCancelled else { return }
+            guard foreground, self.client === client, !Task.isCancelled else { return }
             self.channels = channels
             if connection == "online" {
                 let allowed = try await client.allowsChannelCreation()
-                guard self.client === client, !Task.isCancelled, connection == "online" else { return }
+                guard foreground, self.client === client, !Task.isCancelled, connection == "online" else { return }
                 allowChannelCreation = allowed
                 if let pairing, !busy {
                     let state = try await client.pairingStatus(channel: pairing.channel, requestId: pairing.request)
-                    guard self.client === client, !Task.isCancelled, !busy, self.pairing?.request == pairing.request else { return }
+                    guard foreground, self.client === client, !Task.isCancelled, !busy, self.pairing?.request == pairing.request else { return }
                     switch state {
                     case .member: rememberPairing(nil)
                     case .absent:
@@ -322,6 +579,7 @@ final class AppModel {
                     }
                 }
             }
+            await refreshPendingRequests(channels: channels)
         } catch { /* The connection state communicates transient relay failures. */ }
     }
     func rememberPairing(_ value: JoinInfo?) {
@@ -346,7 +604,7 @@ final class AppModel {
         defaults.set(cardEnabled, forKey: "cardEnabled")
     }
     func recordNFCCard() async {
-        guard !busy, foreground, let client else { return }
+        guard !busy, foreground, hardwareReady, let client else { return }
         busy = true
         let cancellation = CardReadCancellation()
         nfcReadCancellation = cancellation
@@ -366,7 +624,7 @@ final class AppModel {
         recordedNFCCard = nil
     }
     func continueCardInsertion(_ prompt: PinPrompt) async throws {
-        guard !busy, foreground, let client else { throw CancellationError() }
+        guard !busy, foreground, hardwareReady, let client else { throw CancellationError() }
         busy = true
         let cancellation = CardReadCancellation()
         nfcReadCancellation = cancellation
@@ -383,8 +641,8 @@ final class AppModel {
     }
     func showCardInspection() {
         refreshHardwareCapabilities()
-        cardInspection.appear(usbPresent: usbPresent, active: foreground) { [weak self] transport in
-            guard let core = self?.client else { throw CancellationError() }
+        cardInspection.appear(usbPresent: usbPresent, active: foreground && hardwareReady) { [weak self] transport in
+            guard let self, self.foreground, self.hardwareReady, let core = self.client else { throw CancellationError() }
             let cancellation = CardReadCancellation()
             return try await withTaskCancellationHandler {
                 try Task.checkCancellation()
@@ -393,44 +651,75 @@ final class AppModel {
         }
     }
     func answer(_ prompt: PinPrompt, text: String = "", accepted: Bool) {
-        defer { prompts.removeAll { $0.token == prompt.token } }
-        guard let client else { return }
+        guard foreground, let client else { return }
+        defer {
+            prompts.removeAll { $0.token == prompt.token }
+            notifiedOperations.remove(prompt.token)
+            notifications.remove(.operation(prompt.token))
+        }
         do { try client.respond(token: prompt.token, data: Data(text.utf8), accepted: accepted) }
         catch { if client.requestIsPending(token: prompt.token) { show(error) } }
     }
     func cancelPrompt(_ prompt: PinPrompt) {
-        defer { prompts.removeAll { $0.token == prompt.token } }
-        guard let client else { return }
+        guard foreground, let client else { return }
+        defer {
+            prompts.removeAll { $0.token == prompt.token }
+            notifiedOperations.remove(prompt.token)
+            notifications.remove(.operation(prompt.token))
+        }
         do { try client.cancelRequest(token: prompt.token) }
         catch { if client.requestIsPending(token: prompt.token) { show(error) } }
     }
-    private func handle(_ event: NativeEvent, core: MobileClient) {
+    func handle(_ event: NativeEvent, core: MobileClient) {
+        guard client === core else { return }
         switch event {
         case .connection(let state):
+            guard foreground || !backgroundExpired else { return }
             connection = state
             if state != "online" { allowChannelCreation = nil }
+            else if foreground {
+                Task {
+                    await refreshNotificationAuthorization()
+                    await openPendingNotification()
+                }
+            }
         case .prompt(let prompt):
-            guard foreground, core.requestIsPending(token: prompt.token) else { return }
+            guard !backgroundExpired, core.requestIsPending(token: prompt.token), !prompts.contains(where: { $0.token == prompt.token }) else { return }
             prompts.append(prompt)
+            notifyOperation(prompt.token, kind: RequestNoticeKind(prompt))
         case .cancelled(let token):
             prompts.removeAll { $0.token == token }
+            deferredCardOpens[token] = nil
+            notifiedOperations.remove(token)
+            notifications.remove(.operation(token))
             nativeTasks.removeValue(forKey: token)?.cancel()
             Task { await hardware.cancel(token: token) }
         case .cardChanged: recordedNFCCard = core.nfcCard()
         case .cardClose(let id): Task { await hardware.close(id: id) }
         case .cardOpen(let token, let id, let transport):
+            guard !backgroundExpired, core.requestIsPending(token: token) else { return }
+            if !foreground || !hardwareReady {
+                deferredCardOpens[token] = event
+                notifyOperation(token, kind: .card)
+                return
+            }
             native(token: token, core: core) { try await self.hardware.open(id: id, token: token, transport: transport); return Data() }
         case .cardTransmit(let token, let id, let command):
+            guard foreground, hardwareReady else {
+                try? core.failNativeRequest(token: token, message: "App entered background", canceled: true)
+                return
+            }
             native(token: token, core: core) { try await self.hardware.transmit(id: id, token: token, command: command) }
         }
     }
     private func native(token: String, core: MobileClient, operation: @escaping () async throws -> Data) {
-        guard foreground, core.requestIsPending(token: token) else { return }
+        guard foreground, hardwareReady, core.requestIsPending(token: token) else { return }
         nativeTasks[token] = Task {
             defer { nativeTasks[token] = nil }
             do {
+                guard !Task.isCancelled, foreground, hardwareReady, client === core, core.requestIsPending(token: token) else { return }
                 let response = try await operation()
-                guard !Task.isCancelled, foreground, core.requestIsPending(token: token) else { return }
+                guard !Task.isCancelled, foreground, hardwareReady, core.requestIsPending(token: token) else { return }
                 try core.respond(token: token, data: response, accepted: true)
             } catch {
                 if core.requestIsPending(token: token) {

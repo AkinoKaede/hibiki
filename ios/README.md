@@ -293,11 +293,37 @@ remains the requesting agent's responsibility; Hibiki does not report `PIN_REPEA
 
 ## Lifecycle and storage
 
-Only the foreground app receives requests. Backgrounding disconnects the server,
-cancels prompts and native requests, and releases card connections. The temporary
-inactive state caused by the NFC sheet does not disconnect. Returning reconnects
-and accepts still-pending requests. Completed, canceled, expired, and previously
-executed requests are not replayed. There is no APNs integration or claimed background service.
+Backgrounding requests a finite iOS background execution allowance. While it lasts,
+the existing connection, reconnection loop, incoming requests, and three-second
+join-application checks continue. iOS chooses the allowance and may refuse it;
+there is no guaranteed duration. Expiration synchronously cancels the connection
+and outstanding requests. Returning to the foreground reconnects automatically.
+The temporary inactive state caused by NFC or permission sheets does not disconnect.
+There is no APNs integration: a suspended or terminated app cannot receive new
+requests or send new notifications. No background audio or location mode is used.
+
+After connecting, the app requests notification permission in the foreground.
+Settings shows authorization and links to the system notification settings.
+Background notifications cover password entry, confirmations, security-key requests,
+and newly discovered channel join applications. They contain only the request type;
+device names, channel names, operation text, and secrets are omitted. Connection
+changes do not generate notifications. The first foreground join snapshot is a
+baseline, and requests are deduplicated across polls. Failed queries preserve the
+last successful snapshot. Resolved requests and lost channel access clear their
+notifications. Notification delivery also depends on the user's iOS notification,
+Focus, and notification-summary settings.
+
+Tapping an operation notification opens its pending request. Tapping a join
+notification opens that channel's exact approval page after revalidation; it never
+approves automatically. A resolved request opens the relevant page with an
+unavailable message. Denying notifications does not disable the connection.
+
+Backgrounding hides prompts and clears unsubmitted PIN input without canceling
+waiting prompts. Active NFC/USB work is canceled and readers are released. New
+reader-open requests wait until the foreground and are checked for validity before
+continuing. Interrupted APDUs and completed, canceled, or expired requests are not
+replayed. Returning clears operation notifications; disconnecting from the server
+clears all notifications and pending navigation.
 
 The independently generated identity is stored in a non-synchronizing Keychain
 item accessible only while the device is unlocked, on this device only. Public
@@ -470,3 +496,17 @@ custom sheet-priority logic. Run with `TEST_RUNNER_HIBIKI_PHYSICAL_NFC_TEST=1` o
 an NFC-capable iPhone; keep the key away for the first five seconds, then tap it
 or cancel the scanner. Screenshots capture the native scanner and the subsequent
 confirmation. Simulator runs skip this test.
+
+### Background notifications acceptance check
+
+On a physical iPhone, allow notifications and connect to a test relay. Establish a
+foreground join-request baseline, then lock the phone or switch apps and send a
+password/confirmation, a card request, and a new join application while the system
+background allowance remains active. Check type-only lock-screen previews, one
+notification per request, and routing to the exact prompt/approval when tapped.
+Cancel/approve requests elsewhere and check stale taps do not execute anything.
+Repeat with notification permission denied, rapid background/foreground switches,
+and a disconnected network. Let the background allowance expire and verify a
+foreground return reconnects without replaying private operations. NFC/USB work
+already in progress must cancel on backgrounding. These hardware and real iOS
+suspension checks cannot be established by simulator unit tests alone.

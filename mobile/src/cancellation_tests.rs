@@ -424,3 +424,54 @@ async fn recorded_nfc_prepares_without_prompt_and_clear_cancels_dependent_sessio
     assert!(client.nfc_card().is_none());
     ep.close().await;
 }
+
+#[tokio::test]
+async fn synchronous_stop_invalidates_native_requests_before_returning() {
+    let (_root, client, _, _) = fixture();
+    let broker = client.broker.clone();
+    let waiter = tokio::spawn(async move {
+        broker
+            .request(
+                |token| NativeEvent::CardOpen {
+                    token,
+                    connection: "background-reader".into(),
+                    transport: CardTransport::Nfc,
+                },
+                &CancellationToken::new(),
+                Duration::from_secs(90),
+            )
+            .await
+    });
+    let NativeEvent::CardOpen { token, .. } = next(&client).await else {
+        panic!("expected a native request")
+    };
+    client.request_stop();
+    assert!(!client.request_is_pending(token.clone()));
+    assert!(client.respond(token, vec![], true).is_err());
+    assert!(waiter.await.unwrap().is_err());
+    client.stop().await;
+}
+
+#[tokio::test]
+async fn start_joins_a_synchronously_stopped_worker_before_reconnecting() {
+    let root = tempfile::tempdir().unwrap();
+    let client = MobileClient::new(
+        root.path().join("mobile").to_string_lossy().into(),
+        "ws://127.0.0.1:1/hibiki".into(),
+        create_identity("background restart".into()).unwrap(),
+        false,
+    )
+    .unwrap();
+    client.clone().start().await.unwrap();
+    let old_stop = client.stop.lock().unwrap().clone();
+    client.request_stop();
+    assert!(old_stop.is_cancelled());
+    tokio::time::timeout(Duration::from_secs(3), client.clone().start())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!client.stop.lock().unwrap().is_cancelled());
+    assert!(client.job.lock().unwrap().is_some());
+    client.stop().await;
+    assert!(client.job.lock().unwrap().is_none());
+}

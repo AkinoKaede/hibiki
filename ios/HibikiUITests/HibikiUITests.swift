@@ -2,6 +2,63 @@ import XCTest
 
 @MainActor
 final class HibikiUITests: XCTestCase {
+    func testOperationNotificationOpensTheSelectedPrompt() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture", "--ui-operation-notification"]
+        app.launch()
+        XCTAssertTrue(app.navigationBars["Selected Notification Request"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.secureTextFields["pinInput"].exists)
+        XCTAssertFalse(app.navigationBars["Hibiki Request"].exists)
+    }
+
+    func testExpiredOperationNotificationDoesNotPresentAnotherRequest() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture", "--ui-operation-notification", "--ui-expired-notification"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["This request is no longer pending."].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.secureTextFields["pinInput"].exists)
+        app.buttons["dismissUnavailableNotice"].tap()
+        XCTAssertTrue(app.secureTextFields["pinInput"].waitForExistence(timeout: 5))
+    }
+
+    func testJoinNotificationOpensItsApprovalPage() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online", "--ui-invitations-fixture", "--ui-join-notification"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["notification-request-id"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.navigationBars["Approve"].exists)
+        XCTAssertTrue(app.staticTexts["Work Mac"].exists)
+        XCTAssertTrue(app.buttons["scanAndApprove"].exists)
+        XCTAssertFalse(app.buttons["Approve"].isEnabled)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        XCTAssertTrue(app.navigationBars["UI Test Channel"].waitForExistence(timeout: 5))
+    }
+
+    func testExpiredJoinNotificationStaysOnItsChannel() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online", "--ui-invitations-fixture", "--ui-join-notification", "--ui-expired-notification"]
+        app.launch()
+        XCTAssertTrue(app.staticTexts["This request is no longer pending."].waitForExistence(timeout: 10))
+        app.buttons["dismissUnavailableNotice"].tap()
+        XCTAssertTrue(app.navigationBars["UI Test Channel"].exists)
+        XCTAssertFalse(app.buttons["scanAndApprove"].exists)
+    }
+
+    func testBackgroundHidesPromptAndClearsUnsubmittedPINWithoutCanceling() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture"]
+        app.launch()
+        let input = app.secureTextFields["pinInput"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        input.typeText("123456")
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        XCTAssertFalse((input.value as? String ?? "").contains("•"))
+        XCTAssertTrue(app.buttons["cancelPIN"].exists)
+    }
+
     func testPendingChannelRemainsAccessibleAfterLeavingJoin() {
         let app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online", "--ui-invitations-fixture", "--ui-pending-fixture"]

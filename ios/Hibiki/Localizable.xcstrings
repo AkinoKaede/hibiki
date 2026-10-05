@@ -2687,6 +2687,146 @@
           }
         }
       }
+    },
+    "A device is requesting to join a channel. Open Hibiki to review.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有设备申请加入频道，请打开 Hibiki 审核。"
+          }
+        }
+      }
+    },
+    "A password request needs your attention. Open Hibiki to continue.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有密码请求需要处理，请打开 Hibiki 继续。"
+          }
+        }
+      }
+    },
+    "A security key operation needs your attention. Open Hibiki to continue.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有安全密钥操作需要处理，请打开 Hibiki 继续。"
+          }
+        }
+      }
+    },
+    "Allowed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已允许"
+          }
+        }
+      }
+    },
+    "An operation has a message for you. Open Hibiki to continue.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有操作消息需要查看，请打开 Hibiki 继续。"
+          }
+        }
+      }
+    },
+    "An operation needs your confirmation. Open Hibiki to continue.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有操作需要确认，请打开 Hibiki 继续。"
+          }
+        }
+      }
+    },
+    "Background Requests": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "后台请求"
+          }
+        }
+      }
+    },
+    "Hibiki keeps the connection while iOS allows background execution. Notifications require permission and cannot arrive after the app is suspended.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hibiki 会在 iOS 允许后台运行期间保持连接。通知需要获得授权，App 被系统挂起后无法接收新请求通知。"
+          }
+        }
+      }
+    },
+    "Not Allowed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未允许"
+          }
+        }
+      }
+    },
+    "Not Requested": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "尚未请求"
+          }
+        }
+      }
+    },
+    "Notifications": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通知"
+          }
+        }
+      }
+    },
+    "Open Notification Settings": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开通知设置"
+          }
+        }
+      }
+    },
+    "Request Unavailable": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求不可用"
+          }
+        }
+      }
+    },
+    "This request is no longer pending.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此请求已失效或处理完毕。"
+          }
+        }
+      }
     }
   },
   "version": "1.1"

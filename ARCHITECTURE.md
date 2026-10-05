@@ -55,7 +55,11 @@ provider. For software keys, only password entry needs to be forwarded; the
 private operation stays on the requesting machine.
 
 On iOS, native UI and card transports replace the desktop native processes. The
-app receives requests while in the foreground. NFC registration stores public
+app receives requests in the foreground and during a finite, system-granted
+background execution allowance. Type-only local notifications route to pending
+operations or channel join approvals; no APNs delivery is available after suspension.
+Backgrounding releases hardware, and allowance expiration cancels the connection
+synchronously. NFC registration stores public
 card information; USB cards need no registration. Selected NFC cards skip extra
 confirmation. After PIN entry, the provider checks USB before opening NFC, and
 verifies the target identity before sending the PIN. See the

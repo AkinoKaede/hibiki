@@ -414,6 +414,14 @@ impl MobileClient {
     }
     pub async fn start(self: Arc<Self>) -> MobileResult<()> {
         let _lock = self.lifecycle.lock().await;
+        // A synchronous background-expiration stop may still be unwinding.
+        // Join it before replacing its token or publishing another connection.
+        if self.stop.lock().unwrap().is_cancelled() {
+            let job = self.job.lock().unwrap().take();
+            if let Some(job) = job {
+                let _ = job.await;
+            }
+        }
         if self
             .job
             .lock()
@@ -431,13 +439,18 @@ impl MobileClient {
         }));
         Ok(())
     }
-    pub async fn stop(&self) {
-        let _lock = self.lifecycle.lock().await;
+    /// Synchronous cancellation for host background-expiration callbacks.
+    /// `stop` or the next `start` joins the canceled connection task.
+    pub fn request_stop(&self) {
         self.stop.lock().unwrap().cancel();
         if let Some(hub) = self.hub.lock().unwrap().take() {
             hub.connection().close();
         }
         self.broker.cancel_all();
+    }
+    pub async fn stop(&self) {
+        let _lock = self.lifecycle.lock().await;
+        self.request_stop();
         let job = self.job.lock().unwrap().take();
         if let Some(job) = job {
             let _ = job.await;

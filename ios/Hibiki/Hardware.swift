@@ -16,8 +16,17 @@ enum HardwareError: LocalizedError {
     }
 }
 
+protocol CardHardwareAccess: Sendable {
+    func usbAvailable() async -> Bool
+    func open(id: String, token: String, transport: CardTransport) async throws
+    func transmit(id: String, token: String, command: Data) async throws -> Data
+    func cancel(token: String) async
+    func close(id: String) async
+    func closeAll() async
+}
+
 /// Native card objects never leave this actor. Rust owns the OpenPGP protocol.
-actor CardHardware {
+actor CardHardware: CardHardwareAccess {
     nonisolated static var nfcReadingAvailable: Bool { NFCTagReaderSession.readingAvailable }
     nonisolated static func isUserCancellation(_ error: Error) -> Bool {
         if error is CancellationError { return true }
