@@ -421,6 +421,9 @@ def main():
             mobile.card_delay = 10
             previous = mobile.card_confirmations
             with Assuan(a, 'scdaemon') as scd:
+                assert scd.command(b'GETINFO version') == [b'D 2.5.24', b'OK']
+                for selector in ['--demand='+card['serial'], card['keys'][0]['grip']]:
+                    assert scd.command(('LEARN --force '+selector).encode())[-1] == b'OK'
                 for _ in range(8):
                     assert scd.command(b'SERIALNO')[-1] == b'OK'
                     assert scd.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'

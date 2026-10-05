@@ -296,7 +296,7 @@ impl CardSession {
                 }
             }
             "GETINFO" => Ok(match args {
-                "version" => ok_data(b"2.4.0"),
+                "version" => ok_data(assuan::SCDAEMON_VERSION.as_bytes()),
                 "app_list" => ok_data(b"openpgp:\n"),
                 "reader_list" => ok_data(b"Hibiki iOS\n"),
                 "deny_admin" => AssuanResult::ok(),
@@ -561,4 +561,33 @@ pub fn operation_error(error: &anyhow::Error) -> AssuanResult {
 }
 
 #[cfg(test)]
-mod name_tests {}
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_and_staged_data_survive_only_the_intended_commands() {
+        let mut card = CardSession::new(CardInfo {
+            serial: "AABB".into(),
+            transport: CardTransport::Nfc,
+            keys: vec![],
+        });
+        let version = card.command(b"GETINFO version").unwrap();
+        assert_eq!(
+            &*version.lines[0],
+            format!("D {}", assuan::SCDAEMON_VERSION).as_bytes()
+        );
+        for line in [b"SETDATA 0011".as_slice(), b"SETDATA --append 2233"] {
+            assert!(card.command(line).unwrap().success());
+        }
+        assert_eq!(&*card.take_data(), &[0x00, 0x11, 0x22, 0x33]);
+        assert!(card.take_data().is_empty());
+        card.command(b"SETDATA AABB").unwrap();
+        card.command(b"SETDATA CC").unwrap();
+        assert_eq!(&*card.take_data(), &[0xcc]);
+        for reset in [b"RESET".as_slice(), b"RESTART"] {
+            card.command(b"SETDATA AABB").unwrap();
+            card.command(reset).unwrap();
+            assert!(card.take_data().is_empty());
+        }
+    }
+}

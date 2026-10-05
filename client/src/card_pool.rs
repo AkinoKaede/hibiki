@@ -6,13 +6,14 @@
 //! One persistent scdaemon candidate per eligible device and adapter session.
 use crate::{
     daemon::Hub,
+    endpoint::Endpoint,
     frontend::LocalOpen,
     provider::LocalContext,
     proxy::{Inquiry, transaction},
 };
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{
-    assuan::{AssuanResult, Line},
+    assuan::{self, AssuanResult, Line},
     protocol::{CardPreparation, CardTarget, ServiceKind},
     random_id,
 };
@@ -29,8 +30,110 @@ struct Command {
     preparation: Option<Vec<Line>>,
     operation: Option<String>,
     inquiries: Option<mpsc::Sender<Inquiry>>,
-    reply: oneshot::Sender<Result<AssuanResult>>,
+    reply: oneshot::Sender<Result<CandidateResult>>,
 }
+#[derive(Debug)]
+struct CandidateResult {
+    result: AssuanResult,
+    // Metadata for the requester, never injected into the Assuan response.
+    serial: Option<String>,
+}
+impl From<AssuanResult> for CandidateResult {
+    fn from(result: AssuanResult) -> Self {
+        Self {
+            result,
+            serial: None,
+        }
+    }
+}
+
+pub(crate) fn targeted_learn(line: &Line) -> bool {
+    assuan::command(line).is_ok_and(|(cmd, args)| {
+        cmd == "LEARN"
+            && args.split_ascii_whitespace().any(|arg| {
+                arg.starts_with("--demand=")
+                    || (arg.len() == 40 && arg.bytes().all(|c| c.is_ascii_hexdigit()))
+            })
+    })
+}
+
+// The candidate owns this entire sequence so another command or preparation
+// cannot interleave card selection and LEARN. GnuPG 2.4.0 ignores LEARN --demand.
+async fn learn(ep: &mut Endpoint, line: &Line) -> Result<CandidateResult> {
+    let (_, args) = assuan::command(line)?;
+    let mut serial = None;
+    let mut key = None;
+    let mut options = Vec::new();
+    for arg in args.split_ascii_whitespace() {
+        if let Some(value) = arg.strip_prefix("--demand=") {
+            if serial.replace(value.to_owned()).is_some() {
+                return Ok(
+                    AssuanResult::error(assuan::NOT_SUPPORTED, "multiple card selectors").into(),
+                );
+            }
+        } else if arg.len() == 40 && arg.bytes().all(|c| c.is_ascii_hexdigit()) {
+            if key.replace(arg).is_some() {
+                return Ok(
+                    AssuanResult::error(assuan::NOT_SUPPORTED, "multiple key selectors").into(),
+                );
+            }
+        } else {
+            options.push(arg);
+        }
+    }
+    if let Some(key) = key {
+        let info = transaction(ep, format!("KEYINFO {key}").as_str().into(), None).await?;
+        if !info.success() {
+            return Ok(info.into());
+        }
+        let Some(found) = crate::proxy::keyinfo_serial(key, &info) else {
+            return Ok(AssuanResult::error(assuan::NO_DATA, "missing key card identity").into());
+        };
+        if serial
+            .as_ref()
+            .is_some_and(|serial: &String| !serial.eq_ignore_ascii_case(&found))
+        {
+            return Ok(
+                AssuanResult::error(assuan::CARD_NOT_PRESENT, "key and card do not match").into(),
+            );
+        }
+        serial = Some(found);
+    }
+    let serial = serial.context("targeted LEARN requires a card identity")?;
+    let selected = transaction(ep, format!("SWITCHCARD {serial}").as_str().into(), None).await?;
+    if !selected.success() {
+        return Ok(selected.into());
+    }
+    if !selected.lines.iter().any(|line| {
+        line.strip_prefix(b"S SERIALNO ")
+            .is_some_and(|value| value.eq_ignore_ascii_case(serial.as_bytes()))
+    }) {
+        return Ok(
+            AssuanResult::error(assuan::CARD_NOT_PRESENT, "selected card does not match").into(),
+        );
+    }
+    // The key was resolved and checked above. Do not let a second key-based
+    // selection override the serial chosen on this candidate.
+    let result = transaction(
+        ep,
+        format!("LEARN {}", options.join(" ")).trim_end().into(),
+        None,
+    )
+    .await?;
+    if result.success()
+        && result.lines.iter().any(|line| {
+            line.strip_prefix(b"S SERIALNO ")
+                .is_some_and(|value| !value.eq_ignore_ascii_case(serial.as_bytes()))
+        })
+    {
+        return Ok(
+            AssuanResult::error(assuan::CARD_NOT_PRESENT, "learned card does not match").into(),
+        );
+    }
+    let serial = result.success().then_some(serial);
+    Ok(CandidateResult { result, serial })
+}
+
 #[derive(Debug)]
 struct CandidateUnavailable;
 impl std::fmt::Display for CandidateUnavailable {
@@ -191,13 +294,13 @@ impl Pool {
             },
         )
         .await?;
-        rx.await?
+        Ok(rx.await??.result)
     }
     pub async fn query(
         &self,
         line: Line,
         failures: &mut QueryFailures,
-    ) -> Result<(String, AssuanResult)> {
+    ) -> Result<(String, AssuanResult, Option<String>)> {
         tokio::select! {
             biased;
             _ = self.rejected() => Err(hibiki_core::provider::PreparationRejected.into()),
@@ -208,7 +311,7 @@ impl Pool {
         &self,
         line: Line,
         failures: &mut QueryFailures,
-    ) -> Result<(String, AssuanResult)> {
+    ) -> Result<(String, AssuanResult, Option<String>)> {
         let mut queries = tokio::task::JoinSet::new();
         let peers: Vec<_> = self
             .candidates
@@ -230,9 +333,9 @@ impl Pool {
                         reply,
                     })
                     .await;
-                // A discovery performs one query per candidate. Native errors,
-                // including no-card, belong to gpg-agent; connection failures
-                // exclude only that device from this round.
+                // Each candidate completes discovery once, including any
+                // targeted LEARN selection. Native errors belong to gpg-agent;
+                // connection failures exclude only that device from this round.
                 let result = if sent.is_ok() {
                     rx.await.ok().and_then(Result::ok)
                 } else {
@@ -248,15 +351,16 @@ impl Pool {
                 completed=queries.join_next()=>{
                     let (peer, result) = completed.context("query task missing")??;
                     let Some(result) = result else { continue; };
-                    if result.success() || result.canceled() {
-                        return Ok((peer, result));
+                    if result.result.success() || result.result.canceled() {
+                        return Ok((peer, result.result, result.serial));
                     }
-                    failures.0.insert(peer, result);
+                    failures.0.insert(peer, result.result);
                 },
             }
         }
         failures
             .take_first()
+            .map(|(peer, result)| (peer, result, None))
             .context("no available scdaemon providers")
     }
     pub async fn ready(&self) -> Result<String> {
@@ -314,7 +418,7 @@ impl Pool {
             },
         )
         .await?;
-        rx.await?
+        Ok(rx.await??.result)
     }
     pub async fn reset(&self, line: Line) {
         self.cancel_prompts();
@@ -387,9 +491,11 @@ async fn candidate(
                             let work = async {
                                 if let Some(preparation) = command.preparation {
                                     ep.execute(command.line, preparation).await?;
-                                    crate::proxy::collect(&mut ep, command.inquiries.as_ref()).await
+                                    crate::proxy::collect(&mut ep, command.inquiries.as_ref()).await.map(CandidateResult::from)
+                                } else if targeted_learn(&command.line) {
+                                    learn(&mut ep, &command.line).await
                                 } else {
-                                    transaction(&mut ep, command.line, command.inquiries.as_ref()).await
+                                    transaction(&mut ep, command.line, command.inquiries.as_ref()).await.map(CandidateResult::from)
                                 }
                             };
                             let result = tokio::select! {
@@ -495,18 +601,19 @@ mod tests {
             let ca = a.recv().await.unwrap();
             let cb = b.recv().await.unwrap();
             cb.reply
-                .send(Ok(AssuanResult::error(27, "not found")))
+                .send(Ok((AssuanResult::error(27, "not found")).into()))
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
             ca.reply
-                .send(Ok(AssuanResult {
+                .send(Ok((AssuanResult {
                     lines: vec!["S TEST diagnostic".into(), "ERR 100663313 No key".into()],
-                }))
+                })
+                .into()))
                 .unwrap();
             (a, b)
         });
         let mut failures = QueryFailures::default();
-        let (peer, result) = tokio::time::timeout(
+        let (peer, result, _) = tokio::time::timeout(
             Duration::from_secs(1),
             pool.query("READKEY OPENPGP.1".into(), &mut failures),
         )
@@ -532,14 +639,14 @@ mod tests {
                     .await
                     .unwrap()
                     .reply
-                    .send(Ok(AssuanResult::error(code, "No key or card")))
+                    .send(Ok((AssuanResult::error(code, "No key or card")).into()))
                     .unwrap();
                 let command = b.recv().await.unwrap();
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                command.reply.send(Ok(AssuanResult::ok())).unwrap();
+                command.reply.send(Ok((AssuanResult::ok()).into())).unwrap();
                 a
             });
-            let (peer, result) = pool
+            let (peer, result, _) = pool
                 .query("READKEY OPENPGP.1".into(), &mut QueryFailures::default())
                 .await
                 .unwrap();
@@ -567,10 +674,10 @@ mod tests {
                 .await
                 .unwrap()
                 .reply
-                .send(Ok(AssuanResult::error(100663313, "No key")))
+                .send(Ok((AssuanResult::error(100663313, "No key")).into()))
                 .unwrap();
         });
-        let (peer, result) = tokio::time::timeout(
+        let (peer, result, _) = tokio::time::timeout(
             Duration::from_secs(1),
             pool.query("READKEY OPENPGP.1".into(), &mut QueryFailures::default()),
         )
@@ -592,7 +699,7 @@ mod tests {
                 .await
                 .unwrap()
                 .reply
-                .send(Ok(AssuanResult::error(100663313, "No key")))
+                .send(Ok((AssuanResult::error(100663313, "No key")).into()))
                 .unwrap();
             // An online peer accepted a command but never returned a response.
             (a, stalled.recv().await.unwrap())
@@ -625,10 +732,15 @@ mod tests {
             lines: result.lines.clone(),
         };
         let replies = tokio::spawn(async move {
-            a.recv().await.unwrap().reply.send(Ok(response)).unwrap();
+            a.recv()
+                .await
+                .unwrap()
+                .reply
+                .send(Ok((response).into()))
+                .unwrap();
             a
         });
-        let (_, actual) = tokio::time::timeout(
+        let (_, actual, _) = tokio::time::timeout(
             Duration::from_secs(1),
             pool.query("SERIALNO".into(), &mut QueryFailures::default()),
         )
@@ -646,12 +758,13 @@ mod tests {
                 .await
                 .unwrap()
                 .reply
-                .send(Ok(AssuanResult {
+                .send(Ok((AssuanResult {
                     lines: vec!["S SERIALNO AABB".into(), "OK".into()],
-                }))
+                })
+                .into()))
                 .unwrap();
         });
-        let (_, result) = pool
+        let (_, result, _) = pool
             .query("SERIALNO".into(), &mut QueryFailures::default())
             .await
             .unwrap();
@@ -669,16 +782,16 @@ mod tests {
                 .await
                 .unwrap()
                 .reply
-                .send(Ok(AssuanResult::error(17, "No key")))
+                .send(Ok((AssuanResult::error(17, "No key")).into()))
                 .unwrap();
             let command = b.recv().await.unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
             command
                 .reply
-                .send(Ok(AssuanResult::error(100663395, "canceled")))
+                .send(Ok((AssuanResult::error(100663395, "canceled")).into()))
                 .unwrap();
         });
-        let (peer, result) = pool
+        let (peer, result, _) = pool
             .query("READKEY OPENPGP.1".into(), &mut QueryFailures::default())
             .await
             .unwrap();

@@ -41,8 +41,10 @@ provider. See the [trust model](ARCHITECTURE.md#trust-and-storage).
 
 ## Get started
 
-Desktop clients run on macOS and Linux with GnuPG 2.4 or 2.5. Building from source
-requires Rust 1.96+. Card providers need native scdaemon; password providers need
+Desktop clients run on macOS and Linux with GnuPG 2.4 or 2.5. The scdaemon adapter
+reports compatibility baseline 2.5.24 for its supported command subset; pinentry
+reports the Hibiki build version. See [adapter compatibility](ARCHITECTURE.md).
+Building from source requires Rust 1.96+. Card providers need native scdaemon; password providers need
 native Pinentry. Server-only hosts do not need GnuPG.
 
 1. [Install release binaries](USAGE.md#install-release-packages) or

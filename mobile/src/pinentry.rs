@@ -34,7 +34,7 @@ impl Pinentry {
             "NOP" | "BYE" => {}
             "GETINFO" => {
                 let value = match args {
-                    "version" => "1.0",
+                    "version" => assuan::PINENTRY_VERSION,
                     "flavor" => "hibiki-ios",
                     _ => {
                         return Ok(AssuanResult::error(
@@ -207,6 +207,16 @@ mod tests {
             )
             .await
             .unwrap();
+        for (query, value) in [
+            ("version", assuan::PINENTRY_VERSION),
+            ("flavor", "hibiki-ios"),
+        ] {
+            ep.command(format!("GETINFO {query}").as_str().into())
+                .await
+                .unwrap();
+            assert_eq!(&*ep.next().await.unwrap(), format!("D {value}").as_bytes());
+            assert_eq!(&*ep.next().await.unwrap(), b"OK");
+        }
         for cmd in [
             "SETDESC first%0Asecond%25",
             "OPTION default-ok=Allow",

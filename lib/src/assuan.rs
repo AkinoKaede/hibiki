@@ -12,6 +12,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub const MAX_LINE: usize = 1000;
 pub const MAX_DATA: usize = 1024 * 1024;
 pub const MAX_LINES: usize = 8192;
+/// Audited GnuPG baseline for Hibiki's supported scdaemon commands, not full emulation.
+pub const SCDAEMON_VERSION: &str = "2.5.24";
+/// Pinentry reports our implementation version; GnuPG uses it for diagnostics only.
+pub const PINENTRY_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const CANCELED: u32 = 99;
 pub const CARD_NOT_PRESENT: u32 = 112;
 pub const FULLY_CANCELED: u32 = 198;

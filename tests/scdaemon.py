@@ -97,7 +97,7 @@ try:
         command, _, args = text.partition(' ')
         if (base / 'card.json').exists(): card = json.loads((base / 'card.json').read_text())
         with (base / 'card-commands.log').open('a') as f:
-            f.write(command + (' '+args if command in ('SERIALNO','LEARN','READKEY','GETATTR','KEYINFO') else '') + '\n')
+            f.write(command + (' '+args if command in ('SERIALNO','SWITCHCARD','LEARN','READKEY','GETATTR','KEYINFO') else '') + '\n')
         if not card.get('present', True) and command in ('LEARN', 'KEYINFO', 'GETATTR', 'READKEY', 'PKSIGN', 'PKDECRYPT', 'SWITCHCARD'):
             emit(b'ERR 100663408 Card not present')
             continue
@@ -108,9 +108,17 @@ try:
                 emit(b'ERR 100663408 Card not present')
                 continue
             emit(('S SERIALNO ' + card['serial']).encode())
+        elif command == 'SWITCHCARD':
+            if args and args.lower() != card['serial'].lower():
+                emit(b'ERR 100663408 Card not present')
+                continue
+            emit(('S SERIALNO ' + card['serial']).encode())
         elif command == 'LEARN':
+            # Model 2.4: unknown --demand is ignored, so the proxy must select
+            # the card first. --keypairinfo deliberately omits SERIALNO.
             for attr in attributes():
-                emit(('S ' + attr).encode())
+                if '--keypairinfo' not in args or attr.startswith('KEYPAIRINFO '):
+                    emit(('S ' + attr).encode())
         elif command == 'KEYINFO':
             keys = card['keys'] if '--list' in args else [selected_key(args)]
             if keys == [None]:

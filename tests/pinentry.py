@@ -24,6 +24,13 @@ try:
             replayed.append('OPTION ' + raw.rstrip(b'\r\n').partition(b' ')[2].split(b'=', 1)[0].decode())
         elif command.startswith(b'SET'):
             replayed.append(command.decode())
+        if command == b'SETREPEATOK':
+            mode = json.loads((base / 'pinentry-mode.json').read_text())
+            if mode.get('repeat_ok_disconnect'):
+                break
+            if code := mode.get('repeat_ok_error'):
+                emit(('ERR %d repeat label failed' % code).encode())
+                continue
         if command in (b'GETPIN', b'CONFIRM', b'MESSAGE'):
             if (base/'pinentry-record-commands').exists():
                 (base/('pinentry-replay-%s.json' % os.getpid())).write_text(json.dumps(replayed))

@@ -46,7 +46,18 @@ jobs:
       - name: Install GnuPG (macOS)
         if: runner.os == 'macOS'
         run: brew list gnupg >/dev/null 2>&1 || brew install gnupg
-      - run: gpg --version
+      - name: Verify GnuPG compatibility lane
+        env:
+          EXPECTED_GNUPG_SERIES: ${{ runner.os == 'Linux' && '2.4' || '2.5' }}
+        run: |
+          gpg --version
+          python3 - <<'PY'
+          import os, subprocess
+          expected = os.environ['EXPECTED_GNUPG_SERIES'] + '.'
+          for program in ('gpg', 'gpg-agent'):
+              version = subprocess.check_output([program, '--version'], text=True).splitlines()[0].split()[-1]
+              assert version.startswith(expected), (program, version, expected)
+          PY
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace

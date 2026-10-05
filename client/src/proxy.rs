@@ -154,6 +154,34 @@ async fn upstream_inquiry(
     let _ = inquiry.reply.send(reply);
     Ok(())
 }
+// SETREPEATOK is an optional success label. Older pinentries may reject it;
+// cancellation and every other failure must still end this candidate.
+fn optional_pinentry_setting_error(line: &Line, result: &AssuanResult) -> bool {
+    assuan::command(line).is_ok_and(|(cmd, _)| cmd == "SETREPEATOK")
+        && result.lines.last().is_some_and(|line| {
+            matches!(assuan::parse_response(line), Ok(Response::Err(code))
+                if matches!(code & 0xffff, assuan::NOT_SUPPORTED | 175 | 275))
+        })
+}
+
+async fn replay_pinentry_settings(
+    ep: &mut Endpoint,
+    settings: &Settings,
+    remote: bool,
+) -> Result<Option<AssuanResult>> {
+    for setting in settings.values() {
+        let (cmd, args) = assuan::command(setting)?;
+        if remote && cmd == "OPTION" && assuan::local_option(args) {
+            continue;
+        }
+        let result = transaction(ep, setting.clone(), None).await?;
+        if !result.success() && !optional_pinentry_setting_error(setting, &result) {
+            return Ok(Some(result));
+        }
+    }
+    Ok(None)
+}
+
 // The local candidate never awaits relay control traffic. Keep remote discovery,
 // queue registration and completion in a separate task, including during reconnect.
 async fn password_race(
@@ -190,11 +218,8 @@ async fn password_race(
                 )
                 .await?
                 .context("local pinentry disabled")?;
-            for setting in settings.values() {
-                let result = transaction(&mut ep, setting.clone(), None).await?;
-                if !result.success() {
-                    return Ok(Some(result));
-                }
+            if let Some(result) = replay_pinentry_settings(&mut ep, &settings, false).await? {
+                return Ok(Some(result));
             }
             transaction(&mut ep, line, Some(&tx)).await.map(Some)
         });
@@ -264,11 +289,8 @@ async fn password_remote(
                     tasks.spawn(async move {
                         let result=async {
                             let Some(mut ep)=hub.open(&channel, &peer, ServiceKind::Pinentry, stop, context).await? else { return Ok(None); };
-                            for setting in settings.values() {
-                                let (cmd,args)=assuan::command(setting)?;
-                                if cmd == "OPTION" && assuan::local_option(args) { continue; }
-                                let result=transaction(&mut ep,setting.clone(),None).await?;
-                                if !result.success() { return Ok(Some(result)); }
+                            if let Some(result) = replay_pinentry_settings(&mut ep, &settings, true).await? {
+                                return Ok(Some(result));
                             }
                             ep.bind_operation(Some(operation.value.id.clone()));
                             let watching=operation.watch(ep.stop.clone());
@@ -319,7 +341,7 @@ fn local_info(service: ServiceKind, args: &str, pid: u32) -> AssuanResult {
         let (Some(command), Some(option)) = (words.next(), words.next()) else {
             return AssuanResult::error(assuan::MISSING_VALUE, "command and option required");
         };
-        // GnuPG 2.4's capability table advertises only SERIALNO's all option.
+        // GnuPG 2.4 and 2.5.24 advertise only SERIALNO's all option.
         return if command == "SERIALNO" && option == "all" && words.next().is_none() {
             AssuanResult::ok()
         } else {
@@ -329,9 +351,9 @@ fn local_info(service: ServiceKind, args: &str, pid: u32) -> AssuanResult {
     let value = match args {
         "pid" => pid.to_string(),
         "version" => if service == ServiceKind::Scdaemon {
-            "2.4.0"
+            assuan::SCDAEMON_VERSION
         } else {
-            "1.3.0"
+            assuan::PINENTRY_VERSION
         }
         .into(),
         "flavor" if service == ServiceKind::Pinentry => "hibiki".into(),
@@ -343,6 +365,41 @@ fn local_info(service: ServiceKind, args: &str, pid: u32) -> AssuanResult {
     let mut lines = assuan::data_lines(value.as_bytes());
     lines.push("OK".into());
     AssuanResult { lines }
+}
+
+pub(crate) fn keyinfo_serial(key: &str, result: &AssuanResult) -> Option<String> {
+    if !result.success() {
+        return None;
+    }
+    let serial = |record: &str| {
+        let mut fields = record.split_ascii_whitespace();
+        if !fields.next()?.eq_ignore_ascii_case(key) || fields.next()? != "T" {
+            return None;
+        }
+        let serial = fields.next()?;
+        (!serial.is_empty() && serial.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| serial.to_owned())
+    };
+    let mut data = Vec::new();
+    for line in &result.lines {
+        if let Some(record) = line.strip_prefix(b"S KEYINFO ")
+            && let Ok(record) = std::str::from_utf8(record)
+            && let Some(serial) = serial(record)
+        {
+            return Some(serial);
+        }
+        if let Some(record) = line.strip_prefix(b"D ")
+            && let Ok(record) = assuan::unescape(record)
+        {
+            data.extend_from_slice(&record);
+        }
+    }
+    if let Ok(data) = std::str::from_utf8(&data)
+        && let Some(serial) = data.lines().find_map(serial)
+    {
+        return Some(serial);
+    }
+    None
 }
 
 #[derive(Default)]
@@ -357,33 +414,7 @@ impl CardState {
         let Some(key) = keygrip(args).filter(|_| result.success()) else {
             return;
         };
-        let serial = |record: &str| {
-            let mut fields = record.split_ascii_whitespace();
-            if !fields.next()?.eq_ignore_ascii_case(key) || fields.next()? != "T" {
-                return None;
-            }
-            let serial = fields.next()?;
-            (!serial.is_empty() && serial.bytes().all(|b| b.is_ascii_hexdigit()))
-                .then(|| serial.to_owned())
-        };
-        let mut data = Vec::new();
-        for line in &result.lines {
-            if let Some(record) = line.strip_prefix(b"S KEYINFO ")
-                && let Ok(record) = std::str::from_utf8(record)
-                && let Some(serial) = serial(record)
-            {
-                self.serial = serial;
-                return;
-            }
-            if let Some(record) = line.strip_prefix(b"D ")
-                && let Ok(record) = assuan::unescape(record)
-            {
-                data.extend_from_slice(&record);
-            }
-        }
-        if let Ok(data) = std::str::from_utf8(&data)
-            && let Some(serial) = data.lines().find_map(serial)
-        {
+        if let Some(serial) = keyinfo_serial(key, result) {
             self.serial = serial;
         }
     }
@@ -640,10 +671,16 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
                 // requested key must still be looked up across all devices.
                 let result = if card_state.public_source.is_empty()
                     || (cmd == "KEYINFO" && keygrip(args).is_some())
+                    || crate::card_pool::targeted_learn(&line)
                 {
-                    let (peer, result) = pool.query(line.clone(), &mut query_failures).await?;
+                    let (peer, result, serial) =
+                        pool.query(line.clone(), &mut query_failures).await?;
                     if result.success() {
                         card_state.public_source = peer;
+                        if let Some(serial) = serial {
+                            card_state.serial = serial;
+                            card_state.peer.clear();
+                        }
                     }
                     result
                 } else {
@@ -743,6 +780,39 @@ mod card_state_tests {
             settings.insert(key, (*line).into());
         }
         settings
+    }
+
+    #[test]
+    fn only_unsupported_repeat_success_labels_are_optional() {
+        for source in [0, 5 << 24] {
+            for code in [60, 175, 275, 99, 198, 1, 174] {
+                let result = AssuanResult::error(source | code, "test error");
+                assert_eq!(
+                    optional_pinentry_setting_error(&"SETREPEATOK Match".into(), &result),
+                    matches!(code, 60 | 175 | 275)
+                );
+                assert!(!optional_pinentry_setting_error(
+                    &"SETREPEAT Again".into(),
+                    &result
+                ));
+                assert!(!optional_pinentry_setting_error(
+                    &"SETDESC Prompt".into(),
+                    &result
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn local_service_versions_identify_the_audited_baseline_and_build() {
+        for (service, version) in [
+            (ServiceKind::Scdaemon, assuan::SCDAEMON_VERSION),
+            (ServiceKind::Pinentry, assuan::PINENTRY_VERSION),
+        ] {
+            let result = local_info(service, "version", 123);
+            assert_eq!(&*result.lines[0], format!("D {version}").as_bytes());
+            assert!(result.success());
+        }
     }
 
     #[test]

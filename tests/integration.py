@@ -179,11 +179,11 @@ def concurrent_agent_sessions(device):
     path = run([GPGCONF, '--homedir', device.native, '--list-dirs', 'agent-socket'],
                env=device.env).stdout.decode().strip()
     with SocketAssuan(path) as first, SocketAssuan(path) as second:
-        assert b'D 2.4.0' in first.command(b'SCD GETINFO version')
+        assert b'D 2.5.24' in first.command(b'SCD GETINFO version')
         # Keep the first agent session open so its primary scdaemon connection
         # cannot be reused. GnuPG must open the advertised secondary socket.
         reply = second.command(b'SCD GETINFO version')
-        assert b'D 2.4.0' in reply, reply
+        assert b'D 2.5.24' in reply, reply
         advertised = first.command(b'SCD GETINFO socket_name')
         socket_path = Path(next(line[2:].decode() for line in advertised if line.startswith(b'D ')))
         assert socket_path.is_socket()
@@ -196,7 +196,7 @@ def concurrent_agent_sessions(device):
         busy = device.gpg('--card-status', ok=False)
         assert b'not available' in busy.stderr
     with SocketAssuan(socket_path) as extra:
-        assert b'D 2.4.0' in extra.command(b'GETINFO version')
+        assert b'D 2.5.24' in extra.command(b'GETINFO version')
         device.kill_agent()
         assert extra.stream.readline() == b'', 'secondary connection outlived the primary pipe'
     wait_for(lambda: not socket_path.parent.exists())
@@ -298,6 +298,75 @@ def pinentry_compatibility(requester, provider):
     finally:
         record.unlink()
         provider.mode()
+
+
+def pinentry_repeat_compatibility(requester, provider):
+    """Optional labels degrade, while cancellation and real errors propagate."""
+    version = run([CLIENT, '--version']).stdout.decode().split()[-1].encode()
+    try:
+        for code in [None, 60, 175, 275, 0x5000000 | 275, 99, 198, 1]:
+            provider.mode(repeat_ok_error=code)
+            with Assuan(requester, 'pinentry') as pe:
+                assert pe.command(b'GETINFO version') == [b'D ' + version, b'OK']
+                assert pe.command(b'GETINFO flavor') == [b'D hibiki', b'OK']
+                assert pe.command(b'SETREPEATOK Match') == [b'OK']
+                reply = pe.command(b'GETPIN')
+                if code is None or code & 0xffff in (60, 175, 275):
+                    assert reply == [b'D 123456', b'OK'], (code, reply)
+                else:
+                    assert reply == [('ERR %d repeat label failed' % code).encode()], reply
+            wait_for(provider.idle)
+        provider.mode(repeat_ok_disconnect=True)
+        with Assuan(requester, 'pinentry') as pe:
+            assert pe.command(b'SETREPEATOK Match') == [b'OK']
+            reply = pe.command(b'GETPIN')
+            assert reply[-1].startswith(b'ERR') and not any(x.startswith(b'D ') for x in reply), reply
+        wait_for(provider.idle)
+    finally:
+        provider.mode()
+
+
+def targeted_learn_compatibility(requester, first, second):
+    serial = first['serial']
+    grip = first['keys'][0]['grip']
+    other_serial = second['serial']
+    with Assuan(requester, 'scdaemon') as sc:
+        for selector in ['--demand='+serial, grip, '--demand='+serial+' '+grip]:
+            assert sc.command(('SWITCHCARD '+other_serial).encode())[-1] == b'OK'
+            reply = sc.command(('LEARN --force '+selector).encode())
+            assert reply[-1] == b'OK' and ('S SERIALNO '+serial).encode() in reply, reply
+            assert not any(x.startswith(b'S KEYINFO ') for x in reply), reply
+            reply = sc.command(b'GETATTR SERIALNO')
+            assert reply == [('S SERIALNO '+serial).encode(), b'OK'], reply
+        assert sc.command(('SWITCHCARD '+other_serial).encode())[-1] == b'OK'
+        reply = sc.command(('LEARN --force --keypairinfo '+grip).encode())
+        assert reply[-1] == b'OK' and any(x.startswith(b'S KEYPAIRINFO ') for x in reply), reply
+        assert not any(x.startswith((b'S SERIALNO ', b'S KEYINFO ')) for x in reply), reply
+        # No SERIALNO in LEARN's response: the selected identity must still
+        # reach private preparation, even when the operation uses a slot name.
+        payload = bytes(range(32))
+        for command in [b'SETDATA DEADBEEF', b'RESET', b'SETDATA FF',
+                        b'SETDATA '+payload[:11].hex().encode(),
+                        b'SETDATA --append '+payload[11:].hex().encode()]:
+            assert sc.command(command) == [b'OK']
+        assert sc.command(('LEARN --force --keypairinfo '+grip).encode())[-1] == b'OK'
+        reply = sc.command(b'PKSIGN --hash=sha256 OPENPGP.1', lambda _: [b'D 123456', b'END'])
+        assert reply[-1] == b'OK', reply
+        # Recover the signed block to verify replacement and concatenation.
+        signature = b''.join(re.sub(rb'%([0-9A-Fa-f]{2})', lambda m: bytes([int(m[1], 16)]), x[2:])
+                             for x in reply if x.startswith(b'D '))
+        key = first['keys'][0]
+        width = (int(key['n'], 16).bit_length()+7)//8
+        block = pow(int.from_bytes(signature, 'big'), int(key['e'], 16), int(key['n'], 16)).to_bytes(width, 'big')
+        assert block == b'\x00\x01' + b'\xff'*(width-len(payload)-3) + b'\x00' + payload
+        assert sc.command(b'RESET') == [b'OK']
+        assert sc.command(('SWITCHCARD '+serial).encode())[-1] == b'OK'
+        for selector in ['--demand=ABCD', 'F'*40, '--demand='+other_serial+' '+grip]:
+            reply = sc.command(('LEARN --force '+selector).encode())
+            assert reply[-1].startswith(b'ERR') and not any(x.startswith(b'S KEYPAIRINFO ') for x in reply), reply
+            assert sc.command(b'GETATTR SERIALNO') == [('S SERIALNO '+serial).encode(), b'OK']
+        # Untargeted LEARN still uses the bound card.
+        assert ('S SERIALNO '+serial).encode() in sc.command(b'LEARN --force')
 
 
 def missing_card_prompt(requester, provider, input_device, card, args, data, cancel=False):
@@ -723,6 +792,7 @@ def test_all():
             # B supplies only the card; C supplies PINs. Cancel is no longer a way to opt out.
             b.services(scdaemon=True);b.mode(confirm=True);b.restart()
             pinentry_compatibility(a, c)
+            pinentry_repeat_compatibility(a, c)
             print('PASS: remote pinentry preserves RESET options and consumes one-shot settings on success/cancel/failure', flush=True)
             c.mode(password='123456',delay=.1)
             a.configure_agent()
@@ -738,6 +808,7 @@ def test_all():
             a.services(scdaemon=True, pinentry=True); a.mode(delay=10); a.card(dict(card, present=False)); a.restart()
             prompts = [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)]
             status=a.gpg('--card-status')
+            assert b"server 'scdaemon' is older than us" not in status.stderr, status.stderr
             assert b'00001234' in status.stdout or b'Hibiki test card' in status.stdout,status.stdout
             assert prompts == [set(d.root.glob('pinentry-[0-9]*')) for d in (a,b)], 'real GnuPG card discovery created insertion prompts'
             a.gpg('--batch','--local-user',fpr,'--armor','--detach-sign',data=b'card message')
@@ -834,6 +905,9 @@ def test_all():
             c.mode(delay=10)
             c.card(other);c.services(scdaemon=True,pinentry=True);c.restart()
             card['delay']=.15;b.card(card)
+            targeted_learn_compatibility(a, card, other)
+            wait_for(lambda: b.idle('scdaemon') and c.idle('scdaemon'))
+            print('PASS: targeted LEARN selects across old providers, hides intermediate results and preserves split SETDATA', flush=True)
             with Assuan(a,'scdaemon') as sc:
                 reply=sc.command(('SERIALNO --demand='+card['serial']).encode())
                 assert ('S SERIALNO '+card['serial']).encode() in reply
@@ -873,6 +947,7 @@ def test_all():
             for d in devices:d.restart()
             with Assuan(a,'pinentry') as pe: assert b'D local only' in pe.command(b'GETPIN')
             pinentry_compatibility(a, a)
+            pinentry_repeat_compatibility(a, a)
             print('PASS: local pinentry preserves RESET options and consumes one-shot settings on success/cancel/failure', flush=True)
             a.mode(cancel=True)
             with Assuan(a,'pinentry') as pe:
