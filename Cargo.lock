@@ -1216,7 +1216,7 @@ checksum = "5491a308e0214554f07a81d8944abe45f552871c12e3c3c6e7e5d354039a6c4c"
 
 [[package]]
 name = "hibiki"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "hibiki-core"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "fs2",
@@ -1263,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "hibiki-lib"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "argon2",
  "base64 0.23.1",
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "hibiki-mobile"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "card-backend",
@@ -1306,7 +1306,7 @@ dependencies = [
 
 [[package]]
 name = "hibiki-server"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "anyhow",
  "axum",

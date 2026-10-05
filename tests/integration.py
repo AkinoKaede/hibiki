@@ -9,6 +9,7 @@ import selectors
 import shlex
 import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -151,6 +152,47 @@ class Device:
         return all(not alive(int(p.name.rsplit('-',1)[1])) for p in self.root.glob(kind+'-[0-9]*'))
     def waiting(self): return any(p.read_text()=='waiting' and alive(int(p.name.rsplit('-',1)[1])) for p in self.root.glob('pinentry-[0-9]*'))
 
+class SocketAssuan(Assuan):
+    def __init__(self, path):
+        self.socket = socket.socket(socket.AF_UNIX)
+        self.socket.settimeout(15)
+        self.socket.connect(str(path))
+        self.stream = self.socket.makefile('rwb', buffering=0)
+        assert self.line().startswith(b'OK')
+    def line(self, timeout=15):
+        line = self.stream.readline().rstrip(b'\r\n')
+        assert line, 'Assuan socket disconnected'
+        return line
+    def send(self, line): self.stream.write(line+b'\n')
+    def close(self): self.stream.close(); self.socket.close()
+
+def concurrent_agent_sessions(device):
+    device.configure_agent()
+    connect = Path(GPGCONF).with_name('gpg-connect-agent')
+    run([connect, '--homedir', device.native, '/bye'], env=device.env)
+    path = run([GPGCONF, '--homedir', device.native, '--list-dirs', 'agent-socket'],
+               env=device.env).stdout.decode().strip()
+    with SocketAssuan(path) as first, SocketAssuan(path) as second:
+        assert b'D 2.4.0' in first.command(b'SCD GETINFO version')
+        # Keep the first agent session open so its primary scdaemon connection
+        # cannot be reused. GnuPG must open the advertised secondary socket.
+        reply = second.command(b'SCD GETINFO version')
+        assert b'D 2.4.0' in reply, reply
+        advertised = first.command(b'SCD GETINFO socket_name')
+        socket_path = Path(next(line[2:].decode() for line in advertised if line.startswith(b'D ')))
+        assert socket_path.is_socket()
+        assert socket_path.stat().st_mode & 0o777 == 0o600
+        assert socket_path.parent.stat().st_mode & 0o777 == 0o700
+        assert first.command(b'SCD NOP')[-1] == b'OK'
+        assert second.command(b'SCD NOP')[-1] == b'OK'
+        # Card discovery still works while the first client holds its session.
+        assert b'D276' in device.gpg('--card-status').stdout
+    with SocketAssuan(socket_path) as extra:
+        assert b'D 2.4.0' in extra.command(b'GETINFO version')
+        device.kill_agent()
+        assert extra.stream.readline() == b'', 'secondary connection outlived the primary pipe'
+    wait_for(lambda: not socket_path.parent.exists())
+
 def secret_rsa_packets(data):
     result=[];offset=0
     while offset<len(data):
@@ -267,6 +309,9 @@ def test_all():
             assert b'client channel creation: false' in a.cli('doctor').stdout
             assert b'hibiki use NAME' in a.cli('setup').stderr
             print('PASS: fresh HIbiki pairing, server-only creation and independent services',flush=True)
+
+            concurrent_agent_sessions(a)
+            print('PASS: simultaneous GnuPG clients use independent scdaemon connections', flush=True)
 
             # Queue metadata survives a relay restart; only a live caller resumes it.
             a.services(timeout=20);a.restart();b.stop();c.stop()

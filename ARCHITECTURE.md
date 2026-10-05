@@ -88,9 +88,9 @@ Each device grants one exclusive scdaemon session at a time; busy devices reject
 
 The native agent or card validates the password. A retry starts a new race; Hibiki never tries the losing candidates' passwords. Answers go only to the requester. Multiple Pinentry inquiries are serialized upstream, with each answer routed back to its original candidate.
 
-**Transport and lifecycle.** Both agent-to-adapter and Hibiki-to-native-program connections use stdio. The adapters reach the local daemon through a private Unix socket. Assuan inquiries preserve their parameters, binary data, percent escapes, and native error codes.
+**Transport and lifecycle.** The agent starts adapters over stdio; scdaemon's `--multi-server` mode also accepts additional agent connections through a private local Unix socket. Hibiki-to-native-program connections use stdio. The adapters reach the local daemon through its private Unix socket. Assuan inquiries preserve their parameters, binary data, percent escapes, and native error codes.
 
-- No extra scdaemon socket is exposed. `GETINFO socket_name` returns no data, and additional concurrent card connections from the same agent are unsupported.
+- In `--multi-server` mode, `GETINFO socket_name` advertises the adapter's local socket, with a separate daemon session for each connection. The socket uses mode 0600 in a private 0700 runtime directory; the primary pipe owns its lifetime and closes all secondary sessions on exit. Plain stdio mode still returns no socket. Native provider sockets are never forwarded, and each card provider retains its exclusive session limit.
 - Card discovery, public-key reading, signing, and decryption are supported. PIN changes, key writing, key generation, and raw APDU commands are rejected on both ends.
 - Each active command has a 120-second default timeout, configurable from 1 to 3600 seconds. Idle time does not consume the next command's deadline.
 - Caller exit, timeout, revocation, or channel deletion cancels pending work and closes affected backends. Offline members can join a waiting operation before its original deadline; the first success cancels every other queued copy. Relay reconnection preserves live callers and uses new encrypted sessions.
