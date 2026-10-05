@@ -10,13 +10,13 @@ gpgconf_program = "gpgconf"
 # These switches control local providers. Remote requests work with both off.
 # Restart hibiki daemon after changing configuration.
 [scdaemon]
-enabled = false
+enabled = true
 # Omit program to locate the native binary with gpgconf --list-components.
 # scdaemon runs with --server and a dedicated home under HIbiki's data directory.
 # program = "/usr/lib/gnupg/scdaemon"
 
 [pinentry]
-enabled = false
+enabled = true
 # Omit program to locate the native binary with gpgconf --list-components.
 # This may select a terminal Pinentry. Set program to a GUI Pinentry for a
 # background service; terminal input requires this device's GPG_TTY and TERM

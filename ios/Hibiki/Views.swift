@@ -29,7 +29,7 @@ struct RootView: View {
         }
         .tint(.indigo)
         .sheet(item: Binding(get: { model.currentPrompt }, set: { value in
-            if value == nil, let prompt = model.currentPrompt { Task { await model.dismissPrompt(prompt) } }
+            if value == nil, let prompt = model.currentPrompt { model.cancelPrompt(prompt) }
         })) { prompt in
             PinView(prompt: prompt, model: model).id(prompt.token).interactiveDismissDisabled()
         }
@@ -751,18 +751,13 @@ struct PinView: View {
                     Button(prompt.ok.isEmpty ? String(localized: "Continue") : PinentryLabel.display(prompt.ok)) { submit() }
                         .disabled(submitting || (prompt.kind == .cardUsb && !model.usbPresent))
                         .accessibilityIdentifier("submitPIN")
-                    Button("Cancel", role: .destructive) {
-                        pin = ""
-                        model.cancelPrompt(prompt, entireOperation: true)
-                    }
-                    .accessibilityIdentifier("cancelOperation")
                     if !prompt.notOk.isEmpty, !asksPin { Button(PinentryLabel.display(prompt.notOk)) { model.answer(prompt, accepted: false) } }
                 }
             }
             .navigationTitle(prompt.title.isEmpty ? String(localized: "Hibiki Request") : prompt.title)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button { pin = ""; Task { await model.dismissPrompt(prompt) } } label: {
+                    Button { pin = ""; model.cancelPrompt(prompt) } label: {
                         Image(systemName: "xmark")
                     }
                     .accessibilityLabel(prompt.cancel.isEmpty ? String(localized: "Cancel") : PinentryLabel.display(prompt.cancel))

@@ -218,7 +218,6 @@ async fn password_race(
                     failed = Some(result);
                 },
                 Some(Ok(Ok(None))) => {},
-                Some(Ok(Err(error))) if error.is::<hibiki_core::endpoint::CandidateIgnored>() => {},
                 Some(_) => failed = Some(AssuanResult::error(assuan::GENERAL, "pinentry candidate failed")),
                 None => return Ok(failed.unwrap_or_else(||
                     AssuanResult::error(assuan::GENERAL, "no pinentry providers"))),
@@ -297,7 +296,6 @@ async fn password_remote(
                         },
                         Ok(Some(mut result))=>{failures+=1;failed=result.lines.pop();},
                         Ok(None)=>{},
-                        Err(error) if error.is::<hibiki_core::endpoint::CandidateIgnored>()=>{},
                         Err(_)=>failures+=1,
                     }
                     if !hub.connection().closed.is_cancelled() {
@@ -808,36 +806,6 @@ mod card_state_tests {
             },
         );
         assert_eq!(state.serial, "original");
-    }
-
-    #[tokio::test]
-    async fn ignore_discards_partial_pin_and_does_not_become_an_assuan_result() {
-        use hibiki_lib::protocol::SessionOutput;
-        let (tx, _input) = mpsc::channel(8);
-        let (out, rx) = mpsc::channel(8);
-        let mut ep = Endpoint::new(tx, rx, CancellationToken::new(), CancellationToken::new());
-        ep.command("GETPIN".into()).await.unwrap();
-        out.send(SessionOutput::Line {
-            request: 1,
-            line: "D partial-secret".into(),
-        })
-        .await
-        .unwrap();
-        out.send(SessionOutput::Ignored { request: 1 })
-            .await
-            .unwrap();
-        let error = collect(&mut ep, None).await.unwrap_err();
-        assert!(error.is::<hibiki_core::endpoint::CandidateIgnored>());
-        ep.command("GETPIN".into()).await.unwrap();
-        out.send(SessionOutput::Line {
-            request: 2,
-            line: "OK".into(),
-        })
-        .await
-        .unwrap();
-        let result = collect(&mut ep, None).await.unwrap();
-        assert_eq!(result.lines.len(), 1);
-        assert_eq!(&*result.lines[0], b"OK");
     }
 
     #[test]

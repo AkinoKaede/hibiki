@@ -17,7 +17,7 @@ successful response wins and the other prompts close.
 - **Remote password entry:** use another device's native Pinentry or the iOS app
   for card PINs and software-key passphrases.
 - **Independent device roles:** provide card access, password entry, both, or
-  neither. Both services are disabled by default.
+  neither. Both services are enabled by default.
 - **Encrypted peer sessions:** devices authenticate with Ed25519 identities and
   exchange Assuan traffic over Noise sessions through a WebSocket relay.
 - **Native iOS support:** the SwiftUI app supports iOS 18+ with wired and NFC

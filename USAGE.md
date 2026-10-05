@@ -152,7 +152,7 @@ hibiki channel approve personal
 
 Compare the joining device's request ID and all 24 public-key verification words before answering `y`. Approval defaults to No. Pending requests remain until approved, rejected by a member, withdrawn by the applicant, invalidated by PSK rotation, or removed with the channel. A waiting `join` exits when its request is removed. Ctrl-C only stops waiting; use `hibiki channel leave NAME` to cancel joining. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
 
-### 3. Enable the services each device will provide
+### 3. Configure the services each device will provide
 
 Edit `~/.config/hibiki/client.toml`, or the corresponding XDG path. See the complete [client configuration](examples/client.toml).
 
@@ -166,7 +166,7 @@ enabled = true
 # program = "/opt/homebrew/bin/pinentry-mac"
 ```
 
-These switches control whether the device accepts requests and participates as a provider. They do not restrict its ability to request services from other devices.
+Both services are enabled by default. Explicitly saved `enabled = false` settings remain disabled. These switches control whether the device accepts requests and participates as a provider. They do not restrict its ability to request services from other devices.
 
 | Device role | `scdaemon.enabled` | `pinentry.enabled` |
 | --- | --- | --- |

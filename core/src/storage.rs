@@ -39,11 +39,19 @@ impl Default for Config {
         }
     }
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ServiceConfig {
     pub enabled: bool,
     pub program: Option<PathBuf>,
+}
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            program: None,
+        }
+    }
 }
 impl Config {
     pub fn service(&self, kind: hibiki_lib::protocol::ServiceKind) -> &ServiceConfig {
@@ -329,6 +337,34 @@ mod tests {
     use super::*;
     use hibiki_lib::channel::*;
     use std::collections::BTreeMap;
+    #[test]
+    fn service_defaults_enable_both_and_preserve_explicit_choices() {
+        assert!(Config::default().scdaemon.enabled);
+        assert!(Config::default().pinentry.enabled);
+        for (text, card, pin) in [
+            ("", true, true),
+            ("[scdaemon]\n[pinentry]\n", true, true),
+            ("[scdaemon]\nprogram = '/test/scdaemon'\n", true, true),
+            ("[scdaemon]\nenabled = false\n", false, true),
+            ("[pinentry]\nenabled = false\n", true, false),
+            (
+                "[scdaemon]\nenabled = false\n[pinentry]\nenabled = false\n",
+                false,
+                false,
+            ),
+        ] {
+            let config: Config = toml::from_str(text).unwrap();
+            assert_eq!(
+                (config.scdaemon.enabled, config.pinentry.enabled),
+                (card, pin)
+            );
+            assert_eq!(
+                toml::from_str::<Config>(&toml::to_string(&config).unwrap()).unwrap(),
+                config
+            );
+        }
+    }
+
     fn app(root: &Path) -> App {
         let paths = AppPaths::resolve(&BTreeMap::new(), root, root, unsafe { libc::geteuid() });
         App {

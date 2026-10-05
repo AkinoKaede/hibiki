@@ -88,23 +88,6 @@ supported capabilities. The initiator rejects unoffered selections. Lists are
 protected inside the Noise session; relay capabilities do not authorize a peer
 extension. This adds no round trip to service or Ping setup.
 
-## Ignoring an input request
-
-`pinentry-ignore-v1` negotiates `SessionOutput.ignored` (oneof field 4), containing
-`SessionOutputIgnored.request` (uint64 field 1). It is a terminal, device-local
-withdrawal for the named active Pinentry request, not an Assuan response. Only
-Pinentry sessions may send it; the request ID must match an active command with
-no outstanding inquiry. The requester discards partial input, removes that
-candidate and continues waiting for the others. The provider releases its queue
-claim. If every candidate exits, the requester returns an aggregate failure;
-a later explicit caller command may start a new race.
-
-Ignore is never forwarded to gpg-agent. It has **no compatibility fallback** to
-NO_DATA, CANCELED, or a legacy failure message. Both peers must negotiate the
-capability before sending or accepting it; unsupported peers fail explicitly.
-Do not reintroduce error-code aliases for Ignore. Ordinary CANCELED (99) and
-FULLY_CANCELED (198) retain whole-operation cancellation semantics.
-
 ## Bounds and private data
 
 Existing bounds remain: WebSocket envelopes up to 4 MiB, reassembled encrypted

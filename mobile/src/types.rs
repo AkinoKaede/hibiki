@@ -11,7 +11,6 @@ impl From<anyhow::Error> for MobileError {
     fn from(value: anyhow::Error) -> Self {
         if value.is::<crate::broker::RequestCancelled>()
             || value.is::<crate::broker::OperationCancelled>()
-            || value.is::<crate::broker::CandidateWithdrawn>()
         {
             return Self::Cancelled;
         }

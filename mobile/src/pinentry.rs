@@ -128,9 +128,6 @@ impl Pinentry {
                     Err(error) if error.is::<crate::broker::OperationCancelled>() => {
                         AssuanResult::error(assuan::CANCELED, "operation canceled by user")
                     }
-                    Err(error) if error.is::<crate::broker::CandidateWithdrawn>() => {
-                        return Err(error);
-                    }
                     Err(_) => AssuanResult::error(assuan::CANCELED, "input canceled or timed out"),
                 });
             }
@@ -239,12 +236,7 @@ mod tests {
                 .respond(&prompt.token, b"again".to_vec(), true)
                 .is_err()
         );
-        for (inserted, explicit_cancel, expected) in [
-            (false, false, None),
-            (true, false, Some(assuan::CANCELED)),
-            (false, true, Some(assuan::CANCELED)),
-            (true, true, Some(assuan::CANCELED)),
-        ] {
+        for inserted in [false, true] {
             client.usb_present(inserted);
             ep.command("GETPIN".into()).await.unwrap();
             let token = loop {
@@ -252,23 +244,10 @@ mod tests {
                     break prompt.token;
                 }
             };
-            if explicit_cancel {
-                client.cancel_request(token.clone(), true).unwrap();
-            } else {
-                client.dismiss_request(token.clone()).unwrap();
-            }
-            if let Some(expected) = expected {
-                assert!(
-                    matches!(assuan::parse_response(&ep.next().await.unwrap()).unwrap(), assuan::Response::Err(code) if code == expected)
-                );
-            } else {
-                assert!(
-                    ep.next()
-                        .await
-                        .unwrap_err()
-                        .is::<hibiki_core::endpoint::CandidateIgnored>()
-                );
-            }
+            client.cancel_request(token.clone()).unwrap();
+            assert!(
+                matches!(assuan::parse_response(&ep.next().await.unwrap()).unwrap(), assuan::Response::Err(code) if code == assuan::CANCELED)
+            );
             assert!(!client.broker.pending(&token));
             assert!(client.respond(token, b"late reply".to_vec(), true).is_err());
         }

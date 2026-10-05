@@ -9,16 +9,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-/// A provider declined this request. This is not an Assuan cancellation or error.
-#[derive(Debug)]
-pub struct CandidateIgnored;
-impl std::fmt::Display for CandidateIgnored {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("input candidate ignored the request")
-    }
-}
-impl std::error::Error for CandidateIgnored {}
-
 pub struct Endpoint {
     pub peer: String,
     pub card_serial: Option<String>,
@@ -131,13 +121,6 @@ impl Endpoint {
         let (request, line) = loop {
             match self.rx.recv().await {
                 Some(SessionOutput::Line { request, line }) => break (request, line),
-                Some(SessionOutput::Ignored { request }) => {
-                    if request != self.request || !self.active || self.inquiry {
-                        bail!("unexpected ignored response or request ID");
-                    }
-                    self.active = false;
-                    return Err(CandidateIgnored.into());
-                }
                 Some(SessionOutput::CardStatus { id, state }) => {
                     self.preparation_status = Some((id, state));
                     continue;
@@ -192,54 +175,6 @@ impl Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[tokio::test]
-    async fn ignore_ends_only_its_active_request_and_allows_a_new_command() {
-        let (tx, _input) = mpsc::channel(8);
-        let (out, rx) = mpsc::channel(8);
-        let mut ep = Endpoint::new(tx, rx, CancellationToken::new(), CancellationToken::new());
-        ep.command("GETPIN".into()).await.unwrap();
-        out.send(SessionOutput::Ignored { request: 1 })
-            .await
-            .unwrap();
-        assert!(ep.next().await.unwrap_err().is::<CandidateIgnored>());
-        ep.command("GETPIN".into()).await.unwrap();
-        out.send(SessionOutput::Line {
-            request: 2,
-            line: "OK".into(),
-        })
-        .await
-        .unwrap();
-        assert_eq!(&*ep.next().await.unwrap(), b"OK");
-    }
-
-    #[tokio::test]
-    async fn ignore_rejects_wrong_ids_inactive_commands_and_pending_inquiries() {
-        for scenario in 0..3 {
-            let (tx, _input) = mpsc::channel(8);
-            let (out, rx) = mpsc::channel(8);
-            let mut ep = Endpoint::new(tx, rx, CancellationToken::new(), CancellationToken::new());
-            if scenario != 0 {
-                ep.command("GETPIN".into()).await.unwrap();
-            }
-            if scenario == 2 {
-                out.send(SessionOutput::Line {
-                    request: 1,
-                    line: "INQUIRE QUALITY test".into(),
-                })
-                .await
-                .unwrap();
-                ep.next().await.unwrap();
-            }
-            out.send(SessionOutput::Ignored {
-                request: if scenario == 1 { 2 } else { 1 },
-            })
-            .await
-            .unwrap();
-            let error = ep.next().await.unwrap_err();
-            assert!(!error.is::<CandidateIgnored>(), "invalid ignore accepted");
-        }
-    }
-
     #[tokio::test]
     async fn request_ids_and_inquiry_state_are_enforced() {
         let (tx, mut input) = mpsc::channel(8);

@@ -134,8 +134,8 @@ final class CoreBridgeTests: XCTestCase {
         XCTAssertTrue(model.channels.isEmpty)
         XCTAssertNil(model.pairing)
         XCTAssertTrue(model.prompts.isEmpty)
-        XCTAssertFalse(model.pinEnabled)
-        XCTAssertFalse(model.cardEnabled)
+        XCTAssertTrue(model.pinEnabled)
+        XCTAssertTrue(model.cardEnabled)
         XCTAssertFalse(model.skipTLSCertificateValidation)
         XCTAssertEqual(model.name, "My iPhone")
         XCTAssertNil(defaults.object(forKey: "relayResetPending"))
@@ -187,7 +187,27 @@ final class CoreBridgeTests: XCTestCase {
             XCTFail("A non-WebSocket relay must not pass onboarding")
         } catch {}
     }
-    func testIdentitySurvivesReopeningAndServicesStartDisabled() throws {
+    @MainActor
+    func testServicesDefaultToEnabledAndPreserveSavedChoices() throws {
+        let suite = "hibiki-tests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        for pin in [nil, false, true] as [Bool?] {
+            for card in [nil, false, true] as [Bool?] {
+                defaults.removePersistentDomain(forName: suite)
+                if let pin { defaults.set(pin, forKey: "pinEnabled") }
+                if let card { defaults.set(card, forKey: "cardEnabled") }
+                let model = AppModel(defaults: defaults)
+                XCTAssertEqual(model.pinEnabled, pin ?? true)
+                XCTAssertEqual(model.cardEnabled, card ?? true)
+                model.updateServices()
+                let reopened = AppModel(defaults: defaults)
+                XCTAssertEqual(reopened.pinEnabled, model.pinEnabled)
+                XCTAssertEqual(reopened.cardEnabled, model.cardEnabled)
+            }
+        }
+    }
+    func testIdentitySurvivesReopening() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let identity = try createIdentity(name: "iPhone test")

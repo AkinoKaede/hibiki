@@ -41,8 +41,8 @@ impl MobileProvider {
         Arc::new(Self {
             broker,
             cards: Arc::new(Mutex::new(cards)),
-            card_enabled: AtomicBool::new(false),
-            pin_enabled: AtomicBool::new(false),
+            card_enabled: AtomicBool::new(true),
+            pin_enabled: AtomicBool::new(true),
             usb_present: Arc::new(AtomicBool::new(false)),
             nfc_available: Arc::new(AtomicBool::new(false)),
             sessions: Mutex::new(HashMap::new()),
@@ -212,15 +212,10 @@ impl Provider for MobileProvider {
                         _=stop.cancelled()=>bail!("card preparation canceled"),
                         result=&mut prompt, if !acknowledged && prompt_started && candidates.len() == 1=>{
                             if let Err(error) = result {
-                                // The UI distinguishes leaving this device from explicitly
-                                // canceling the operation, even before a card is inserted.
-                                if error.is::<crate::broker::OperationCancelled>() {
-                                    return Err(hibiki_core::provider::PreparationRejected.into());
-                                }
-                                if error.is::<crate::broker::CandidateWithdrawn>()
+                                if error.is::<crate::broker::OperationCancelled>()
                                     || error.is::<crate::broker::RequestCancelled>()
                                 {
-                                    return Err(hibiki_core::provider::PreparationDeclined.into());
+                                    return Err(hibiki_core::provider::PreparationRejected.into());
                                 }
                                 return Err(error);
                             }
@@ -382,13 +377,6 @@ impl Provider for MobileProvider {
                             .await
                             {
                                 Ok(Ok(result)) => result,
-                                Ok(Err(error))
-                                    if kind == ServiceKind::Pinentry
-                                        && error.is::<crate::broker::CandidateWithdrawn>() =>
-                                {
-                                    outputs.send(SessionOutput::Ignored { request }).await?;
-                                    continue;
-                                }
                                 Ok(Err(_)) if command_stop.is_cancelled() => {
                                     card::operation_error(&crate::broker::RequestCancelled.into())
                                 }
@@ -468,12 +456,19 @@ impl Drop for CancelOnDrop {
 mod tests {
     use super::*;
     #[test]
-    fn services_start_disabled() {
+    fn services_start_enabled_and_can_be_disabled_independently() {
         let provider = MobileProvider::new(Broker::new(), vec![]);
-        assert!(!provider.enabled(ServiceKind::Scdaemon));
-        assert!(!provider.nfc_available.load(Ordering::Acquire));
-        provider.card_enabled.store(true, Ordering::Release);
         assert!(provider.enabled(ServiceKind::Scdaemon));
+        assert!(provider.enabled(ServiceKind::Pinentry));
+        assert!(!provider.nfc_available.load(Ordering::Acquire));
+        for card in [false, true] {
+            for pin in [false, true] {
+                provider.card_enabled.store(card, Ordering::Release);
+                provider.pin_enabled.store(pin, Ordering::Release);
+                assert_eq!(provider.enabled(ServiceKind::Scdaemon), card);
+                assert_eq!(provider.enabled(ServiceKind::Pinentry), pin);
+            }
+        }
     }
     #[tokio::test]
     async fn pin_inquiry_rejects_cross_request_replies() {

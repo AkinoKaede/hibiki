@@ -22,7 +22,7 @@ pub type OpenFuture<'a> = Pin<Box<dyn Future<Output = Result<Endpoint>> + Send +
 pub type PrepareFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<String>>> + Send + 'a>>;
 
 /// A user explicitly canceled the entire card acquisition.
-/// This is terminal, unlike an unavailable device or a dismissed no-card prompt.
+/// This is terminal, unlike an unavailable device.
 #[derive(Debug)]
 pub struct PreparationRejected;
 impl std::fmt::Display for PreparationRejected {
@@ -31,15 +31,6 @@ impl std::fmt::Display for PreparationRejected {
     }
 }
 impl std::error::Error for PreparationRejected {}
-
-#[derive(Debug)]
-pub struct PreparationDeclined;
-impl std::fmt::Display for PreparationDeclined {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("card candidate dismissed by user")
-    }
-}
-impl std::error::Error for PreparationDeclined {}
 
 /// One acquisition, including its UI, survives pauses for public queries.
 /// Dropping it must close its prompt. A pause must drain any native transaction

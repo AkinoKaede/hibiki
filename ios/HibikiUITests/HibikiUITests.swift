@@ -70,21 +70,22 @@ final class HibikiUITests: XCTestCase {
         }
     }
 
-    func testPINShowsExplicitCancelBelowOKAndKeepsCloseButton() {
+    func testPINUsesOnlyCloseButtonToCancel() {
         let app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture"]
         app.launch()
         let ok = app.buttons["submitPIN"]
-        let cancel = app.buttons["cancelOperation"]
+        let close = app.buttons["cancelPIN"]
         XCTAssertTrue(ok.waitForExistence(timeout: 10))
-        XCTAssertTrue(cancel.isHittable)
-        XCTAssertEqual(cancel.label, "Cancel")
-        XCTAssertGreaterThanOrEqual(cancel.frame.minY, ok.frame.maxY)
-        XCTAssertTrue(app.buttons["cancelPIN"].isHittable)
+        XCTAssertFalse(app.buttons["cancelOperation"].exists)
+        XCTAssertTrue(close.isHittable)
+        XCTAssertEqual(close.label, "Cancel")
         let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.name = "PIN with destructive Cancel below OK"
+        screenshot.name = "PIN with a single close button for cancellation"
         screenshot.lifetime = .keepAlways
         add(screenshot)
+        close.tap()
+        XCTAssertTrue(ok.waitForNonExistence(timeout: 5))
     }
     func testMembersOpenFullIdentityAndOfflinePingDetails() {
         let app = XCUIApplication()

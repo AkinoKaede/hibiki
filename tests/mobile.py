@@ -128,7 +128,6 @@ class Mobile:
         self.delay = 0
         self.cancel = False
         self.pin_action = None
-        self.dismiss_card = False
         self.password = '123456'
         self.events = queue.Queue()
         self.lock = threading.Lock()
@@ -165,9 +164,8 @@ class Mobile:
                     token = event['token']
                     if event.get('prompt_kind') in ('CardUsb', 'CardNfc'):
                         self.card_confirmations += 1
-                        def answer_card(token=token, decline=self.decline_card, dismiss=self.dismiss_card):
-                            if decline: self.send(action='cancel_request', token=token, entire_operation=True)
-                            elif dismiss: self.send(action='dismiss_request', token=token)
+                        def answer_card(token=token, decline=self.decline_card):
+                            if decline: self.send(action='cancel_request', token=token)
                             else: self.send(action='reply', token=token, data='', accepted=True)
                         threading.Timer(self.card_delay, answer_card).start()
                         continue
@@ -175,7 +173,7 @@ class Mobile:
                     def reply(token=token, prompt_kind=event.get('prompt_kind'), action=self.pin_action):
                         if action:
                             self.prompts.discard(token)
-                            self.send(action=action, token=token, entire_operation=True)
+                            self.send(action=action, token=token)
                             return
                         if prompt_kind == 'Pin' and self.before_pin_reply:
                             try:
@@ -244,6 +242,7 @@ def main():
             a.gpg('--import', data=public)
             a.services(); a.configure_agent(); a.start()
             mobile = Mobile(root/'mobile', url, card)
+            mobile.send(action='services', pin=False, card=False); mobile.wait('services')
             while mobile.wait('state')['state'] != 'online':
                 pass
             mobile.send(action='join', invite=invite, psk='')
@@ -340,7 +339,7 @@ def main():
             # With USB inserted, the PIN sheet's X cancels the whole operation,
             # even while another device could still supply the correct PIN.
             a.kill_agent(); a.services(pinentry=True); a.mode(delay=2); a.restart()
-            mobile.pin_action = 'dismiss_request'
+            mobile.pin_action = 'cancel_request'
             previous_verify = len([c for c in mobile.card.commands if c[0] in (0x20, 0x2A)])
             canceled = a.gpg('--local-user', fpr, '--detach-sign', data=b'cancel connected USB', ok=False)
             assert b'cancel' in canceled.stderr.lower(), canceled.stderr
@@ -408,18 +407,23 @@ def main():
             with Assuan(a, 'scdaemon') as scd:
                 wait_for(lambda: mobile.card_confirmations >= previous + 2)
                 assert len(mobile.card.commands) == before, 'USB confirmation must not open NFC or send a PIN'
-            # X without a card withdraws only this candidate, including across
-            # target refinement. Public metadata remains usable.
-            mobile.dismiss_card = True
+            # X without a card cancels the entire operation and cannot be
+            # undone by public metadata queries or target refinement.
+            mobile.decline_card = True
             previous = mobile.card_confirmations
             with Assuan(a, 'scdaemon') as scd:
                 wait_for(lambda: mobile.card_confirmations > previous)
                 time.sleep(.2)
-                dismissed_prompts = mobile.card_confirmations
-                assert scd.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
-                assert scd.command(b'READKEY OPENPGP.1')[-1] == b'OK'
-                assert mobile.card_confirmations == dismissed_prompts
-            mobile.dismiss_card = False
+                canceled_prompts = mobile.card_confirmations
+                started = time.monotonic()
+                assert scd.command(('SERIALNO --demand='+card['serial']).encode())[-1].startswith(b'ERR 99 ')
+                assert time.monotonic() - started < 3
+                assert scd.command(b'READKEY OPENPGP.1')[-1].startswith(b'ERR')
+                assert mobile.card_confirmations == canceled_prompts
+                mobile.decline_card = False
+                assert scd.command(b'RESET')[-1] == b'OK'
+                assert scd.command(b'SERIALNO')[-1] == b'OK'
+                wait_for(lambda: mobile.card_confirmations > canceled_prompts)
             mobile.decline_card = False
             before = len(mobile.card.commands)
             with Assuan(a, 'scdaemon') as scd:
@@ -503,36 +507,25 @@ def main():
                 assert a.gpg('--decrypt', data=ciphertext).stdout == b'ECC card decryption'
                 print('PASS: real GnuPG mobile %s signing + %s decryption' % (signing, decryption), flush=True)
 
-            # Explicit Cancel is global; X is global only while USB is inserted.
-            # A second input device must not override an explicit cancellation.
+            # X always cancels the entire operation, with or without USB.
+            # A second input device must not override cancellation.
             a.services(pinentry=True); a.mode(delay=2, password='desktop'); a.restart()
             mobile.delay = .05
-            for present, action, canceled in [(False, 'dismiss_request', False), (True, 'dismiss_request', True), (False, 'cancel_request', True), (True, 'cancel_request', True)]:
+            for present in (False, True):
                 mobile.send(action='usb_presence', present=present); mobile.wait('usb-presence')
-                mobile.pin_action = action
+                mobile.pin_action = 'cancel_request'
                 with Assuan(a, 'pinentry') as pin:
                     result = pin.command(b'GETPIN')
-                    if canceled:
-                        assert result[-1].startswith(b'ERR 99 '), result
-                        assert not any(line.startswith(b'D ') for line in result)
-                    else: assert b'D desktop' in result, result
+                    assert result[-1].startswith(b'ERR 99 '), result
+                    assert not any(line.startswith(b'D ') for line in result)
+                    wait_for(a.idle)
+                    # Only an explicit new caller command starts a fresh request.
+                    mobile.pin_action = None
+                    assert pin.command(b'GETPIN')[-1] == b'OK'
                 wait_for(a.idle)
-            # With no remaining candidates, Ignore ends promptly as an aggregate
-            # failure; no custom message or NO_DATA is forwarded to gpg-agent.
-            a.services(); a.restart()
-            mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
-            mobile.pin_action = 'dismiss_request'
-            with Assuan(a, 'pinentry') as pin:
-                started = time.monotonic()
-                result = pin.command(b'GETPIN')
-                assert result == [b'ERR 1 no pinentry providers'], result
-                assert time.monotonic() - started < 3, 'all ignored waited for timeout'
-                # Explicitly starting another command is allowed after ignoring.
-                mobile.pin_action = None
-                assert pin.command(b'GETPIN')[-1] == b'OK'
             mobile.pin_action = None
             a.mode()
-            print('PASS: iOS Cancel and connected X terminate input races; disconnected X only withdraws mobile', flush=True)
+            print('PASS: iOS X with or without USB cancels all input candidates; new requests still work', flush=True)
 
             # A second desktop pinentry beats a delayed mobile UI and cancels its token.
             a.services(pinentry=True); a.restart(); mobile.delay = 2

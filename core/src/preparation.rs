@@ -1,7 +1,7 @@
 //! Card acquisition is distinct from both public metadata and private execution.
 use crate::{
     endpoint::Endpoint,
-    provider::{Preparation, PreparationDeclined, PreparationRejected, Provider, ProviderContext},
+    provider::{Preparation, PreparationRejected, Provider, ProviderContext},
     storage::App,
 };
 use anyhow::{Context, Result, bail};
@@ -76,7 +76,6 @@ struct Acquisition {
     state: CardPreparation,
     preparation: Option<Box<dyn Preparation>>,
     retired: bool,
-    withdrawn: bool,
 }
 impl Acquisition {
     async fn report(&mut self, outputs: &mpsc::Sender<SessionOutput>) -> Result<()> {
@@ -97,10 +96,6 @@ impl Acquisition {
             Ok(None) => return Ok(()), // Paused for a query; preserve the prompt.
             Ok(Some(serial)) => CardPreparation::Ready { serial },
             Err(error) if error.is::<PreparationRejected>() => CardPreparation::Rejected,
-            Err(error) if error.is::<PreparationDeclined>() => {
-                self.withdrawn = true;
-                CardPreparation::Unavailable
-            }
             Err(_) => CardPreparation::Unavailable,
         };
         self.preparation = None;
@@ -165,7 +160,6 @@ pub fn wrap(
                         target.validate()?;
                         if let Some(current) = acquisition.as_mut()
                             && ((current.target == target && !current.retired)
-                                || current.withdrawn
                                 || matches!(current.state, CardPreparation::Rejected))
                         {
                             // Repeated notifications do not dismiss an unanswered prompt
@@ -187,7 +181,6 @@ pub fn wrap(
                                 },
                                 preparation,
                                 retired: false,
-                                withdrawn: false,
                             });
                         }
                         acquisition.as_mut().unwrap().report(&outputs).await?;

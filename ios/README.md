@@ -175,7 +175,7 @@ actionlint .github/workflows/build.yml
 3. For member invitations, compare **all 24 public-key words and the request ID**
    on an existing member before approving. The words are public identity data,
    not a recovery phrase. Pending requests remain until approved or invalidated; they have no time limit.
-4. Enable Pinentry and/or OpenPGP Card. Both start disabled. On the
+4. Configure Pinentry and OpenPGP Card. Both start enabled. On the
    requesting computer, configure the Hibiki adapters as described in the
    [desktop usage guide](../USAGE.md#4-connect-the-requesting-devices-agent).
    The app can approve members, share invitations, rotate PSKs, revoke
@@ -184,7 +184,7 @@ actionlint .github/workflows/build.yml
 To switch servers, open **Settings → Connection → Disconnect from server** and
 confirm. This works offline, stops current requests, clears local pairing and the
 device identity, and returns to setup with an empty address field. Security key registrations and the device
-name are kept; password/card services and the TLS bypass are reset to off. Connect
+name are kept; password/card services reset to enabled and the TLS bypass resets to off. Connect
 to the new server and pair again. Returning to the old server also requires pairing
 with a new device identity. This local disconnect does not delete server-side
 channels or revoke the old membership; remaining members can remove the old device.
@@ -392,16 +392,15 @@ The USB PIN description can read live Number, Holder, signature Counter and low
 remaining-attempt counts. NFC does not present stale counters before the tap.
 Neither confirmation nor a registered public key is proof of USB readiness.
 
-The request page has a **Cancel** button that cancels the whole operation and
-closes other input candidates. The **×** closes only this device's candidate when
-USB is absent, sending an internal Ignore message so other candidates may continue;
-with USB inserted, it also cancels the whole operation. Ignore requires both peers
-to support `pinentry-ignore-v1`, has no legacy error-code fallback, and never reaches
-gpg-agent. Explicit cancellation returns standard Assuan Canceled (99). USB presence
-is refreshed when × is tapped. A canceled or dismissed card preparation is not
-reopened by metadata queries or target refinement; RESET/RESTART or a new request
-session permits another attempt. Desktop insertion and PIN dialogs always cancel
-the whole operation when Cancel is clicked, including when no key is inserted.
+Pinentry and OpenPGP Card services default to enabled. Previously saved off settings
+remain off; enabling the card service still requires registering a security key.
+
+The request page uses **×** to cancel the entire operation and close other input
+candidates, whether or not a USB key is inserted. There is no separate Cancel
+button. PIN cancellation returns standard Assuan Canceled (99). Canceled card
+preparation is not reopened by metadata queries or target refinement;
+RESET/RESTART or a new request session permits another attempt. Desktop insertion
+and PIN dialogs also cancel the whole operation when Cancel is clicked.
 
 When replacing an unpublished Postcard build, upgrade all components to the
 Protobuf `hibiki/2` baseline once. Later same-major releases support separate
