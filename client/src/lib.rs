@@ -13,5 +13,6 @@ pub mod terminal;
 
 pub mod management;
 pub mod presentation;
+pub mod tui;
 
 mod card_pool;

@@ -55,6 +55,8 @@ enum Commands {
         json: bool,
     },
 
+    /// Interactive device, channel, request and service management.
+    Tui,
     /// Show live daemon, relay and selected-channel status.
     Status {
         #[arg(long)]
@@ -181,6 +183,9 @@ async fn main() -> std::process::ExitCode {
 
 async fn run() -> Result<()> {
     let args = Args::parse();
+    if matches!(args.command, Commands::Tui) {
+        return hibiki::tui::run(args.config).await;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_ansi(anstream::AutoStream::choice(&std::io::stderr()) != anstream::ColorChoice::Never)
