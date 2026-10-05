@@ -1032,12 +1032,12 @@
         }
       }
     },
-    "Refresh USB Information": {
+    "Read USB Information": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "刷新USB信息"
+            "value": "读取USB信息"
           }
         }
       }

@@ -266,6 +266,10 @@ final class HibikiUITests: XCTestCase {
             }
             app.tabBars.buttons["Security Keys"].tap()
             XCTAssertEqual(app.segmentedControls["inspectionTransport"].exists, nfc)
+            let read = app.buttons["readSecurityKeyInfo"]
+            XCTAssertEqual(read.label, "Read USB Information")
+            XCTAssertTrue(read.isEnabled)
+            XCTAssertTrue(read.isHittable)
             XCTAssertFalse(app.buttons["registerSecurityKey"].exists)
             XCTAssertFalse(app.buttons["recordNFCKey"].exists)
             XCTAssertFalse(app.buttons["editSecurityKey"].exists)

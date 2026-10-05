@@ -38,8 +38,7 @@ final class CardInspection {
     func usbChanged(_ present: Bool) {
         guard usbPresent != present else { return }
         usbPresent = present
-        guard transport == .usb else { return }
-        cancel()
+        if !present, transport == .usb { cancel() }
     }
 
     func usbRemoved() {
@@ -60,7 +59,7 @@ final class CardInspection {
     }
 
     func refresh() {
-        guard visible, active, (transport == .nfc ? nfcAvailable : usbPresent), let read else { return }
+        guard visible, active, (transport != .nfc || nfcAvailable), let read else { return }
         let previous = task
         cancel()
         if transport == .nfc { info = nil }

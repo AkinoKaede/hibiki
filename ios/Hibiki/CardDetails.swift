@@ -20,12 +20,12 @@ struct CardInspectionView: View {
             }
             Button { inspection.refresh() } label: {
                 HStack {
-                    Text(inspection.transport == .usb ? "Refresh USB Information" : "Read NFC Information")
+                    Text(inspection.transport == .usb ? "Read USB Information" : "Read NFC Information")
                     Spacer()
                     if inspection.isReading { ProgressView() }
                 }
             }
-            .disabled(model.busy || inspection.isReading || (inspection.transport == .usb && !model.usbPresent))
+            .disabled(model.busy || inspection.isReading)
             .accessibilityIdentifier("readSecurityKeyInfo")
             if let error = inspection.error { Text(verbatim: error).foregroundStyle(.red) }
         } header: { Text("Security Key Reader") } footer: {

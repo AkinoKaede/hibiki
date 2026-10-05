@@ -127,6 +127,28 @@ async fn next(client: &MobileClient) -> NativeEvent {
         .unwrap()
 }
 
+/// Model the native USB probe explicitly; public discovery must never prompt or open NFC.
+async fn query_without_usb(
+    client: &MobileClient,
+    ep: &mut Endpoint,
+    line: assuan::Line,
+) -> anyhow::Result<assuan::AssuanResult> {
+    let query = hibiki_core::preparation::query(ep, line);
+    tokio::pin!(query);
+    loop {
+        tokio::select! {
+            result = &mut query => return result,
+            event = next(client) => match event {
+                NativeEvent::CardOpen { token, transport: CardTransport::Usb, .. } => {
+                    client.card_not_present(token).unwrap();
+                }
+                NativeEvent::Cancelled { .. } | NativeEvent::CardClose { .. } => {}
+                _ => panic!("unexpected native work during public discovery"),
+            }
+        }
+    }
+}
+
 async fn prepare(
     client: &MobileClient,
     context: ProviderContext,
@@ -157,73 +179,66 @@ async fn prepare(
 }
 
 #[tokio::test]
-async fn no_card_cancel_is_retained_while_preparation_is_paused_for_a_public_query() {
-    let (_root, client, context, _) = fixture();
-    let (mut preparation, mut ep) = prepare(&client, context).await;
-    let pause = CancellationToken::new();
-    let token = pause.clone();
-    let task = tokio::spawn(async move {
-        let result = preparation.poll(&mut ep, token).await;
-        (preparation, ep, result)
-    });
-    let NativeEvent::Prompt { prompt } = next(&client).await else {
-        panic!()
-    };
-    pause.cancel();
-    let (mut preparation, mut ep, result) = task.await.unwrap();
-    assert!(result.unwrap().is_none());
-    client.cancel_request(prompt.token.clone()).unwrap();
-    let result = hibiki_core::preparation::query(&mut ep, "SERIALNO".into())
-        .await
-        .unwrap();
-    assert!(matches!(
-        assuan::parse_response(result.lines.last().unwrap()).unwrap(),
-        assuan::Response::Err(assuan::CARD_NOT_PRESENT)
-    ));
-    let error = tokio::time::timeout(
-        Duration::from_secs(1),
-        preparation.poll(&mut ep, CancellationToken::new()),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert!(error.is::<hibiki_core::provider::PreparationRejected>());
-    assert!(!client.request_is_pending(prompt.token));
-    ep.close().await;
+async fn discovered_usb_prepares_without_reading_or_checking_presence_even_without_nfc() {
+    for nfc in [false, true] {
+        for present in [false, true] {
+            let (_root, client, context, mut card) = fixture();
+            client.set_nfc_available(nfc);
+            client.usb_present(present);
+            card.transport = CardTransport::Usb;
+            let (mut preparation, mut ep) = prepare(&client, context.clone()).await;
+            let state = client.provider.sessions.lock().unwrap()[&context.session]
+                .upgrade()
+                .unwrap();
+            state.lock().unwrap().usb = Some(card.clone());
+            // Metadata preparation must not even wait for a busy hardware slot.
+            let _busy = client.slots.clone().acquire_owned().await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(
+                    Duration::from_millis(100),
+                    preparation.poll(&mut ep, CancellationToken::new())
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+                Some(card.serial.clone()),
+            );
+            assert_eq!(
+                state.lock().unwrap().prepared.as_ref().unwrap().serial,
+                card.serial
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), client.next_event())
+                    .await
+                    .is_err()
+            );
+            ep.close().await;
+        }
+    }
 }
 
 #[tokio::test]
-async fn preparation_cancel_interrupts_pending_usb_probe() {
-    let (_root, client, context, _) = fixture();
-    let (mut preparation, mut ep) = prepare(&client, context).await;
-    let task =
-        tokio::spawn(async move { preparation.poll(&mut ep, CancellationToken::new()).await });
-    let NativeEvent::Prompt { prompt } = next(&client).await else {
-        panic!()
-    };
-    client.usb_present(true);
-    let NativeEvent::CardOpen {
-        token, connection, ..
-    } = next(&client).await
-    else {
-        panic!()
-    };
-    // Leave the hardware request unanswered, as with a stalled reader.
-    client.cancel_request(prompt.token).unwrap();
-    let error = tokio::time::timeout(Duration::from_secs(1), task)
+async fn undiscovered_target_is_unavailable_without_probing_or_prompting() {
+    for present in [false, true] {
+        let (_root, client, context, _) = fixture();
+        client.usb_present(present);
+        let (mut preparation, mut ep) = prepare(&client, context).await;
+        let _busy = client.slots.clone().acquire_owned().await.unwrap();
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            preparation.poll(&mut ep, CancellationToken::new()),
+        )
         .await
         .unwrap()
-        .unwrap()
         .unwrap_err();
-    assert!(error.is::<hibiki_core::provider::PreparationRejected>());
-    loop {
-        if let NativeEvent::CardClose { connection: closed } = next(&client).await {
-            assert_eq!(closed, connection);
-            break;
-        }
+        assert!(error.to_string().contains("has not been discovered"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), client.next_event())
+                .await
+                .is_err()
+        );
+        ep.close().await;
     }
-    assert!(!client.request_is_pending(token.clone()));
-    assert!(client.respond(token, vec![], true).is_err());
 }
 
 #[tokio::test]
@@ -367,20 +382,23 @@ async fn serial_queries_use_only_the_current_volatile_record_without_prompting()
             "SERIALNO --all".into(),
             format!("SERIALNO --demand={}", card.serial),
         ] {
-            let result = hibiki_core::preparation::query(&mut ep, command.as_str().into())
+            let result = query_without_usb(&client, &mut ep, command.as_str().into())
                 .await
                 .unwrap();
             assert_eq!(result.success(), recorded && available);
         }
-        let result = hibiki_core::preparation::query(&mut ep, "SERIALNO --demand=ABCD".into())
+        let result = query_without_usb(&client, &mut ep, "SERIALNO --demand=ABCD".into())
             .await
             .unwrap();
         assert!(!result.success());
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), client.next_event())
-                .await
-                .is_err()
-        );
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(20), client.next_event()).await
+        {
+            assert!(matches!(
+                event,
+                NativeEvent::Cancelled { .. } | NativeEvent::CardClose { .. }
+            ));
+        }
         ep.close().await;
     }
 }

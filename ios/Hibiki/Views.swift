@@ -808,7 +808,6 @@ struct PinView: View {
                 catch MobileError.Cancelled { }
                 catch { model.show(error) }
             } else {
-                if cardRequest || asksPin { await model.syncUSBState() }
                 model.answer(prompt, text: value, accepted: true)
             }
         }

@@ -214,8 +214,9 @@ to replace it, or **Forget NFC Key** to clear it. Reading never asks for a PIN. 
 network reconnects retain completed records; a cold launch starts empty. No card
 information or names are persisted.
 
-Security Keys is a read-only information viewer. USB reads only when **Refresh USB Information** is tapped;
-NFC reads only after tapping **Read NFC Information**. Viewing another card does
+Security Keys is a read-only information viewer. USB reads only when **Read USB Information** is tapped.
+The USB button remains available without a presence notification; a read reports
+whether a card is actually connected. NFC reads only after tapping **Read NFC Information**. Viewing another card does
 not record it for use or change the Status record. Results show public keys,
 fingerprints, keygrips and creation dates; NFC results are snapshots, not proof
 of a continuous connection. Leaving, switching transport or backgrounding cancels
@@ -223,7 +224,9 @@ unfinished inspection. The last successful USB result stays visible after remova
 failed or canceled refreshes, and returning to the viewer, until a new read succeeds. Switching back
 from NFC restores the USB snapshot. These results are only cached in memory.
 
-Ordinary `SERIALNO` checks USB first, then the current NFC snapshot. A targeted
+Ordinary `SERIALNO` performs a live USB probe and waits for its result before
+falling back to the current NFC snapshot. Cached USB presence never suppresses
+this probe, so reinsertion can be discovered by the first request. A targeted
 `SERIALNO --demand=<serial>` requires a matching serial. Neither starts a scanner.
 Public reads use the same hardware lock as card operations; idle card sessions
 do not hold the reader indefinitely.
@@ -240,8 +243,12 @@ the in-memory record; cancellation, errors and mismatches preserve the old recor
 The read has its own cancellation handle, so completing the old CONFIRM does not
 cancel it. Existing Pinentry queuing and system sheet presentation are unchanged.
 
-For signing or decryption, the chosen iOS provider obtains the PIN from the
-requesting computer’s agent cache or requests input from any Pinentry device.
+For signing or decryption, preparation only matches the target against already
+discovered USB metadata or the current NFC record. It does not check USB presence,
+open a reader, poll for insertion, or show an extra insertion confirmation. An
+undiscovered target is unavailable until an explicit public query discovers it.
+The chosen iOS provider then obtains the PIN from the requesting computer’s agent
+cache or requests input from any Pinentry device.
 Once the PIN is available, it probes USB again regardless of the last
 presence notification. A matching USB card is used immediately. If absent or a
 different card is connected, Core NFC scans for the target. This also works for a
@@ -436,10 +443,9 @@ remain off; USB access does not require registering a security key.
 
 The request page uses **×** to cancel the entire operation and close other input
 candidates, whether or not a USB key is inserted. There is no separate Cancel
-button. PIN cancellation returns standard Assuan Canceled (99). Canceled card
-preparation is not reopened by metadata queries or target refinement;
-RESET/RESTART or a new request session permits another attempt. Desktop insertion
-and PIN dialogs also cancel the whole operation when Cancel is clicked.
+button. PIN cancellation returns standard Assuan Canceled (99) without opening
+USB or NFC. Desktop insertion and PIN dialogs also cancel the whole operation
+when Cancel is clicked.
 
 When replacing an unpublished Postcard build, upgrade all components to the
 Protobuf `hibiki/4` baseline once. Later same-major releases support separate

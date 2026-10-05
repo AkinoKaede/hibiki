@@ -4,7 +4,7 @@ use crate::{
     pin_cache::{PinCache, Scope},
     pinentry::Pinentry,
     provider_cards::{CardSetSession, matches_target},
-    types::{CardInfo, CardTransport, NativeEvent, PinPrompt, PromptKind},
+    types::{CardInfo, CardTransport},
 };
 use anyhow::{Context, Result, bail};
 use hibiki_core::{
@@ -76,9 +76,8 @@ impl MobileProvider {
         })
     }
 }
-// Mobile preparation does not borrow the native Assuan endpoint. Keep its
-// complete future (including broker reply tokens and NFC/USB state) across
-// public queries, polling it again when the controller resumes acquisition.
+// Preparation selects already discovered metadata only. Native reader access
+// belongs to public discovery and private execution after PIN acquisition.
 struct MobilePreparation(
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>,
 );
@@ -107,15 +106,12 @@ impl Provider for MobileProvider {
     }
     fn prepare(
         &self,
-        app: Arc<App>,
+        _app: Arc<App>,
         target: hibiki_lib::protocol::CardTarget,
         context: ProviderContext,
     ) -> Result<Box<dyn hibiki_core::provider::Preparation>> {
-        let slots = self.slots.clone();
         let cards = self.nfc_card.clone();
-        let broker = self.broker.clone();
         let nfc_available = self.nfc_available.clone();
-        let usb_present = self.usb_present.clone();
         let prepared = self
             .sessions
             .lock()
@@ -124,7 +120,6 @@ impl Provider for MobileProvider {
             .and_then(Weak::upgrade)
             .context("card session is closed")?;
         Ok(Box::new(MobilePreparation(Box::pin(async move {
-            let stop = CancellationToken::new();
             target.validate()?;
             prepared.lock().unwrap().prepared = None;
             if nfc_available.load(Ordering::Acquire)
@@ -146,92 +141,12 @@ impl Provider for MobileProvider {
                 .usb
                 .clone()
                 .filter(|c| matches_target(c, &target));
-            // A previously discovered USB identity can proceed to PIN entry even
-            // after removal: the final reader is chosen only once the PIN arrives.
-            if nfc_available.load(Ordering::Acquire)
-                && let Some(info) = known_usb.clone()
-            {
-                let serial = info.serial.clone();
-                prepared.lock().unwrap().prepared = Some(info);
-                return Ok(serial);
-            }
-            let prompt_stop = stop.child_token();
-            let _guard = CancelOnDrop(stop.clone());
-            let make_prompt = || async {
-                let serial = target
-                    .serial
-                    .as_deref()
-                    .or_else(|| known_usb.as_ref().map(|c| c.serial.as_str()))
-                    .context("card serial number is required for insertion prompt")?;
-                confirm_card(&app, &context, &broker, &prompt_stop, serial, false).await
-            };
-            let mut prompt = Box::pin(make_prompt());
-            let mut prompt_started = false;
-            loop {
-                if stop.is_cancelled() {
-                    bail!("card preparation canceled");
-                }
-                // Once shown, keep polling the prompt while USB detection is in flight.
-                // A ready card must not overtake an already submitted cancellation.
-                prompt_started |= !usb_present.load(Ordering::Acquire);
-                let probe = async {
-                    if nfc_available.load(Ordering::Acquire)
-                        && let Some(info) = cards
-                            .lock()
-                            .unwrap()
-                            .clone()
-                            .filter(|c| matches_target(c, &target))
-                    {
-                        let serial = info.serial.clone();
-                        let mut state = prepared.lock().unwrap();
-                        state.prepared = Some(info);
-                        state.nfc_used = true;
-                        return Ok(Some(serial));
-                    }
-                    if usb_present.load(Ordering::Acquire) {
-                        let Ok(_permit) = slots.clone().try_acquire_owned() else {
-                            tokio::time::sleep(Duration::from_millis(300)).await;
-                            return Ok(None);
-                        };
-                        match inspect_usb(&broker, &stop, Some(Arc::new(_permit))).await {
-                            Ok(Some(info)) if matches_target(&info, &target) => {
-                                let serial = info.serial.clone();
-                                let mut state = prepared.lock().unwrap();
-                                state.usb = Some(info.clone());
-                                state.prepared = Some(info);
-                                return Ok(Some(serial));
-                            }
-                            Err(error) => return Err(error),
-                            _ => {}
-                        }
-                    }
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    Ok(None)
-                };
-                tokio::pin!(probe);
-                loop {
-                    tokio::select! {
-                        biased;
-                        _=stop.cancelled()=>bail!("card preparation canceled"),
-                        result=&mut prompt, if prompt_started=>{
-                            if let Err(error) = result {
-                                if error.is::<crate::broker::OperationCancelled>()
-                                    || error.is::<crate::broker::RequestCancelled>()
-                                {
-                                    return Err(hibiki_core::provider::PreparationRejected.into());
-                                }
-                                return Err(error);
-                            }
-                            prompt = Box::pin(make_prompt());
-                        },
-                        serial=&mut probe=>{
-                            if let Some(serial) = serial? { return Ok(serial); }
-                            prompt_started = true;
-                            break;
-                        },
-                    }
-                }
-            }
+            // Presence and NFC capability do not affect metadata readiness. The
+            // actual card is selected and verified only after obtaining the PIN.
+            let info = known_usb.context("target card has not been discovered")?;
+            let serial = info.serial.clone();
+            prepared.lock().unwrap().prepared = Some(info);
+            Ok(serial)
         }))))
     }
     fn open(
@@ -344,7 +259,6 @@ impl Provider for MobileProvider {
                                             card: card.as_ref(),
                                             permit: _permit.clone(),
                                             broker: &broker,
-                                            usb_present: usb_present.load(Ordering::Acquire),
                                             nfc_available: nfc_available.load(Ordering::Acquire),
                                         };
                                         match query.run(args, &app, &context, &command_stop).await?
@@ -477,7 +391,6 @@ struct SerialQuery<'a> {
     card: Option<&'a CardInfo>,
     permit: Option<Arc<OwnedSemaphorePermit>>,
     broker: &'a Arc<Broker>,
-    usb_present: bool,
     nfc_available: bool,
 }
 impl SerialQuery<'_> {
@@ -491,8 +404,9 @@ impl SerialQuery<'_> {
         let serial = args
             .split_ascii_whitespace()
             .find_map(|a| a.strip_prefix("--demand="));
-        if self.usb_present
-            && let Some(info) = inspect_usb(self.broker, stop, self.permit.clone()).await?
+        // Presence notifications can lag behind a reinserted USB card. Complete
+        // a live probe in this command before reporting no card to gpg-agent.
+        if let Some(info) = inspect_usb(self.broker, stop, self.permit.clone()).await?
             && serial.is_none_or(|s| s.eq_ignore_ascii_case(&info.serial))
         {
             return Ok(Some(info));
@@ -525,49 +439,6 @@ async fn inspect_usb(
         Err(error) if error.is::<crate::broker::CardNotPresent>() => Ok(None),
         Err(error) => Err(error),
     }
-}
-
-async fn confirm_card(
-    app: &App,
-    context: &ProviderContext,
-    broker: &Arc<Broker>,
-    stop: &CancellationToken,
-    serial: &str,
-    nfc: bool,
-) -> Result<Zeroizing<Vec<u8>>> {
-    let state = app.proof(&context.channel)?.verify()?;
-    let device = state.member(&context.peer)?;
-    broker
-        .request(
-            |token| NativeEvent::Prompt {
-                prompt: PinPrompt {
-                    token,
-                    session: context.session.clone(),
-                    request: 0,
-                    channel: state.name.clone(),
-                    device_name: device.name.clone(),
-                    device_id: context.peer.clone(),
-                    kind: if nfc {
-                        PromptKind::CardNfc
-                    } else {
-                        PromptKind::CardUsb
-                    },
-                    title: String::new(),
-                    description: hibiki_lib::card_prompt::description(serial, ""),
-                    label: String::new(),
-                    error: String::new(),
-                    repeat: String::new(),
-                    repeat_error: String::new(),
-                    ok: String::new(),
-                    cancel: String::new(),
-                    not_ok: String::new(),
-                    timeout_seconds: app.config.operation_timeout_seconds as u32,
-                },
-            },
-            stop,
-            Duration::from_secs(app.config.operation_timeout_seconds),
-        )
-        .await
 }
 
 async fn send(outputs: &mpsc::Sender<SessionOutput>, request: u64, line: Line) -> Result<()> {

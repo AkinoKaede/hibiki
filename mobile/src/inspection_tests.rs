@@ -718,3 +718,60 @@ async fn usb_identification_tracks_native_insertions_and_rejects_late_reads() {
         );
     }
 }
+
+#[tokio::test]
+async fn first_serialno_after_usb_reinsertion_waits_for_live_card_despite_stale_presence() {
+    use hibiki_core::provider::{Provider, ProviderContext};
+    use hibiki_lib::protocol::ServiceKind;
+    let serial = "D2760001240103040005000012340000";
+    for command in [
+        "SERIALNO".to_owned(),
+        "SERIALNO --all".into(),
+        format!("SERIALNO --demand={serial}"),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let core = client(root.path());
+        core.usb_connections(vec!["old-insertion".into()]);
+        core.usb_connections(vec![]);
+        // The physical card has been reinserted, but its presence event has not arrived.
+        let mut ep = core
+            .provider
+            .open(
+                core.app.clone(),
+                ServiceKind::Scdaemon,
+                core.slots.clone(),
+                CancellationToken::new(),
+                ProviderContext {
+                    local: None,
+                    channel: "channel".into(),
+                    peer: "peer".into(),
+                    session: "reinsert".into(),
+                },
+            )
+            .await
+            .unwrap();
+        ep.command(command.as_str().into()).await.unwrap();
+        let token = match next(&core).await {
+            NativeEvent::CardOpen {
+                token,
+                transport: CardTransport::Usb,
+                ..
+            } => token,
+            _ => panic!("SERIALNO must probe USB without an insertion prompt"),
+        };
+        assert!(
+            ep.rx.try_recv().is_err(),
+            "SERIALNO replied before the live probe completed"
+        );
+        core.usb_connections(vec!["new-insertion".into()]);
+        core.respond(token, b"new-insertion".to_vec(), true)
+            .unwrap();
+        finish_public_read(&core, CardTransport::Usb).await;
+        assert_eq!(
+            &*ep.next().await.unwrap(),
+            format!("S SERIALNO {serial}").as_bytes()
+        );
+        assert_eq!(&*ep.next().await.unwrap(), b"OK");
+        ep.close().await;
+    }
+}

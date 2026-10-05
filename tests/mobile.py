@@ -271,6 +271,14 @@ def pin_cache_scenarios(a, mobile, fpr, card, encrypted):
     a.gpg('--card-status')
     agent('RESTART')
     sign(0)
+    # A reinserted USB card must be found by the first query even before its event.
+    mobile.send(action='clear_nfc'); mobile.wait('nfc-cleared')
+    mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+    mobile.usb_present = True  # Physical insertion; the core still believes USB is absent.
+    events = sign(1)
+    assert ('prompt', 'Confirm') not in events, events
+    assert ('open', 'Usb') in events and ('open', 'Nfc') not in events, events
+    mobile.send(action='record_nfc', present=True); mobile.wait('recorded')
     # USB removal invalidates the shared entry; separate NFC scans preserve it.
     mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
     assert ('open', 'Nfc') in sign(1)
@@ -284,13 +292,16 @@ def pin_cache_scenarios(a, mobile, fpr, card, encrypted):
     assert ('open', 'Nfc') in sign(0)
     mobile.send(action='usb_presence', present=True); mobile.wait('usb-presence')
     assert ('open', 'Nfc') not in sign(0)
-    # Wrong hardware never sees a PIN, even with a valid agent cache hit.
+    # Wrong hardware inserted after discovery never sees a PIN.
     wrong = Card(dict(card, serial='D2760001240103040005000099990000'))
     mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
-    # The newly inserted wrong USB card arrives after the last presence report.
-    mobile.usb_present = True
+    # Insert only after discovery has selected the recorded NFC identity.
     mobile.usb_card = wrong
-    assert ('open', 'Nfc') in sign(1)
+    mobile.before_pin_reply = lambda: setattr(mobile, 'usb_present', True)
+    try:
+        assert ('open', 'Nfc') in sign(1)
+    finally:
+        mobile.before_pin_reply = None
     assert not any(c[0] == 0x20 for c in wrong.commands)
     mobile.usb_card = None
     mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
@@ -465,7 +476,7 @@ def main():
                     assert scd.command(command)[-1].startswith(b'ERR'), command
             print('PASS: volatile NFC is immediately discoverable; clearing removes discovery; no registry file is written', flush=True)
 
-            # Connected USB bypasses consent; a disconnected USB-only key asks for insertion.
+            # Discovered USB metadata bypasses extra consent; physical checks follow the PIN.
             a.kill_agent()
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
@@ -511,7 +522,10 @@ def main():
                     assert a.gpg('--decrypt', data=encrypted).stdout == b'mobile decryption'
                 events = mobile.operation_events[first_event:]
                 assert ('prompt', 'CardNfc') not in events and ('prompt', 'CardUsb') not in events, events
-                assert events.index(('prompt', 'Pin')) < events.index(('open', 'Usb')) < events.index(('open', 'Nfc')), events
+                pin_index = events.index(('prompt', 'Pin'))
+                assert ('open', 'Nfc') not in events[:pin_index], events
+                after_pin = events[pin_index:]
+                assert after_pin.index(('open', 'Usb')) < after_pin.index(('open', 'Nfc')), events
             # Insert USB during the PIN prompt after starting with no USB connection.
             # The actual USB card must win after the PIN reply.
             def insert_usb_before_pin_reply():
@@ -535,7 +549,7 @@ def main():
                 events = mobile.operation_events[first_event:]
                 assert ('prompt', 'CardNfc') not in events, events
                 assert ('open', 'Nfc') not in events, events
-                assert events.index(('prompt', 'Pin')) < events.index(('open', 'Usb')), events
+                assert ('open', 'Usb') in events[events.index(('prompt', 'Pin')) + 1:], events
             print('PASS: inserting USB during PIN entry uses USB without opening NFC', flush=True)
             # A wrong USB card is inspected but must never receive VERIFY.
             wrong_usb = Card(dict(card, serial='D2760001240103040005000099990000'))
@@ -604,41 +618,47 @@ def main():
             mobile.send(action='start'); mobile.wait('started')
             mobile.send(action='nfc_capability', available=False); mobile.wait('nfc-capability')
             mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
-            mobile.decline_card = False
             before = len(mobile.card.commands)
             previous = mobile.card_confirmations
             with Assuan(a, 'scdaemon') as scd:
                 assert scd.command(demand)[-1].startswith(b'ERR 112 ')
-                assert mobile.card_confirmations == previous
                 assert scd.command(b'SETDATA '+b'01'*32)[-1] == b'OK'
-                scd.send(b'PKSIGN --hash=sha256 OPENPGP.1')
-                wait_for(lambda: mobile.card_confirmations >= previous + 2)
-                assert len(mobile.card.commands) == before, 'USB confirmation must not open NFC or send a PIN'
-            # X without a card cancels the entire operation and cannot be
-            # undone by public metadata queries or target refinement.
-            mobile.decline_card = True
-            previous = mobile.card_confirmations
-            with Assuan(a, 'scdaemon') as scd:
-                for command in (b'PKSIGN --hash=sha256 OPENPGP.1', b'PKDECRYPT OPENPGP.2'):
-                    assert scd.command(b'RESET')[-1] == b'OK'
-                    assert scd.command(('SERIALNO --demand='+card['serial']).encode())[-1].startswith(b'ERR 112 ')
-                    assert mobile.card_confirmations == previous, 'RESET discovery requested consent'
-                    assert scd.command(b'SETDATA '+b'01'*32)[-1] == b'OK'
-                    started = time.monotonic()
-                    assert scd.command(command)[-1].startswith(b'ERR 99 ')
-                    assert time.monotonic() - started < 3
-                    assert mobile.card_confirmations > previous, 'new operation did not request consent'
-                    previous = mobile.card_confirmations
-                    assert scd.command(b'READKEY OPENPGP.1')[-1].startswith(b'ERR')
-                    assert scd.command(command)[-1].startswith(b'ERR')
-                    assert mobile.card_confirmations == previous, 'canceled operation prompted again'
+                first_event = len(mobile.operation_events)
+                started = time.monotonic()
+                assert scd.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR')
+                assert time.monotonic() - started < 3
+                assert mobile.operation_events[first_event:] == [], 'unknown metadata must not probe or prompt'
             assert len(mobile.card.commands) == before
-            mobile.decline_card = False
+            # Even USB-only metadata remains ready after removal. Canceling PIN
+            # entry must not open USB; accepting the PIN starts the physical probe.
+            for accept in (False, True):
+                mobile.send(action='usb_presence', present=True); mobile.wait('usb-presence')
+                with Assuan(a, 'scdaemon') as scd:
+                    assert scd.command(demand)[-1] == b'OK'
+                    mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+                    assert scd.command(b'SETDATA '+b'01'*32)[-1] == b'OK'
+                    first_event = len(mobile.operation_events)
+                    inquiries = []
+                    def answer_without_probe(line):
+                        inquiries.append(line.split()[1])
+                        assert line.startswith(b'INQUIRE NEEDPIN '), line
+                        assert mobile.operation_events[first_event:] == [], 'pre-PIN hardware access'
+                        return [b'D 123456', b'END'] if accept else [b'CAN']
+                    result = scd.command(b'PKSIGN --hash=sha256 OPENPGP.1', answer_without_probe)
+                    assert inquiries == [b'NEEDPIN'], inquiries
+                    assert result[-1].startswith(b'ERR'), result
+                    events = mobile.operation_events[first_event:]
+                    assert (('open', 'Usb') in events) == accept, events
+                    assert ('open', 'Nfc') not in events, events
+                    if not accept:
+                        assert result[-1].startswith(b'ERR 99 '), result
+            assert mobile.card_confirmations == previous
             a.kill_agent()
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
             mobile.send(action='nfc_capability', available=True); mobile.wait('nfc-capability')
-            print('PASS: connected USB auto response; disconnected USB-only key asks before PIN/APDU', flush=True)
+            mobile.send(action='record_nfc'); mobile.wait('recorded')
+            print('PASS: metadata preparation never probes or prompts; USB-only execution opens the card only after PIN', flush=True)
 
             # A different card at the second tap is rejected before VERIFY or signing.
             mobile.card.info = dict(card, serial='D2760001240103040005000099990000')

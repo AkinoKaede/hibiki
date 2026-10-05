@@ -83,6 +83,28 @@ final class CardInspectionTests: XCTestCase {
         state.disappear()
     }
 
+    func testUSBManualReadDoesNotRequirePresenceAndSurvivesInsertionNotification() async throws {
+        let state = CardInspection()
+        var pending: CheckedContinuation<CardInfo, Error>?
+        state.appear(usbPresent: false, active: true) { _ in
+            try await withCheckedThrowingContinuation { pending = $0 }
+        }
+        state.refresh()
+        try await eventually { pending != nil }
+        state.usbChanged(true)
+        XCTAssertTrue(state.isReading)
+        pending?.resume(returning: card("USB", .usb))
+        try await eventually { !state.isReading }
+        XCTAssertEqual(state.info?.serial, "USB")
+        state.usbChanged(false)
+        state.appear(usbPresent: false, active: true) { _ in throw HardwareError.cardNotPresent }
+        state.refresh()
+        try await eventually { !state.isReading }
+        XCTAssertNotNil(state.error)
+        XCTAssertEqual(state.info?.serial, "USB")
+        state.disappear()
+    }
+
     func testUSBInsertionIdentityChangesOnRapidReplugAndPreservesOtherReaders() {
         var insertions = USBInsertions()
         XCTAssertFalse(insertions.update(name: "one", present: false))
