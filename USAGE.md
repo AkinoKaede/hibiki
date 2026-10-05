@@ -52,7 +52,8 @@ GitHub Actions builds separate `hibiki-VERSION-TARGET.tar.xz` and
 macOS (Intel/Apple Silicon). Linux offers both `*-unknown-linux-gnu` (glibc)
 and `*-unknown-linux-musl` (static) binaries for each architecture.
 The client archive includes all three desktop
-binaries and, on Linux, a user systemd unit. Both archives contain the relevant
+binaries and, on Linux, a user systemd unit. The Linux server archive includes
+a system systemd unit. Both archives contain the relevant
 example configuration, README, usage guide, and architecture guide.
 GNU Linux binaries are built on Ubuntu
 24.04 and require glibc 2.39 or later; musl binaries have no dynamic libc
@@ -114,6 +115,40 @@ The database defaults to `/var/lib/hibiki/hibiki.sqlite3` regardless of which co
 For a dedicated service account, assign the data directory to that account instead; the directory must have mode `0700` and database files use `0600`. Administrator commands use the same configuration search order as the server.
 
 For an unprivileged local deployment, copy the example into `deploy/server.toml`, change `database` to `"data/hibiki.sqlite3"`, and run `hibiki-server --config deploy/server.toml`. Use the same `--config` for administrator commands. Relative database overrides resolve against the configuration file's directory, or the current working directory if no configuration is loaded. Missing data directories are created with mode `0700`.
+
+#### Linux systemd service
+
+From the extracted server archive, install the server and configuration, create
+a dedicated service account, and enable the system service:
+
+```sh
+sudo useradd --system --user-group --home-dir /var/lib/hibiki --no-create-home --shell /usr/sbin/nologin hibiki
+sudo install -m 0755 bin/hibiki-server /usr/local/bin/hibiki-server
+sudo install -d -m 0755 /etc/hibiki
+sudo install -m 0644 examples/server.toml /etc/hibiki/server.toml
+sudo install -m 0644 systemd/hibiki-server.service /etc/systemd/system/hibiki-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now hibiki-server.service
+sudo systemctl status hibiki-server.service
+```
+
+Skip account creation if the `hibiki` account already exists. When installing
+from source, use `target/release/hibiki-server` and
+`packaging/systemd/hibiki-server.service` instead of the archive paths.
+systemd creates `/var/lib/hibiki` with mode `0700` and assigns it to `hibiki`.
+If migrating an existing database, stop the foreground server and transfer
+ownership of the data directory and its contents to `hibiki` before starting
+the service. The service permits writes to its state directory; keep the
+database there when editing the configuration.
+
+Run health checks and administrator commands with the same configuration and
+service account, and inspect logs with the journal:
+
+```sh
+sudo -u hibiki /usr/local/bin/hibiki-server --config /etc/hibiki/server.toml health
+sudo -u hibiki /usr/local/bin/hibiki-server --config /etc/hibiki/server.toml channel list
+sudo journalctl -u hibiki-server.service -f
+```
 
 The following steps use `wss://hibiki.example.com/hibiki`; replace it with your server URL. For local development, use `ws://127.0.0.1:7749/hibiki` and add `--allow-insecure` to each `hibiki init` command.
 

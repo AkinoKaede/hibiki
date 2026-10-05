@@ -52,8 +52,11 @@ def main():
             for document in ["README.md", "ARCHITECTURE.md", "USAGE.md"]:
                 shutil.copy2(ROOT / document, stage / document)
             shutil.copy2(ROOT / "examples" / config, stage / "examples" / config)
-            if name == "hibiki" and "linux" in target:
-                shutil.copytree(ROOT / "packaging" / "systemd", stage / "systemd")
+            if "linux" in target:
+                (stage / "systemd").mkdir()
+                unit = f"{name}.service"
+                shutil.copy2(ROOT / "packaging" / "systemd" / unit,
+                             stage / "systemd" / unit)
             archive = output / f"{basename}.tar.xz"
             with tarfile.open(archive, "w:xz") as bundle:
                 bundle.add(stage, arcname=basename)

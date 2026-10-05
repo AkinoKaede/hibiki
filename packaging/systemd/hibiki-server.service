@@ -1,0 +1,23 @@
+[Unit]
+Description=Hibiki encrypted traffic relay server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hibiki
+Group=hibiki
+ExecStart=/usr/local/bin/hibiki-server --config /etc/hibiki/server.toml
+StateDirectory=hibiki
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
