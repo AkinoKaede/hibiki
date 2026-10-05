@@ -29,13 +29,10 @@ struct CardInspectionView: View {
             .accessibilityIdentifier("readSecurityKeyInfo")
             if let error = inspection.error { Text(verbatim: error).foregroundStyle(.red) }
         } header: { Text("Security Key Reader") } footer: {
-            Text("Reading public information does not register this security key. No PIN needed.")
+            Text("Reading public information does not record this key for use. No PIN needed.")
         }
         if let info = inspection.info {
             Section {
-                if let entry = model.registeredCards.first(where: { $0.card.serial == info.serial }) {
-                    LabeledContent("Name", value: entry.name)
-                }
                 CardIdentityFields(info: info)
             } header: { Text("Security Key Information") } footer: {
                 if inspection.transport == .nfc {
@@ -84,68 +81,6 @@ struct CardPublicKeyRows: View {
                     }
                 }
             }.padding(.vertical, 4)
-        }
-    }
-}
-
-struct EditRegisteredCardView: View {
-    let entry: RegisteredCard
-    @Bindable var model: AppModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var name: String
-    @State private var saving = false
-    @State private var error: String?
-
-    init(entry: RegisteredCard, model: AppModel) {
-        self.entry = entry
-        self.model = model
-        _name = State(initialValue: entry.name)
-    }
-
-    private var valid: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Security Key") {
-                    TextField("Name", text: $name).accessibilityIdentifier("securityKeyName")
-                }.disabled(saving)
-                Section {
-                    if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text("Enter a security key name.").foregroundStyle(.red)
-                    }
-                    if let error { Text(verbatim: error).foregroundStyle(.red) }
-                } footer: {
-                    Text("Saving the name does not read or change the physical key.")
-                }
-            }
-            .navigationTitle("Edit Security Key")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button { dismiss() } label: { Label("Cancel", systemImage: "xmark").labelStyle(.iconOnly) }.disabled(saving)
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        saving = true
-                        error = nil
-                        Task {
-                            defer { saving = false }
-                            do {
-                                try await model.updateCard(entry.id, name: name)
-                                dismiss()
-                            } catch {
-                                if case MobileError.Failed(let message) = error {
-                                    self.error = message == "card is in use" ? String(localized: "Security key is in use. Try again when the operation finishes.") : message
-                                } else { self.error = error.localizedDescription }
-                            }
-                        }
-                    } label: { Label("Save", systemImage: "checkmark").labelStyle(.iconOnly) }
-                    .disabled(!valid || saving || model.busy).accessibilityIdentifier("saveSecurityKey")
-                }
-            }
-            .interactiveDismissDisabled(saving)
         }
     }
 }

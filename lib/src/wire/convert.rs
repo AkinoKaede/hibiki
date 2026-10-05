@@ -1,6 +1,7 @@
-//! Typed hibiki/2 conversions. Persistent and signed formats use the separate Postcard codec.
+//! Typed hibiki/3 conversions. Persistent and signed formats use the separate Postcard codec.
 use super::{Wire, array32, invalid, pb, required, signature64};
 use crate::e2ee::Fragment;
+use crate::invitation::{AdmissionRequest, InvitationMetadata, OneTimeInvitation};
 use crate::{Result, assuan::Line, channel::*, identity::Device, protocol::*};
 
 impl Wire for JoinState {
@@ -414,9 +415,8 @@ impl Wire for Control {
                 id: id.clone(),
                 completed: *completed,
             }),
-            Self::Create { genesis, verifier } => Kind::Create(pb::ControlCreate {
+            Self::Create { genesis } => Kind::Create(pb::ControlCreate {
                 genesis: Some(genesis.to_proto()),
-                verifier: verifier.clone(),
             }),
             Self::GetChannel { channel } => Kind::GetChannel(pb::ControlGetChannel {
                 channel: channel.clone(),
@@ -427,16 +427,18 @@ impl Wire for Control {
                     channel: channel.clone(),
                 })
             }
-            Self::Join { request, psk } => Kind::Join(pb::ControlJoin {
+            Self::Join {
+                request,
+                invitation,
+            } => Kind::Join(pb::ControlJoin {
                 request: Some(request.to_proto()),
-                psk: psk.clone(),
+                invitation: Some(invitation.to_proto()),
             }),
             Self::Pending { channel } => Kind::Pending(pb::ControlPending {
                 channel: channel.clone(),
             }),
-            Self::Append { event, verifier } => Kind::Append(pb::ControlAppend {
+            Self::Append { event } => Kind::Append(pb::ControlAppend {
                 event: Some(event.to_proto()),
-                verifier: verifier.clone(),
             }),
             Self::Announce { channels } => Kind::Announce(pb::ControlAnnounce {
                 channels: channels.to_vec(),
@@ -444,10 +446,23 @@ impl Wire for Control {
             Self::Peers { channel } => Kind::Peers(pb::ControlPeers {
                 channel: channel.clone(),
             }),
-            Self::Claim { genesis, psk } => Kind::Claim(pb::ControlClaim {
+            Self::Claim {
+                genesis,
+                invitation,
+            } => Kind::Claim(pb::ControlClaim {
                 genesis: Some(genesis.to_proto()),
-                psk: psk.clone(),
+                invitation: Some(invitation.to_proto()),
             }),
+            Self::RegisterInvitation { metadata } => {
+                Kind::RegisterInvitation(pb::ControlRegisterInvitation {
+                    metadata: Some(metadata.to_proto()),
+                })
+            }
+            Self::ResolveInvitation { invitation } => {
+                Kind::ResolveInvitation(pb::ControlResolveInvitation {
+                    invitation: Some(invitation.to_proto()),
+                })
+            }
             Self::Policy => Kind::Policy(pb::ControlPolicy {}),
             Self::RejectJoin { channel, request } => Kind::RejectJoin(pb::ControlRejectJoin {
                 channel: channel.clone(),
@@ -503,7 +518,6 @@ impl Wire for Control {
             },
             Kind::Create(value) => Self::Create {
                 genesis: ChannelGenesis::from_proto(required(&value.genesis)?)?,
-                verifier: value.verifier.clone(),
             },
             Kind::GetChannel(value) => Self::GetChannel {
                 channel: value.channel.clone(),
@@ -513,19 +527,14 @@ impl Wire for Control {
                 channel: value.channel.clone(),
             },
             Kind::Join(value) => Self::Join {
-                request: JoinRequest::from_proto(required(&value.request)?)?,
-                psk: value.psk.clone(),
+                request: AdmissionRequest::from_proto(required(&value.request)?)?,
+                invitation: OneTimeInvitation::from_proto(required(&value.invitation)?)?,
             },
             Kind::Pending(value) => Self::Pending {
                 channel: value.channel.clone(),
             },
             Kind::Append(value) => Self::Append {
                 event: MembershipEvent::from_proto(required(&value.event)?)?,
-                verifier: value
-                    .verifier
-                    .as_ref()
-                    .map(|value| Ok(value.clone()))
-                    .transpose()?,
             },
             Kind::Announce(value) => Self::Announce {
                 channels: value
@@ -539,7 +548,13 @@ impl Wire for Control {
             },
             Kind::Claim(value) => Self::Claim {
                 genesis: ChannelGenesis::from_proto(required(&value.genesis)?)?,
-                psk: value.psk.clone(),
+                invitation: OneTimeInvitation::from_proto(required(&value.invitation)?)?,
+            },
+            Kind::RegisterInvitation(v) => Self::RegisterInvitation {
+                metadata: InvitationMetadata::from_proto(required(&v.metadata)?)?,
+            },
+            Kind::ResolveInvitation(v) => Self::ResolveInvitation {
+                invitation: OneTimeInvitation::from_proto(required(&v.invitation)?)?,
             },
             Kind::Policy(_) => Self::Policy,
             Kind::RejectJoin(value) => Self::RejectJoin {
@@ -585,6 +600,13 @@ impl Wire for Reply {
                 proof: Some(proof.to_proto()),
                 online: online.to_vec(),
                 revoked: revoked.to_vec(),
+            }),
+            Self::InvitationProof {
+                proof,
+                access_revision,
+            } => Kind::InvitationProof(pb::ReplyInvitationProof {
+                proof: Some(proof.to_proto()),
+                access_revision: *access_revision,
             }),
             Self::Requests(value) => Kind::Requests(pb::ReplyRequests {
                 value: value.iter().map(|value| value.to_proto()).collect(),
@@ -633,11 +655,15 @@ impl Wire for Reply {
                     .map(|value| Ok(value.clone()))
                     .collect::<Result<_>>()?,
             },
+            Kind::InvitationProof(v) => Self::InvitationProof {
+                proof: MembershipProof::from_proto(required(&v.proof)?)?,
+                access_revision: v.access_revision,
+            },
             Kind::Requests(value) => Self::Requests(
                 value
                     .value
                     .iter()
-                    .map(JoinRequest::from_proto)
+                    .map(AdmissionRequest::from_proto)
                     .collect::<Result<_>>()?,
             ),
             Kind::Peers(value) => Self::Peers(
@@ -1089,6 +1115,10 @@ impl Wire for MembershipAction {
             Self::Rename { device } => Kind::Rename(pb::MembershipActionRename {
                 device: Some(device.to_proto()),
             }),
+            Self::EnableInvitations => {
+                Kind::EnableInvitations(pb::MembershipActionEnableInvitations {})
+            }
+            Self::Accept(request) => Kind::Accept(request.to_proto()),
             Self::RevokeSubtree { device_id } => {
                 Kind::RevokeSubtree(pb::MembershipActionRevokeSubtree {
                     device_id: device_id.clone(),
@@ -1111,6 +1141,8 @@ impl Wire for MembershipAction {
             Kind::Rename(value) => Self::Rename {
                 device: Device::from_proto(required(&value.device)?)?,
             },
+            Kind::EnableInvitations(_) => Self::EnableInvitations,
+            Kind::Accept(v) => Self::Accept(AdmissionRequest::from_proto(v)?),
             Kind::RevokeSubtree(value) => Self::RevokeSubtree {
                 device_id: value.device_id.clone(),
             },
@@ -1133,4 +1165,55 @@ fn decode_result(value: &pb::ResponseResult) -> Result<std::result::Result<Reply
         Kind::Ok(value) => Ok(Reply::from_proto(value)?),
         Kind::Error(value) => Err(WireError::from_proto(value)?),
     })
+}
+
+impl Wire for AdmissionRequest {
+    type Proto = pb::AdmissionRequest;
+    const NAME: &'static str = "AdmissionRequest";
+    fn to_proto(&self) -> Self::Proto {
+        pb::AdmissionRequest {
+            canonical: crate::encode(self).expect("bounded signed request"),
+        }
+    }
+    fn from_proto(v: &Self::Proto) -> Result<Self> {
+        if v.canonical.len() > 4096 {
+            return Err(invalid("admission request too large"));
+        }
+        let value: Self = crate::decode(&v.canonical)?;
+        value.verify()?;
+        Ok(value)
+    }
+}
+impl Wire for InvitationMetadata {
+    type Proto = pb::InvitationMetadata;
+    const NAME: &'static str = "InvitationMetadata";
+    fn to_proto(&self) -> Self::Proto {
+        pb::InvitationMetadata {
+            canonical: crate::encode(self).expect("bounded invitation metadata"),
+        }
+    }
+    fn from_proto(v: &Self::Proto) -> Result<Self> {
+        if v.canonical.len() > 2048 {
+            return Err(invalid("invitation metadata too large"));
+        }
+        let value: Self = crate::decode(&v.canonical)?;
+        value.validate()?;
+        Ok(value)
+    }
+}
+impl Wire for OneTimeInvitation {
+    type Proto = pb::OneTimeInvitation;
+    const NAME: &'static str = "OneTimeInvitation";
+    fn to_proto(&self) -> Self::Proto {
+        pb::OneTimeInvitation {
+            metadata: Some(self.metadata.to_proto()),
+            key: self.key.to_vec(),
+        }
+    }
+    fn from_proto(v: &Self::Proto) -> Result<Self> {
+        Ok(Self {
+            metadata: InvitationMetadata::from_proto(required(&v.metadata)?)?,
+            key: array32(&v.key)?,
+        })
+    }
 }

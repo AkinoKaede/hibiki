@@ -6,7 +6,6 @@ mod service;
 use anyhow::{Context, Result, bail};
 use axum::serve::ListenerExt;
 use clap::{Parser, Subcommand};
-use hibiki_lib::channel::{hash_psk, make_psk};
 use serde::Deserialize;
 use std::{
     fs::{self, OpenOptions},
@@ -60,10 +59,12 @@ enum ChannelCommand {
         name: String,
         #[arg(long)]
         server: String,
+    },
+    /// Generate a fresh initialization invitation for an unclaimed channel.
+    Invite {
+        name: String,
         #[arg(long)]
-        psk_file: Option<PathBuf>,
-        #[arg(long, conflicts_with = "psk_file")]
-        prompt_psk: bool,
+        server: String,
     },
     /// Permanently delete channel records and stop routing (local administrator only).
     Delete { name: String },
@@ -180,12 +181,7 @@ async fn main() -> Result<()> {
     let db = db::Database::open(&database).await?;
     if let Some(Command::Channel { command }) = args.command {
         match command {
-            ChannelCommand::Create {
-                name,
-                server,
-                psk_file,
-                prompt_psk,
-            } => {
+            ChannelCommand::Create { name, server } => {
                 let url = url::Url::parse(&server)?;
                 if !matches!(url.scheme(), "ws" | "wss")
                     || url.host_str().is_none()
@@ -194,25 +190,13 @@ async fn main() -> Result<()> {
                 {
                     bail!("expected ws:// or wss:// server URL without credentials");
                 }
-                let (secret, _) = if let Some(path) = psk_file {
-                    (
-                        fs::read_to_string(path)?
-                            .trim_end_matches(['\r', '\n'])
-                            .to_owned(),
-                        false,
-                    )
-                } else if prompt_psk {
-                    (rpassword::prompt_password("Channel PSK: ")?, false)
-                } else {
-                    (make_psk(), true)
-                };
-                let invite = db.reserve(server, name, hash_psk(&secret)?).await?;
-                println!("channel {}", invite.id);
-                let text = hibiki_lib::channel::invitation_with_psk(
-                    hibiki_lib::channel::InvitationKind::Initialization(invite),
-                    secret,
-                )?;
-                println!("invite {text}");
+                let invite = db.reserve(server, name).await?;
+                println!("channel {}", invite.metadata.channel);
+                println!("invite {}", *invite.export()?);
+            }
+            ChannelCommand::Invite { name, server } => {
+                let invite = db.reserve_invitation(server, &name).await?;
+                println!("invite {}", *invite.export()?);
             }
             ChannelCommand::Delete { name } => {
                 let id = db.delete(&name).await?;

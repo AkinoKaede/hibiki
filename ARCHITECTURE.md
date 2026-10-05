@@ -65,18 +65,16 @@ verifies the target identity before sending the PIN. See the
 
 A channel is the membership and service-sharing boundary. Channel creation is
 reserved for the relay administrator by default. The administrator issues a
-single-use initialization invitation containing its PSK; the first device claims
+single-use initialization invitation containing its own random key; the first device claims
 the channel without existing-member approval. Later devices use member invitations,
-prove knowledge of the PSK, and wait for an active member to approve their identity.
+consume an independent invitation key, and wait for an active member to approve their identity.
 
 Members compare the joining device's request ID and all 24 public-key verification
 words before approval. These words identify a public key; they are not a recovery
 phrase. Each device generates its own identity rather than copying another's files.
 Approved members can use enabled services and approve additional members.
 
-PSK rotation invalidates pending requests and preserves approved membership.
-Revocation prevents that identity from rejoining the same channel; voluntary
-leaving permits a new admission request. Administrator deletion closes affected
+Each invitation expires after 24 hours and is atomically consumed by one valid request. Pending requests do not expire with the key. Inviter departure invalidates its outstanding invitations and pending requests. Revoked identities and voluntary departures can rejoin after a fresh request and approval; approval ancestry is tracked per admission round, including returning founders. Administrator denial persists until readmission commits. Administrator deletion closes affected
 sessions, and recreating the same channel name creates a new channel ID.
 See [channel administration](USAGE.md#channel-administration) for commands.
 
@@ -119,7 +117,7 @@ Card private keys stay on the card; software private keys stay on the requesting
 
 Private files use mode `0600` and directories use `0700`. Back up identity and trust records together.
 
-The protocol identifier is **`hibiki/2`** and the WebSocket path is **`/hibiki`**. It includes relay policy discovery and pending-request rejection, withdrawal and status queries. Network messages use Protocol Buffers. Relay and clients may use different application releases while supporting the same baseline and negotiating extensions; unpublished Postcard network formats are not supported. See [the compatibility contract](PROTOCOL.md).
+The protocol identifier is **`hibiki/3`** and the WebSocket path is **`/hibiki`**. It includes relay policy discovery and pending-request rejection, withdrawal and status queries. Network messages use Protocol Buffers. Relay and clients may use different application releases while supporting the same baseline and negotiating extensions; unpublished Postcard network formats are not supported. See [the compatibility contract](PROTOCOL.md).
 
 ## Protocol v2 and measurements
 
@@ -147,7 +145,7 @@ A matching authenticated outer Relay frame with empty data cancels an existing p
 
 Ping uses its own Noise-authenticated `PingOpen`/`PingOpened` session and random matching Ping/Pong nonces, never a provider slot. CLI, TUI and iOS report setup separately from RTT, with 1–20 samples and a five-second deadline per sample. It measures the encrypted path through the relay, not ICMP or a direct network route.
 
-Trace metrics contain only message kinds/counts; session and adapter summaries contain elapsed durations. They never contain Assuan bodies, PINs, PSKs or private input. `tests/performance.py` adds 0/50/100/200 ms RTT to an isolated simulated-card setup. Its stable gate is five ordinary queries = five request messages + five result messages; timings are diagnostic rather than machine-dependent pass criteria.
+Trace metrics contain only message kinds/counts; session and adapter summaries contain elapsed durations. They never contain Assuan bodies, PINs, invitation keys or private input. `tests/performance.py` adds 0/50/100/200 ms RTT to an isolated simulated-card setup. Its stable gate is five ordinary queries = five request messages + five result messages; timings are diagnostic rather than machine-dependent pass criteria.
 
 Management uses a separate authenticated connection without Announce, so it cannot replace a daemon or become a service executor. Rename signs an identity update with unchanged public keys, device ID and verification words; only a device can rename itself. TUI refreshes every two seconds, preserves timestamped cached data when offline, and revalidates request identities before mutations.
 
@@ -164,7 +162,7 @@ the waiting period.
 Revocation affects **only the named device by default**. Use
 `hibiki channel revoke NAME DEVICE_ID --subtree` to explicitly remove that device
 and its approval subtree. Subtree revocation is restricted to descendants so it
-cannot accidentally include the caller. Revoked identities cannot rejoin. An
+cannot accidentally include the caller. Revoked identities can rejoin with a valid unused invitation, a fresh request and new approval. An
 ordinary revocation leaves descendants active, and ancestry remains verifiable
 through departed intermediaries. Readmission must not reverse ancestry or create
 a cycle.

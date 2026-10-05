@@ -1,5 +1,8 @@
-use crate::entities::{channel, deleted, device, empty, pending, registry, revoked};
+use crate::entities::{channel, deleted, device, empty, invitation, pending, registry, revoked};
 use anyhow::{Context, Result, bail};
+use hibiki_lib::invitation::{
+    AdmissionRequest, INVITATION_TTL, InvitationMetadata, OneTimeInvitation,
+};
 use hibiki_lib::{channel::*, decode, digest, encode, identity::Device, now, random_id};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, DatabaseConnection,
@@ -35,6 +38,7 @@ impl Database {
         let tx = self.connection.begin().await?;
         let schema = Schema::new(self.connection.get_database_backend());
         for mut statement in [
+            schema.create_table_from_entity(invitation::Entity),
             schema.create_table_from_entity(device::Entity),
             schema.create_table_from_entity(channel::Entity),
             schema.create_table_from_entity(pending::Entity),
@@ -46,39 +50,71 @@ impl Database {
         ] {
             tx.execute(statement.if_not_exists()).await?;
         }
+        let version = tx
+            .query_one_raw(sea_orm::Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                "PRAGMA user_version",
+            ))
+            .await?
+            .context("database version unavailable")?
+            .try_get_by_index::<i64>(0)?;
+        if version < 3 {
+            pending::Entity::delete_many().exec(&tx).await?;
+            channel::Entity::update_many()
+                .col_expr(channel::Column::Verifier, Expr::value(""))
+                .exec(&tx)
+                .await?;
+            empty::Entity::update_many()
+                .col_expr(empty::Column::Verifier, Expr::value(""))
+                .exec(&tx)
+                .await?;
+            tx.execute_unprepared("PRAGMA user_version = 3").await?;
+        }
         tx.commit().await?;
         Ok(())
     }
-    pub async fn reserve(
-        &self,
-        server: String,
-        name: String,
-        verifier: String,
-    ) -> Result<EmptyChannelInvite> {
-        validate_verifier(&verifier)?;
-        let invite = EmptyChannelInvite {
-            version: 1,
-            server,
-            id: random_id(),
-            name,
-            psk_commitment: digest(verifier.as_bytes()),
-        };
-        invite.validate()?;
+    pub async fn reserve(&self, server: String, name: String) -> Result<OneTimeInvitation> {
+        let invite = OneTimeInvitation::new(server, random_id(), name, None)?;
         let tx = self.connection.begin().await?;
         registry::ActiveModel {
-            id: Set(invite.id.clone()),
-            name: Set(invite.name.clone()),
+            id: Set(invite.metadata.channel.clone()),
+            name: Set(invite.metadata.name.clone()),
         }
         .insert(&tx)
         .await
         .context("channel name already exists")?;
         empty::ActiveModel {
-            id: Set(invite.id.clone()),
-            invitation: Set(encode(&invite)?),
-            verifier: Set(verifier),
+            id: Set(invite.metadata.channel.clone()),
+            invitation: Set(Vec::new()),
+            verifier: Set(String::new()),
         }
         .insert(&tx)
         .await?;
+        insert_invitation(&tx, "", &invite.metadata).await?;
+        tx.commit().await?;
+        Ok(invite)
+    }
+    pub async fn reserve_invitation(
+        &self,
+        server: String,
+        name: &str,
+    ) -> Result<OneTimeInvitation> {
+        let tx = self.connection.begin().await?;
+        registry::Entity::update_many()
+            .col_expr(registry::Column::Name, Expr::col(registry::Column::Name))
+            .exec(&tx)
+            .await?;
+        let row = registry::Entity::find()
+            .all(&tx)
+            .await?
+            .into_iter()
+            .find(|r| r.id == name || r.name == name)
+            .context("channel not found")?;
+        if empty::Entity::find_by_id(&row.id).one(&tx).await?.is_none() {
+            bail!("channel already has members; obtain an invitation from a member");
+        }
+        let invite = OneTimeInvitation::new(server, row.id, row.name, None)?;
+        insert_invitation(&tx, "", &invite.metadata).await?;
         tx.commit().await?;
         Ok(invite)
     }
@@ -86,45 +122,113 @@ impl Database {
         &self,
         caller: &str,
         genesis: ChannelGenesis,
-        psk: String,
+        invite: OneTimeInvitation,
     ) -> Result<MembershipProof> {
         genesis.verify()?;
-        if genesis.body.founder.id() != caller {
-            bail!("invalid founder identity");
-        }
-        let row = empty::Entity::find_by_id(&genesis.body.id)
-            .one(&self.connection)
-            .await?
-            .context("channel is not empty or was deleted")?;
-        let invite: EmptyChannelInvite = decode(&row.invitation)?;
-        invite.validate()?;
-        if genesis.body.name != invite.name
-            || genesis.body.psk_commitment != invite.psk_commitment
-            || digest(row.verifier.as_bytes()) != invite.psk_commitment
+        if genesis.body.version != 2
+            || genesis.body.founder.id() != caller
+            || genesis.body.id != invite.metadata.channel
+            || genesis.body.name != invite.metadata.name
+            || invite.metadata.genesis_hash.is_some()
         {
-            bail!("initialization invitation mismatch");
+            bail!("invalid initialization claim");
         }
-        let verifier_copy = row.verifier.clone();
-        if !tokio::task::spawn_blocking(move || check_psk(&psk, &verifier_copy)).await? {
-            bail!("incorrect PSK");
+        let tx = self.connection.begin().await?;
+        lock_channel(&tx, &genesis.body.id).await?;
+        let row = check_invitation(&tx, &invite, None).await?;
+        if let Some(existing) = channel::Entity::find_by_id(&genesis.body.id)
+            .one(&tx)
+            .await?
+        {
+            let proof: MembershipProof = decode(&existing.proof)?;
+            if row.consumed_request.as_deref() == Some(caller)
+                && proof.genesis == genesis
+                && proof.verify()?.member(caller).is_ok()
+                && access_revision(&tx, &genesis.body.id, caller).await? == 0
+            {
+                return Ok(proof);
+            }
+            bail!("initialization invitation already claimed");
+        }
+        if row.consumed_request.is_some()
+            || empty::Entity::delete_by_id(&genesis.body.id)
+                .exec(&tx)
+                .await?
+                .rows_affected
+                != 1
+        {
+            bail!("channel already claimed or deleted");
         }
         let proof = MembershipProof {
             genesis,
-            events: vec![],
+            events: Vec::new(),
         };
-        let tx = self.connection.begin().await?;
-        let consumed = empty::Entity::delete_many()
-            .filter(empty::Column::Id.eq(&invite.id))
-            .filter(empty::Column::Invitation.eq(row.invitation))
-            .filter(empty::Column::Verifier.eq(&row.verifier))
+        channel_model(&proof)?.insert(&tx).await?;
+        invitation::Entity::update_many()
+            .col_expr(invitation::Column::ConsumedRequest, Expr::value(caller))
+            .filter(invitation::Column::Id.eq(&row.id))
             .exec(&tx)
             .await?;
-        if consumed.rows_affected != 1 {
-            bail!("channel already claimed or deleted");
-        }
-        channel_model(&proof, row.verifier)?.insert(&tx).await?;
         tx.commit().await?;
         Ok(proof)
+    }
+    pub async fn register_invitation(
+        &self,
+        caller: &str,
+        metadata: InvitationMetadata,
+    ) -> Result<()> {
+        metadata.validate()?;
+        let tx = self.connection.begin().await?;
+        lock_channel(&tx, &metadata.channel).await?;
+        require_access_tx(&tx, &metadata.channel, caller).await?;
+        let proof = proof_tx(&tx, &metadata.channel).await?;
+        let state = proof.verify()?;
+        state.member(caller)?;
+        if !state.invitations_enabled
+            || metadata.genesis_hash != Some(state.genesis_hash)
+            || metadata.issuer_admission != state.admission_id(caller).unwrap_or_default()
+            || metadata.name != state.name
+            || metadata.expires_at <= now()
+            || metadata.expires_at > now().saturating_add(INVITATION_TTL + 30)
+        {
+            bail!("invalid invitation authority or expiry");
+        }
+        proof.verify_from(&state.genesis_hash, &metadata.checkpoint)?;
+        if let Some(existing) = invitation::Entity::find_by_id(&metadata.id)
+            .one(&tx)
+            .await?
+        {
+            if existing.issuer != caller || existing.metadata != encode(&metadata)? {
+                bail!("invitation ID already exists");
+            }
+        } else {
+            insert_invitation(&tx, caller, &metadata).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+    pub async fn resolve_invitation(
+        &self,
+        caller: &str,
+        invite: OneTimeInvitation,
+    ) -> Result<(MembershipProof, u64)> {
+        let tx = self.connection.begin().await?;
+        lock_channel(&tx, &invite.metadata.channel).await?;
+        let proof = proof_tx(&tx, &invite.metadata.channel).await?;
+        let state = proof.verify()?;
+        let row = check_invitation(&tx, &invite, Some(&state)).await?;
+        if let Some(id) = row.consumed_request {
+            let pending = pending::Entity::find_by_id(id)
+                .one(&tx)
+                .await?
+                .context("invitation already used")?;
+            let request: AdmissionRequest = decode(&pending.request)?;
+            if request.body.device.id() != caller {
+                bail!("invitation already used");
+            }
+        }
+        let revision = access_revision(&tx, &state.id, caller).await?;
+        Ok((proof, revision))
     }
     pub async fn admin_list(&self) -> Result<Vec<(String, String, bool)>> {
         let tx = self.connection.begin().await?;
@@ -175,6 +279,10 @@ impl Database {
             .filter(pending::Column::Channel.eq(&id))
             .exec(&tx)
             .await?;
+        invitation::Entity::delete_many()
+            .filter(invitation::Column::Channel.eq(&id))
+            .exec(&tx)
+            .await?;
         channel::Entity::delete_by_id(&id).exec(&tx).await?;
         empty::Entity::delete_by_id(&id).exec(&tx).await?;
         registry::Entity::delete_by_id(&id).exec(&tx).await?;
@@ -196,7 +304,11 @@ impl Database {
             .await?
             .is_some()
         {
-            bail!("device access revoked by server administrator");
+            return Err(hibiki_lib::protocol::WireError::new(
+                "access_revoked",
+                "device access revoked by server administrator",
+            )
+            .into());
         }
         Ok(())
     }
@@ -241,23 +353,26 @@ impl Database {
             revoked::Entity::insert(revoked::ActiveModel {
                 channel: Set(id.clone()),
                 device: Set(device.clone()),
-                revoked_at: Set(now() as i64),
+                revoked_at: Set(
+                    (now() as i64).max(access_revision(&tx, &id, device).await? as i64 + 1)
+                ),
             })
             .on_conflict(
                 OnConflict::columns([revoked::Column::Channel, revoked::Column::Device])
-                    .do_nothing()
+                    .update_column(revoked::Column::RevokedAt)
                     .to_owned(),
             )
             .try_insert()
             .exec(&tx)
             .await?;
         }
+        invalidate_invitations(&tx, &state).await?;
         for row in pending::Entity::find()
             .filter(pending::Column::Channel.eq(&id))
             .all(&tx)
             .await?
         {
-            let request: JoinRequest = decode(&row.request)?;
+            let request: AdmissionRequest = decode(&row.request)?;
             if affected.contains(&request.body.device.id()) {
                 pending::Entity::delete_by_id(row.id).exec(&tx).await?;
             }
@@ -338,19 +453,11 @@ impl Database {
         }
         Ok(result)
     }
-    pub async fn create(
-        &self,
-        caller: &str,
-        genesis: ChannelGenesis,
-        verifier: String,
-    ) -> Result<MembershipProof> {
+    pub async fn create(&self, caller: &str, genesis: ChannelGenesis) -> Result<MembershipProof> {
         genesis.verify()?;
-        if genesis.body.founder.id() != caller
-            || digest(verifier.as_bytes()) != genesis.body.psk_commitment
-        {
-            bail!("invalid channel creation authority or verifier commitment");
+        if genesis.body.version != 2 || genesis.body.founder.id() != caller {
+            bail!("invalid channel creation authority");
         }
-        validate_verifier(&verifier)?;
         let proof = MembershipProof {
             genesis,
             events: vec![],
@@ -370,80 +477,87 @@ impl Database {
         {
             bail!("deleted channel ID cannot be reused");
         }
-        channel_model(&proof, verifier)?.insert(&tx).await?;
+        channel_model(&proof)?.insert(&tx).await?;
         tx.commit().await?;
         Ok(proof)
     }
-    pub async fn join(&self, caller: &str, request: JoinRequest, psk: String) -> Result<()> {
+    pub async fn join(
+        &self,
+        caller: &str,
+        request: AdmissionRequest,
+        invite: OneTimeInvitation,
+    ) -> Result<()> {
         request.verify()?;
-        self.require_access(&request.body.channel_id, caller)
-            .await?;
         let body = &request.body;
-        let state = self.get(&body.channel_id).await?.verify()?;
         if body.device.id() != caller
-            || body.genesis_hash != state.genesis_hash
-            || body.psk_epoch != state.psk_epoch
+            || body.invitation_id != invite.metadata.id
+            || body.channel_id != invite.metadata.channel
             || body.created_at > now() + 30
-            || state.member(caller).is_ok()
-            || state.is_revoked(caller)
         {
             bail!("invalid admission request");
         }
-        let row = channel::Entity::find_by_id(&state.id)
-            .one(&self.connection)
-            .await?
-            .context("channel not found")?;
-        if digest(row.verifier.as_bytes()) != state.psk_commitment {
-            bail!("verifier commitment mismatch");
-        }
-        if !tokio::task::spawn_blocking(move || check_psk(&psk, &row.verifier)).await? {
-            bail!("incorrect PSK");
-        }
         let tx = self.connection.begin().await?;
-        let unchanged = channel::Entity::update_many()
-            .col_expr(channel::Column::Head, Expr::col(channel::Column::Head))
-            .filter(channel::Column::Id.eq(&state.id))
-            .filter(channel::Column::Head.eq(state.head.to_vec()))
+        lock_channel(&tx, &body.channel_id).await?;
+        let state = proof_tx(&tx, &body.channel_id).await?.verify()?;
+        let request_id = request.id()?;
+        // A committed admission remains retryable if its inviter later departs.
+        // This acknowledges the existing round only; it cannot restore lost access.
+        if state.admission_id(caller) == Some(request_id.as_str())
+            && state.member(caller).is_ok()
+            && access_revision(&tx, &state.id, caller).await? == 0
+        {
+            let row = invitation::Entity::find_by_id(&body.invitation_id)
+                .one(&tx)
+                .await?
+                .context("invitation not found")?;
+            if row.consumed_request.as_deref() == Some(request_id.as_str())
+                && row.metadata == encode(&invite.metadata)?
+                && digest(&invite.key) == invite.metadata.key_hash
+            {
+                return Ok(());
+            }
+            bail!("invalid invitation");
+        }
+        let row = check_invitation(&tx, &invite, Some(&state)).await?;
+        if let Some(used) = &row.consumed_request {
+            if used == &request_id && pending::Entity::find_by_id(used).one(&tx).await?.is_some() {
+                return Ok(());
+            }
+            bail!("invitation already used; obtain a new invitation");
+        }
+        state.validate_admission(&request)?;
+        let revision = access_revision(&tx, &state.id, caller).await?;
+        if revision != body.access_revision || (state.member(caller).is_ok() && revision == 0) {
+            bail!("already a member or access changed; retry with a fresh request");
+        }
+        invitation::Entity::update_many()
+            .col_expr(
+                invitation::Column::ConsumedRequest,
+                Expr::value(&request_id),
+            )
+            .filter(invitation::Column::Id.eq(&row.id))
             .exec(&tx)
             .await?;
-        if unchanged.rows_affected != 1 {
-            bail!("CONFLICT: channel changed; retry admission");
-        }
-        if revoked::Entity::find_by_id((state.id.clone(), caller.to_owned()))
-            .one(&tx)
-            .await?
-            .is_some()
-        {
-            bail!("device access revoked by server administrator");
-        }
-        pending::Entity::insert(pending::ActiveModel {
-            id: Set(request.id()?),
+        pending::ActiveModel {
+            id: Set(request_id),
             channel: Set(state.id),
             request: Set(encode(&request)?),
-            epoch: Set(body.psk_epoch as i64),
-        })
-        .on_conflict(
-            OnConflict::column(pending::Column::Id)
-                .do_nothing()
-                .to_owned(),
-        )
-        .try_insert()
-        .exec(&tx)
+            epoch: Set(0),
+        }
+        .insert(&tx)
         .await?;
         tx.commit().await?;
         Ok(())
     }
-    pub async fn pending(&self, caller: &str, id: &str) -> Result<Vec<JoinRequest>> {
-        self.require_access(id, caller).await?;
+    pub async fn pending(&self, caller: &str, id: &str) -> Result<Vec<AdmissionRequest>> {
         let state = self.get(id).await?.verify()?;
-        let member = state.member(caller).is_ok();
+        let member = state.member(caller).is_ok() && self.require_access(id, caller).await.is_ok();
         let rows = pending::Entity::find()
             .filter(pending::Column::Channel.eq(id))
-            .filter(pending::Column::Epoch.eq(state.psk_epoch as i64))
             .order_by_asc(pending::Column::Id)
             .all(&self.connection)
             .await?;
-        let requests: Vec<JoinRequest> = rows
+        let requests: Vec<AdmissionRequest> = rows
             .into_iter()
             .map(|row| decode(&row.request).map_err(anyhow::Error::from))
             .collect::<Result<_>>()?;
@@ -452,8 +566,8 @@ impl Database {
             .filter(|request| member || request.body.device.id() == caller)
             .collect())
     }
-    /// Remove exactly one request. The channel CAS serializes this with approval,
-    /// rotation, revocation and deletion, including other database connections.
+    /// Remove exactly one request. The channel write lock serializes this with
+    /// approval, revocation and deletion, including other database connections.
     pub async fn remove_pending(
         &self,
         caller: &str,
@@ -461,28 +575,19 @@ impl Database {
         request_id: &str,
         withdraw: bool,
     ) -> Result<()> {
-        let state = self.get(id).await?.verify()?;
-        if !withdraw {
-            self.require_access(id, caller).await?;
-            state.member(caller)?;
-        }
         let tx = self.connection.begin().await?;
-        let locked = channel::Entity::update_many()
-            .col_expr(channel::Column::Head, Expr::col(channel::Column::Head))
-            .filter(channel::Column::Id.eq(id))
-            .filter(channel::Column::Head.eq(state.head.to_vec()))
-            .exec(&tx)
-            .await?;
-        if locked.rows_affected != 1 {
-            bail!("CONFLICT: channel changed; retry");
+        lock_channel(&tx, id).await?;
+        let state = proof_tx(&tx, id).await?.verify()?;
+        if !withdraw {
+            require_access_tx(&tx, id, caller).await?;
+            state.member(caller)?;
         }
         let row = pending::Entity::find_by_id(request_id)
             .filter(pending::Column::Channel.eq(id))
-            .filter(pending::Column::Epoch.eq(state.psk_epoch as i64))
             .one(&tx)
             .await?
             .context("request is no longer pending")?;
-        let request: JoinRequest = decode(&row.request)?;
+        let request: AdmissionRequest = decode(&row.request)?;
         if withdraw && request.body.device.id() != caller {
             bail!("only the requesting device may withdraw its request");
         }
@@ -494,24 +599,15 @@ impl Database {
     /// Cancel all of this device's requests atomically with approval. Return the
     /// locked membership snapshot so a caller admitted first can sign its leave.
     pub async fn withdraw_pending(&self, caller: &str, id: &str) -> Result<MembershipProof> {
-        let proof = self.get(id).await?;
-        let state = proof.verify()?;
         let tx = self.connection.begin().await?;
-        let locked = channel::Entity::update_many()
-            .col_expr(channel::Column::Head, Expr::col(channel::Column::Head))
-            .filter(channel::Column::Id.eq(id))
-            .filter(channel::Column::Head.eq(state.head.to_vec()))
-            .exec(&tx)
-            .await?;
-        if locked.rows_affected != 1 {
-            bail!("CONFLICT: channel changed; retry");
-        }
+        lock_channel(&tx, id).await?;
+        let proof = proof_tx(&tx, id).await?;
         let rows = pending::Entity::find()
             .filter(pending::Column::Channel.eq(id))
             .all(&tx)
             .await?;
         for row in rows {
-            let request: JoinRequest = decode(&row.request)?;
+            let request: AdmissionRequest = decode(&row.request)?;
             if request.body.device.id() == caller {
                 pending::Entity::delete_by_id(row.id).exec(&tx).await?;
             }
@@ -533,51 +629,41 @@ impl Database {
         };
         let proof: MembershipProof = decode(&channel.proof)?;
         let state = proof.verify()?;
-        if revoked::Entity::find_by_id((id.to_owned(), caller.to_owned()))
-            .one(&tx)
-            .await?
-            .is_some()
+        if state.admission_id(caller) == Some(request_id)
+            && state.member(caller).is_ok()
+            && access_revision(&tx, id, caller).await? == 0
         {
-            return Ok(JoinState::Absent);
-        }
-        if state.member(caller).is_ok() {
             return Ok(JoinState::Member);
         }
         let row = pending::Entity::find_by_id(request_id)
             .filter(pending::Column::Channel.eq(id))
-            .filter(pending::Column::Epoch.eq(state.psk_epoch as i64))
             .one(&tx)
             .await?;
         let Some(row) = row else {
             return Ok(JoinState::Absent);
         };
-        let request: JoinRequest = decode(&row.request)?;
+        let request: AdmissionRequest = decode(&row.request)?;
         if request.body.device.id() != caller {
             bail!("request belongs to another device");
         }
         Ok(JoinState::Pending)
     }
 
-    pub async fn append(
-        &self,
-        caller: &str,
-        event: MembershipEvent,
-        new_verifier: Option<String>,
-    ) -> Result<MembershipProof> {
+    pub async fn append(&self, caller: &str, event: MembershipEvent) -> Result<MembershipProof> {
         if event.body.issuer_device_id != caller || event.body.issued_at > now() + 30 {
             bail!("invalid issuer or timestamp");
         }
-        self.require_access(&event.body.channel_id, caller).await?;
-        if matches!(event.body.action, MembershipAction::Admit(_))
-            && event.body.issued_at < now().saturating_sub(30)
-        {
-            bail!("admission timestamp must be current");
+        if matches!(
+            event.body.action,
+            MembershipAction::Admit(_) | MembershipAction::ChangePsk { .. }
+        ) {
+            bail!("PSK admission is no longer supported");
         }
-        if let MembershipAction::Admit(request) = &event.body.action {
-            self.require_access(&event.body.channel_id, &request.body.device.id())
-                .await?;
-        }
-        let mut proof = self.get(&event.body.channel_id).await?;
+        let tx = self.connection.begin().await?;
+        let id = &event.body.channel_id;
+        lock_channel(&tx, id).await?;
+        require_access_tx(&tx, id, caller).await?;
+        let mut proof = proof_tx(&tx, id).await?;
         let old = proof.verify()?;
         old.member(caller)?;
         if event.body.previous_event_hash != old.head {
@@ -588,89 +674,55 @@ impl Database {
         {
             bail!("revocation is not yet permitted");
         }
+        if let MembershipAction::Accept(request) = &event.body.action {
+            if event.body.issued_at < now().saturating_sub(30) {
+                bail!("admission timestamp must be current");
+            }
+            let row = pending::Entity::find_by_id(request.id()?)
+                .filter(pending::Column::Channel.eq(id))
+                .one(&tx)
+                .await?
+                .context("admission not pending")?;
+            if row.request != encode(request)? {
+                bail!("admission altered");
+            }
+            let grant = invitation::Entity::find_by_id(&request.body.invitation_id)
+                .one(&tx)
+                .await?
+                .context("invitation missing")?;
+            validate_issuer(&tx, &grant, &old).await?;
+            let target = request.body.device.id();
+            let revision = access_revision(&tx, id, &target).await?;
+            if revision != request.body.access_revision
+                || (old.member(&target).is_ok() && revision == 0)
+            {
+                bail!("membership changed since request");
+            }
+            pending::Entity::delete_by_id(row.id).exec(&tx).await?;
+            revoked::Entity::delete_by_id((id.clone(), target))
+                .exec(&tx)
+                .await?;
+        }
         proof.events.push(event.clone());
         let state = proof.verify()?;
         let encoded = encode(&proof)?;
         if encoded.len() > 1024 * 1024 {
             bail!("membership proof size limit");
         }
-        let tx = self.connection.begin().await?;
-        // CAS first acquires the SQLite write lock. Any validation failure below rolls it back.
-        let mut update = channel::Entity::update_many()
+        channel::Entity::update_many()
             .col_expr(channel::Column::Proof, Expr::value(encoded))
             .col_expr(channel::Column::Head, Expr::value(state.head.to_vec()))
-            .filter(channel::Column::Id.eq(&state.id))
-            .filter(channel::Column::Head.eq(old.head.to_vec()));
-        if let Some(verifier) = &new_verifier {
-            update = update.col_expr(channel::Column::Verifier, Expr::value(verifier.clone()));
-        }
-        if update.exec(&tx).await?.rows_affected != 1 {
-            bail!("CONFLICT: channel head changed");
-        }
-        if revoked::Entity::find_by_id((state.id.clone(), caller.to_owned()))
-            .one(&tx)
-            .await?
-            .is_some()
-        {
-            bail!("device access revoked by server administrator");
-        }
-        if let MembershipAction::Admit(request) = &event.body.action
-            && revoked::Entity::find_by_id((state.id.clone(), request.body.device.id()))
-                .one(&tx)
-                .await?
-                .is_some()
-        {
-            bail!("device access revoked by server administrator");
-        }
-        match &event.body.action {
-            MembershipAction::Admit(request) => {
-                let row = pending::Entity::find_by_id(request.id()?)
-                    .filter(pending::Column::Channel.eq(&state.id))
-                    .one(&tx)
-                    .await?
-                    .context("admission not pending")?;
-                if row.request != encode(request)? || row.epoch != old.psk_epoch as i64 {
-                    bail!("admission altered");
-                }
-                if new_verifier.is_some() {
-                    bail!("unexpected PSK verifier");
-                }
-                pending::Entity::delete_by_id(row.id).exec(&tx).await?;
-            }
-            MembershipAction::ChangePsk {
-                verifier_commitment,
-            } => {
-                let verifier = new_verifier.as_ref().context("missing PSK verifier")?;
-                validate_verifier(verifier)?;
-                if &digest(verifier.as_bytes()) != verifier_commitment {
-                    bail!("PSK commitment mismatch");
-                }
-                pending::Entity::delete_many()
-                    .filter(pending::Column::Channel.eq(&state.id))
-                    .exec(&tx)
-                    .await?;
-            }
-            MembershipAction::Revoke { .. }
-            | MembershipAction::RevokeSubtree { .. }
-            | MembershipAction::Leave
-            | MembershipAction::Rename { .. } => {
-                if new_verifier.is_some() {
-                    bail!("unexpected PSK verifier");
-                }
-            }
-        }
+            .filter(channel::Column::Id.eq(id))
+            .exec(&tx)
+            .await?;
+        invalidate_invitations(&tx, &state).await?;
         for row in pending::Entity::find()
-            .filter(pending::Column::Channel.eq(&state.id))
+            .filter(pending::Column::Channel.eq(id))
             .all(&tx)
             .await?
         {
-            let request: JoinRequest = decode(&row.request)?;
-            // Subtree revocation also invalidates requests from departed identities in that branch.
-            if matches!(
-                event.body.action,
-                MembershipAction::Revoke { .. } | MembershipAction::RevokeSubtree { .. }
-            ) && state.is_revoked(&request.body.device.id())
-            {
+            let request: AdmissionRequest = decode(&row.request)?;
+            if state.validate_admission(&request).is_err() {
                 pending::Entity::delete_by_id(row.id).exec(&tx).await?;
             }
         }
@@ -678,19 +730,145 @@ impl Database {
         Ok(proof)
     }
 }
-fn channel_model(proof: &MembershipProof, verifier: String) -> Result<channel::ActiveModel> {
+
+fn channel_model(proof: &MembershipProof) -> Result<channel::ActiveModel> {
     let state = proof.verify()?;
     Ok(channel::ActiveModel {
         id: Set(state.id),
         name: Set(state.name),
         proof: Set(encode(proof)?),
         head: Set(state.head.to_vec()),
-        verifier: Set(verifier),
+        verifier: Set(String::new()),
     })
 }
-fn validate_verifier(value: &str) -> Result<()> {
-    if value.len() > 256 || !value.starts_with("$argon2id$v=19$m=19456,t=2,p=1$") {
-        bail!("PSK verifier must use the application Argon2id parameters");
+async fn lock_channel(tx: &sea_orm::DatabaseTransaction, id: &str) -> Result<()> {
+    let locked = registry::Entity::update_many()
+        .col_expr(registry::Column::Name, Expr::col(registry::Column::Name))
+        .filter(registry::Column::Id.eq(id))
+        .exec(tx)
+        .await?;
+    if locked.rows_affected != 1 {
+        bail!("channel not found or deleted");
+    }
+    Ok(())
+}
+async fn proof_tx(tx: &sea_orm::DatabaseTransaction, id: &str) -> Result<MembershipProof> {
+    let row = channel::Entity::find_by_id(id)
+        .one(tx)
+        .await?
+        .context("channel not found")?;
+    let proof: MembershipProof = decode(&row.proof)?;
+    proof.verify()?;
+    Ok(proof)
+}
+async fn access_revision(
+    tx: &sea_orm::DatabaseTransaction,
+    channel: &str,
+    device: &str,
+) -> Result<u64> {
+    Ok(
+        revoked::Entity::find_by_id((channel.to_owned(), device.to_owned()))
+            .one(tx)
+            .await?
+            .map(|r| r.revoked_at as u64)
+            .unwrap_or(0),
+    )
+}
+async fn require_access_tx(
+    tx: &sea_orm::DatabaseTransaction,
+    channel: &str,
+    device: &str,
+) -> Result<()> {
+    if access_revision(tx, channel, device).await? != 0 {
+        return Err(hibiki_lib::protocol::WireError::new(
+            "access_revoked",
+            "device access revoked by server administrator",
+        )
+        .into());
+    }
+    Ok(())
+}
+async fn insert_invitation(
+    tx: &sea_orm::DatabaseTransaction,
+    issuer: &str,
+    metadata: &InvitationMetadata,
+) -> Result<()> {
+    invitation::ActiveModel {
+        id: Set(metadata.id.clone()),
+        channel: Set(metadata.channel.clone()),
+        issuer: Set(issuer.into()),
+        metadata: Set(encode(metadata)?),
+        consumed_request: Set(None),
+        invalidated: Set(false),
+    }
+    .insert(tx)
+    .await?;
+    Ok(())
+}
+async fn validate_issuer(
+    tx: &sea_orm::DatabaseTransaction,
+    row: &invitation::Model,
+    state: &VerifiedChannelState,
+) -> Result<()> {
+    let metadata: InvitationMetadata = decode(&row.metadata)?;
+    if row.invalidated
+        || state.member(&row.issuer).is_err()
+        || state.admission_id(&row.issuer) != Some(metadata.issuer_admission.as_str())
+    {
+        bail!("invitation issuer is no longer a member");
+    }
+    require_access_tx(tx, &state.id, &row.issuer).await
+}
+async fn check_invitation(
+    tx: &sea_orm::DatabaseTransaction,
+    invite: &OneTimeInvitation,
+    state: Option<&VerifiedChannelState>,
+) -> Result<invitation::Model> {
+    invite.metadata.validate()?;
+    let row = invitation::Entity::find_by_id(&invite.metadata.id)
+        .one(tx)
+        .await?
+        .context("invitation not found")?;
+    if row.metadata != encode(&invite.metadata)?
+        || row.invalidated
+        || digest(&invite.key) != invite.metadata.key_hash
+    {
+        bail!("invalid invitation");
+    }
+    if row.consumed_request.is_none() && now() >= invite.metadata.expires_at {
+        bail!("invitation expired; obtain a new invitation");
+    }
+    if let Some(state) = state {
+        if invite.metadata.genesis_hash != Some(state.genesis_hash) {
+            bail!("invitation channel mismatch");
+        }
+        validate_issuer(tx, &row, state).await?;
+    }
+    Ok(row)
+}
+async fn invalidate_invitations(
+    tx: &sea_orm::DatabaseTransaction,
+    state: &VerifiedChannelState,
+) -> Result<()> {
+    for row in invitation::Entity::find()
+        .filter(invitation::Column::Channel.eq(&state.id))
+        .filter(invitation::Column::Invalidated.eq(false))
+        .all(tx)
+        .await?
+    {
+        if row.issuer.is_empty() {
+            continue;
+        }
+        if validate_issuer(tx, &row, state).await.is_err() {
+            invitation::Entity::update_many()
+                .col_expr(invitation::Column::Invalidated, Expr::value(true))
+                .filter(invitation::Column::Id.eq(&row.id))
+                .exec(tx)
+                .await?;
+            if let Some(request) = row.consumed_request {
+                pending::Entity::delete_by_id(request).exec(tx).await?;
+            }
+        }
     }
     Ok(())
 }

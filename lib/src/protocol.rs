@@ -1,8 +1,9 @@
+use crate::invitation::{AdmissionRequest, InvitationMetadata, OneTimeInvitation};
 use crate::{assuan::Line, channel::*, identity::Device};
 use serde::{Deserialize, Serialize};
 
 /// Hibiki wire protocol identifier, authenticated by the device and bound into Noise.
-pub const VERSION: &str = "hibiki/2";
+pub const VERSION: &str = "hibiki/3";
 pub const WS_PATH: &str = "/hibiki";
 pub const MAX_WIRE: usize = 4 * 1024 * 1024;
 /// An hour of caller time plus less than a second of wire timestamp rounding.
@@ -59,7 +60,6 @@ pub enum Control {
     },
     Create {
         genesis: ChannelGenesis,
-        verifier: String,
     },
     GetChannel {
         channel: String,
@@ -69,15 +69,14 @@ pub enum Control {
         channel: String,
     },
     Join {
-        request: JoinRequest,
-        psk: String,
+        request: AdmissionRequest,
+        invitation: OneTimeInvitation,
     },
     Pending {
         channel: String,
     },
     Append {
         event: MembershipEvent,
-        verifier: Option<String>,
     },
     Announce {
         channels: Vec<String>,
@@ -87,7 +86,13 @@ pub enum Control {
     },
     Claim {
         genesis: ChannelGenesis,
-        psk: String,
+        invitation: OneTimeInvitation,
+    },
+    RegisterInvitation {
+        metadata: InvitationMetadata,
+    },
+    ResolveInvitation {
+        invitation: OneTimeInvitation,
     },
     Policy,
     RejectJoin {
@@ -119,7 +124,11 @@ pub enum Reply {
         online: Vec<String>,
         revoked: Vec<String>,
     },
-    Requests(Vec<JoinRequest>),
+    Requests(Vec<AdmissionRequest>),
+    InvitationProof {
+        proof: MembershipProof,
+        access_revision: u64,
+    },
     Peers(Vec<String>),
     Policy {
         allow_client_channel_creation: bool,
@@ -135,6 +144,7 @@ pub enum JoinState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // Bounded management records; avoids changing canonical IPC envelopes.
 pub enum Envelope {
     OperationReady {
         id: String,

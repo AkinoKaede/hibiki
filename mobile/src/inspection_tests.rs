@@ -1,5 +1,4 @@
 use super::*;
-use hibiki_core::storage::read_private;
 
 fn client(root: &std::path::Path) -> Arc<MobileClient> {
     let core = MobileClient::new(
@@ -14,18 +13,11 @@ fn client(root: &std::path::Path) -> Arc<MobileClient> {
 }
 
 fn seed(client: &MobileClient) {
-    let mut registry = registry::Registry::default();
-    for serial in ["first", "selected"] {
-        registry.upsert(
-            CardInfo {
-                serial: serial.into(),
-                transport: CardTransport::Nfc,
-                keys: vec![],
-            },
-            serial.into(),
-        );
-    }
-    client.save_registry(registry).unwrap();
+    *client.provider.nfc_card.lock().unwrap() = Some(CardInfo {
+        serial: "previous".into(),
+        transport: CardTransport::Nfc,
+        keys: vec![],
+    });
 }
 
 async fn next(client: &MobileClient) -> NativeEvent {
@@ -40,44 +32,46 @@ async fn unavailable_nfc_cannot_open_native_reader_or_register_a_card() {
     let root = tempfile::tempdir().unwrap();
     let core = client(root.path());
     seed(&core);
-    let before = encode(&core.registered_cards()).unwrap();
+    let before = encode(&core.nfc_card()).unwrap();
     core.set_nfc_available(false);
     assert!(
         core.inspect_card(CardTransport::Nfc, CardReadCancellation::new())
             .await
             .is_err()
     );
-    assert!(core.register_card("new".into()).await.is_err());
+    assert!(
+        core.record_nfc_card(CardReadCancellation::new())
+            .await
+            .is_err()
+    );
     assert!(
         tokio::time::timeout(Duration::from_millis(20), core.next_event())
             .await
             .is_err()
     );
-    assert_eq!(encode(&core.registered_cards()).unwrap(), before);
+    assert_eq!(encode(&core.nfc_card()).unwrap(), before);
 }
 
-#[tokio::test]
-async fn name_edits_preserve_all_public_data_and_persist() {
+#[test]
+fn records_are_not_loaded_and_legacy_files_are_removed_without_decoding() {
     let root = tempfile::tempdir().unwrap();
     let core = client(root.path());
     seed(&core);
-    let original = encode(&core.registered_cards()[0].card).unwrap();
-    core.update_card("first".into(), "  Renamed  ".into())
-        .await
+    for name in ["cards.bin", "nfc-cards.bin"] {
+        std::fs::write(
+            core.app.paths.data.join(name),
+            b"obsolete or corrupted registry",
+        )
         .unwrap();
-    assert_eq!(core.registered_cards()[1].card.serial, "selected");
-    assert_eq!(encode(&core.registered_cards()[0].card).unwrap(), original);
-    assert_eq!(core.registered_cards()[0].name, "Renamed");
-    let before = read_private(&core.registry_path()).unwrap();
-    for (serial, name) in [("selected", " \n "), ("unknown", "Missing")] {
-        assert!(core.update_card(serial.into(), name.into()).await.is_err());
-        assert_eq!(read_private(&core.registry_path()).unwrap(), before);
     }
-    drop(core);
     let reopened = client(root.path());
-    assert_eq!(reopened.registered_cards()[0].name, "Renamed");
-    assert_eq!(reopened.registered_cards()[1].card.serial, "selected");
-    assert_eq!(reopened.registered_cards()[1].name, "selected");
+    assert!(reopened.nfc_card().is_none());
+    for name in ["cards.bin", "nfc-cards.bin"] {
+        assert!(!core.app.paths.data.join(name).exists());
+    }
+    assert_eq!(core.nfc_card().unwrap().serial, "previous");
+    core.clear_nfc_card();
+    assert!(core.nfc_card().is_none());
 }
 
 // An empty OpenPGP card is enough to verify the production public-read path.
@@ -95,11 +89,12 @@ fn application_data() -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn registration_only_reads_nfc_public_data() {
+async fn recording_reads_public_data_and_is_not_persisted() {
     let root = tempfile::tempdir().unwrap();
     let core = client(root.path());
     let reader = core.clone();
-    let task = tokio::spawn(async move { reader.register_card("My NFC key".into()).await });
+    let task =
+        tokio::spawn(async move { reader.record_nfc_card(CardReadCancellation::new()).await });
     loop {
         match next(&core).await {
             NativeEvent::CardOpen {
@@ -123,11 +118,11 @@ async fn registration_only_reads_nfc_public_data() {
         }
     }
     task.await.unwrap().unwrap();
-    let cards = core.registered_cards();
-    assert_eq!(cards.len(), 1);
-    assert_eq!(cards[0].card.transport, CardTransport::Nfc);
-    assert_eq!(cards[0].name, "My NFC key");
-    assert_eq!(client(root.path()).registered_cards()[0].name, "My NFC key");
+    let card = core.nfc_card().unwrap();
+    assert_eq!(card.transport, CardTransport::Nfc);
+    assert_eq!(card.serial, "D2760001240103040005000012340000");
+    assert!(client(root.path()).nfc_card().is_none());
+    assert!(!core.app.paths.data.join("nfc-cards.bin").exists());
 }
 
 #[tokio::test]
@@ -135,7 +130,7 @@ async fn inspection_reads_both_interfaces_without_changing_registry_or_requestin
     let root = tempfile::tempdir().unwrap();
     let core = client(root.path());
     seed(&core);
-    let before = read_private(&core.registry_path()).unwrap();
+    let before = encode(&core.nfc_card()).unwrap();
     for transport in [CardTransport::Usb, CardTransport::Nfc] {
         let reader = core.clone();
         let mode = transport.clone();
@@ -173,8 +168,8 @@ async fn inspection_reads_both_interfaces_without_changing_registry_or_requestin
         assert_eq!(info.serial, "D2760001240103040005000012340000");
         assert_eq!(info.transport, transport);
         assert!(info.keys.is_empty());
-        assert_eq!(read_private(&core.registry_path()).unwrap(), before);
-        assert_eq!(core.registered_cards()[1].card.serial, "selected");
+        assert_eq!(encode(&core.nfc_card()).unwrap(), before);
+        assert_eq!(core.nfc_card().unwrap().serial, "previous");
         assert_eq!(core.slots.available_permits(), 1);
     }
 }
@@ -201,7 +196,7 @@ async fn inspection_cancellation_releases_hardware_and_rejects_late_responses() 
             .is_err()
     );
     assert!(
-        core.update_card("selected".into(), "Busy".into())
+        core.record_nfc_card(CardReadCancellation::new())
             .await
             .is_err()
     );
@@ -221,9 +216,7 @@ async fn inspection_cancellation_releases_hardware_and_rejects_late_responses() 
         core.inspect_card(CardTransport::Usb, cancellation).await,
         Err(MobileError::Cancelled)
     ));
-    core.update_card("selected".into(), "After cancellation".into())
-        .await
-        .unwrap();
+    assert_eq!(core.nfc_card().unwrap().serial, "previous");
 }
 
 #[tokio::test]

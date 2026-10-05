@@ -6,6 +6,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use hibiki_core::management::{append, leave, refresh, validate_pending};
+use hibiki_lib::invitation::{AdmissionRequest, VerificationCode};
 use hibiki_lib::{
     channel::*,
     now,
@@ -31,6 +32,7 @@ pub struct DeviceRow {
 #[derive(Clone, Serialize)]
 pub struct PendingRow {
     pub id: String,
+    pub verification: String,
     pub channel: String,
     pub channel_name: String,
     pub device: DeviceRow,
@@ -66,6 +68,7 @@ pub struct Snapshot {
 }
 #[derive(Clone, Serialize)]
 pub struct JoinResult {
+    pub verification: String,
     pub channel: String,
     pub name: String,
     pub request: Option<String>,
@@ -95,7 +98,7 @@ impl Manager {
         self.app.identity = std::sync::Arc::new(identity);
         Ok(())
     }
-    pub async fn pending(&self, channel: &str) -> Result<Vec<JoinRequest>> {
+    pub async fn pending(&self, channel: &str) -> Result<Vec<AdmissionRequest>> {
         let state = refresh(&self.app, &self.connection, channel)
             .await?
             .verify()?;
@@ -139,8 +142,19 @@ impl Manager {
         Ok(snapshot)
     }
     pub async fn channel(&self, id: &str) -> Result<ChannelRow> {
-        let state = refresh(&self.app, &self.connection, id).await?.verify()?;
+        let (proof, denied) = match refresh(&self.app, &self.connection, id).await {
+            Ok(proof) => (proof, false),
+            Err(e)
+                if e.downcast_ref::<hibiki_lib::protocol::WireError>()
+                    .is_some_and(|e| e.code == "access_revoked") =>
+            {
+                (self.app.proof(id)?, true)
+            }
+            Err(e) => return Err(e),
+        };
+        let state = proof.verify()?;
         let mut row = channel_row(&self.app, &state)?;
+        row.member &= !denied;
         row.available = true;
         if row.member {
             let Reply::ChannelSnapshot {
@@ -216,8 +230,7 @@ impl Manager {
             &self.app,
             &self.connection,
             channel,
-            MembershipAction::Admit(request),
-            None,
+            MembershipAction::Accept(request),
         )
         .await
     }
@@ -270,143 +283,27 @@ impl Manager {
         Ok(())
     }
 
-    pub async fn invitation(
-        &self,
-        channel: &str,
-        psk: Option<String>,
-    ) -> Result<Zeroizing<String>> {
-        let psk = psk.map(Zeroizing::new);
-        let proof = refresh(&self.app, &self.connection, channel).await?;
-        let state = proof.verify()?;
-        state.member(&self.app.identity.device.id())?;
-        let invite = Invite {
-            version: 1,
-            server: self.app.config.server.clone(),
-            genesis: proof.genesis,
-            checkpoint: state.checkpoint(),
-        };
-        Ok(Zeroizing::new(match psk {
-            Some(psk) => invitation_with_psk(InvitationKind::Member(invite), psk.to_string())?,
-            None => invite.export()?,
-        }))
-    }
-    pub async fn create(&self, name: String, psk: String) -> Result<Zeroizing<String>> {
-        let psk = Zeroizing::new(psk);
-        let verifier = hash_psk(&psk)?;
-        let genesis = ChannelGenesis::create(&self.app.identity, name, &verifier)?;
-        let Reply::Proof(proof) = self
-            .connection
-            .request(Control::Create {
-                genesis: genesis.clone(),
-                verifier,
-            })
+    pub async fn invitation(&self, channel: &str) -> Result<Zeroizing<String>> {
+        hibiki_core::management::invitation(&self.app, &self.connection, channel)
             .await?
-        else {
-            bail!("invalid creation response")
-        };
-        if proof.genesis != genesis || !proof.events.is_empty() {
-            bail!("server altered channel genesis");
-        }
-        let proof = self.app.bootstrap(proof, None)?;
-        let state = proof.verify()?;
-        let invite = Invite {
-            version: 1,
-            server: self.app.config.server.clone(),
-            genesis: proof.genesis,
-            checkpoint: state.checkpoint(),
-        };
-        Ok(Zeroizing::new(invitation_with_psk(
-            InvitationKind::Member(invite),
-            psk.to_string(),
-        )?))
+            .export()
+            .map_err(Into::into)
     }
-
-    pub async fn rotate(&self, channel: &str) -> Result<Zeroizing<String>> {
-        let psk = Zeroizing::new(make_psk());
-        self.rotate_with_psk(channel, &psk).await?;
-        Ok(psk)
+    pub async fn create(&self, name: String) -> Result<Zeroizing<String>> {
+        hibiki_core::management::create_channel(&self.app, &self.connection, name)
+            .await?
+            .export()
+            .map_err(Into::into)
     }
-    pub async fn rotate_with_psk(&self, channel: &str, psk: &str) -> Result<()> {
-        let verifier = hash_psk(psk)?;
-        append(
-            &self.app,
-            &self.connection,
-            channel,
-            MembershipAction::ChangePsk {
-                verifier_commitment: hibiki_lib::digest(verifier.as_bytes()),
-            },
-            Some(verifier),
-        )
-        .await
-    }
-    pub async fn join(&self, text: String, external: Option<String>) -> Result<JoinResult> {
+    pub async fn join(&self, text: String) -> Result<JoinResult> {
         let text = Zeroizing::new(text);
-        let (kind, psk) = ParsedInvitation::import(&text)?.secret(external)?;
-        if kind.server() != self.app.config.server {
-            bail!("invitation relay differs from configured relay");
-        }
-        let psk = psk.context("channel PSK required")?;
-        match kind {
-            InvitationKind::Initialization(invite) => {
-                let genesis = invite.founder_genesis(&self.app.identity)?;
-                let proof = match self
-                    .connection
-                    .request(Control::GetChannel {
-                        channel: invite.id.clone(),
-                    })
-                    .await
-                {
-                    Ok(Reply::Proof(proof)) => proof,
-                    _ => match self
-                        .connection
-                        .request(Control::Claim {
-                            genesis: genesis.clone(),
-                            psk: psk.to_string(),
-                        })
-                        .await?
-                    {
-                        Reply::Proof(proof) => proof,
-                        _ => bail!("invalid claim response"),
-                    },
-                };
-                if proof.genesis != genesis {
-                    bail!("initialization invitation already claimed or altered");
-                }
-                proof.verify()?.member(&self.app.identity.device.id())?;
-                self.app.bootstrap(proof, None)?;
-                Ok(JoinResult {
-                    channel: invite.id,
-                    name: invite.name,
-                    request: None,
-                })
-            }
-            InvitationKind::Member(invite) => {
-                let id = invite.genesis.body.id.clone();
-                let Reply::Proof(proof) = self
-                    .connection
-                    .request(Control::GetChannel {
-                        channel: id.clone(),
-                    })
-                    .await?
-                else {
-                    bail!("invalid channel response")
-                };
-                let state = self.app.bootstrap(proof, Some(&invite))?.verify()?;
-                let request = JoinRequest::create(&self.app.identity, &state)?;
-                let request_id = request.id()?;
-                self.connection
-                    .request(Control::Join {
-                        request,
-                        psk: psk.to_string(),
-                    })
-                    .await?;
-                Ok(JoinResult {
-                    channel: id,
-                    name: state.name,
-                    request: Some(request_id),
-                })
-            }
-        }
+        let result = hibiki_core::management::join(&self.app, &self.connection, &text).await?;
+        Ok(JoinResult {
+            channel: result.channel,
+            name: result.name,
+            request: result.request,
+            verification: result.verification,
+        })
     }
     pub async fn join_status(&self, channel: &str, request: &str) -> Result<JoinState> {
         let Reply::JoinStatus(status) = self
@@ -425,11 +322,12 @@ impl Manager {
 pub fn pending_row(
     app: &App,
     state: &VerifiedChannelState,
-    request: &JoinRequest,
+    request: &AdmissionRequest,
 ) -> Result<PendingRow> {
     validate_pending(request, state)?;
     Ok(PendingRow {
         id: request.id()?,
+        verification: VerificationCode::new(app.config.server.clone(), request)?.export()?,
         channel: state.id.clone(),
         channel_name: state.name.clone(),
         device: device_row(app, &request.body.device)?,

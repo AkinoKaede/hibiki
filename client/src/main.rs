@@ -7,10 +7,7 @@ use hibiki::{
     storage::App,
     terminal::{ERROR, HEADING, SUCCESS, WARNING},
 };
-use hibiki_lib::{
-    channel::*,
-    protocol::{Control, JoinState, Reply},
-};
+use hibiki_lib::protocol::{Control, JoinState, Reply};
 use std::{io::Write, path::PathBuf, time::Duration};
 
 #[derive(Parser)]
@@ -93,22 +90,20 @@ enum DeviceCommand {
 enum ChannelCommand {
     Create {
         name: String,
-        #[arg(long)]
-        psk_file: Option<PathBuf>,
-        #[arg(long, conflicts_with = "psk_file")]
-        prompt_psk: bool,
+        #[command(flatten)]
+        qr: QrOptions,
     },
     Invite {
         name: String,
-        #[arg(long)]
-        psk_file: Option<PathBuf>,
+        #[command(flatten)]
+        qr: QrOptions,
     },
     Join {
         invite: String,
         #[arg(long)]
-        psk_file: Option<PathBuf>,
-        #[arg(long)]
         no_wait: bool,
+        #[command(flatten)]
+        qr: QrOptions,
     },
     Pending {
         name: String,
@@ -122,13 +117,6 @@ enum ChannelCommand {
     },
     /// Reject one pending request; the device may submit a new request.
     Reject { name: String, request_id: String },
-    RotatePsk {
-        name: String,
-        #[arg(long)]
-        psk_file: Option<PathBuf>,
-        #[arg(long, conflicts_with = "psk_file")]
-        prompt_psk: bool,
-    },
     /// Leave a channel or withdraw this device's pending join requests.
     Leave { name: String },
     Revoke {
@@ -143,15 +131,32 @@ enum ChannelCommand {
         json: bool,
     },
 }
-fn psk(file: Option<PathBuf>, generate: bool) -> Result<(String, bool)> {
-    if let Some(path) = file {
-        let data = std::fs::read_to_string(path)?;
-        return Ok((data.trim_end_matches(['\r', '\n']).to_owned(), false));
-    }
-    if generate {
-        Ok((make_psk(), true))
-    } else {
-        Ok((rpassword::prompt_password("Channel PSK: ")?, false))
+#[derive(clap::Args)]
+struct QrOptions {
+    /// Display a scannable QR code on the terminal (stderr).
+    #[arg(long)]
+    qr: bool,
+    /// Export the QR code as a private PNG file; never overwrite an existing file.
+    #[arg(long)]
+    qr_output: Option<PathBuf>,
+}
+impl QrOptions {
+    fn show(&self, text: &str) -> Result<()> {
+        if self.qr {
+            for line in hibiki_lib::qr::terminal(text)?.lines() {
+                eprintln!("\x1b[30;47m{line}\x1b[0m");
+            }
+        }
+        if let Some(path) = &self.qr_output {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)?;
+            file.write_all(&hibiki_lib::qr::png(text)?)?;
+        }
+        Ok(())
     }
 }
 use hibiki_core::management::refresh;
@@ -324,47 +329,32 @@ async fn run() -> Result<()> {
         connection: conn.clone(),
     };
     match command {
-        ChannelCommand::Create {
-            name,
-            psk_file,
-            prompt_psk,
-        } => {
-            let (secret, _) = psk(psk_file, !prompt_psk)?;
-            let secret = zeroize::Zeroizing::new(secret);
-            let invite = manager.create(name, secret.to_string()).await?;
-            let parsed = ParsedInvitation::import(&invite)?;
-            let InvitationKind::Member(value) = parsed.invitation else {
-                unreachable!()
-            };
-            println!("channel {}", value.genesis.body.id);
+        ChannelCommand::Create { name, qr } => {
+            let invite = manager.create(name).await?;
+            let parsed = hibiki_lib::invitation::OneTimeInvitation::import(&invite)?;
+            println!("channel {}", parsed.metadata.channel);
             println!("invite {}", &*invite);
-            eprintln!("Channel created. Next: hibiki channel invite NAME; hibiki use NAME.");
+            qr.show(&invite)?;
+            eprintln!("Invitation expires in 24 hours and can be used once.");
         }
-        ChannelCommand::Invite { name, psk_file } => {
+        ChannelCommand::Invite { name, qr } => {
             let id = app.resolve_channel(&name)?;
-            let secret = psk(psk_file, false)?.0;
-            println!("{}", &*manager.invitation(&id, Some(secret)).await?);
+            let invite = manager.invitation(&id).await?;
+            println!("{}", &*invite);
+            qr.show(&invite)?;
         }
         ChannelCommand::Join {
             invite,
-            psk_file,
             no_wait,
+            qr,
         } => {
             pairing::show_device(&mut std::io::stderr().lock(), &app.identity.device)?;
-            let invite = zeroize::Zeroizing::new(invite);
-            let embedded = ParsedInvitation::import(&invite)?.psk.is_some();
-            if embedded && psk_file.is_some() {
-                bail!("invitation already contains a PSK; remove --psk-file");
-            }
-            let external = if embedded {
-                None
-            } else {
-                Some(psk(psk_file, false)?.0)
-            };
-            let result = manager.join(invite.to_string(), external).await?;
+            let result = manager.join(invite).await?;
             if let Some(request_id) = &result.request {
                 // Flush before waiting: scripts and the approving terminal need this ID.
                 println!("request {request_id}");
+                println!("verification {}", result.verification);
+                qr.show(&result.verification)?;
                 std::io::stdout().flush()?;
                 eprintln!(
                     "Channel: {}\nChannel ID: {}\nRequest ID: {request_id}\nStatus: Awaiting approval",
@@ -465,19 +455,6 @@ async fn run() -> Result<()> {
                 "Next: hibiki channel pending {}",
                 hibiki::presentation::quote(&id)
             );
-        }
-        ChannelCommand::RotatePsk {
-            name,
-            psk_file,
-            prompt_psk,
-        } => {
-            let id = app.resolve_channel(&name)?;
-            let (secret, generated) = psk(psk_file, !prompt_psk)?;
-            manager.rotate_with_psk(&id, &secret).await?;
-            println!("{SUCCESS}PSK updated; existing members retained{SUCCESS:#}");
-            if generated {
-                println!("{HEADING}PSK{HEADING:#} {secret}");
-            }
         }
         ChannelCommand::Leave { name } => {
             let id = app.resolve_channel(&name)?;

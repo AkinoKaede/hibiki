@@ -1,6 +1,6 @@
 # Hibiki network protocol
 
-The first published `hibiki/2` uses Protocol Buffers over binary WebSocket messages
+`hibiki/3` uses Protocol Buffers over binary WebSocket messages
 at `/hibiki`. One WebSocket message contains one `Envelope`, without an extra
 length prefix. The relay routes Noise packets as opaque bytes. The Noise XX
 handshake and its Postcard-encoded prologue remain unchanged; authenticated
@@ -9,7 +9,7 @@ one Protobuf `PrivateMessage`.
 
 ## Schema and codecs
 
-The `hibiki.v2` package is split by function in `lib/proto`:
+The `hibiki.v3` package is split by function in `lib/proto`:
 
 | File | Responsibility |
 | --- | --- |
@@ -26,17 +26,16 @@ The desktop, relay and iOS Rust framework share this codec.
 
 `hibiki_lib::{encode, encode_secret, decode}` remains the separate Postcard codec
 for local IPC, identities, trust files, database blobs, invitations, signing inputs
-and hashes. Never sign or hash re-encoded Protobuf as a replacement for a v1
-preimage: Protobuf is not a canonical serialization. Network conversions preserve
-v1 certificates, signatures, history hashes and trust checkpoints.
+and hashes. Never sign or hash re-encoded Protobuf as a replacement for a historical
+preimage: Protobuf is not a canonical serialization. Network conversions preserve legacy certificates, signatures, history hashes and trust checkpoints. V3 admission requests use bounded canonical Postcard blobs inside Protobuf messages, signed under `join/v3`. New genesis records use `genesis/v2`; new membership events use `membership/v3` after an explicit signed upgrade (or immediately for a new channel).
 
 ## Compatibility contract
 
 The schema, message behavior and limits at the first publication are the
-`hibiki/2` baseline. Application release numbers need not match. A newer server,
+`hibiki/3` baseline. Application release numbers need not match. A newer server,
 desktop client or iOS client must continue supporting this baseline for as long
-as it advertises `hibiki/2`. A same-major upgrade requires no simultaneous rollout.
-The earlier unpublished Postcard network format is unsupported.
+as it advertises `hibiki/3`. A same-major upgrade requires no simultaneous rollout.
+Older protocol majors, including v2, are unsupported at runtime. Upgrading from v2 requires upgrading every component; historical signed channel data remains readable.
 
 Within this major version:
 
@@ -69,13 +68,21 @@ field and retain unavailable/timeout behavior; the canceling provider still cann
 execute the operation. Upgrade both endpoints for immediate rejection reporting.
 Existing baseline fields, variants and byte fixtures remain unchanged.
 
+## Admission and invitation lifecycle
+
+`RegisterInvitation` authenticates a current member and records the invitation metadata, issuer's admission ID, key hash and expiry. `ResolveInvitation` validates the presented key and returns the pinned channel proof plus the applicant's current administrator-revocation revision. `Join` binds the invitation ID, device, current trust checkpoint, previous admission and access revision into the applicant's signature. `Claim` uses a one-use initialization invitation for a reserved empty channel. `Create` and `Append` have no PSK arguments.
+
+The relay serializes invitation consumption, pending admission, approval, withdrawal and revocation through SQLite transactions. Exact retries of the same signed request are idempotent; a different request cannot reuse the key. Approval verifies that the issuer's admission is still effective and that no newer revocation occurred. Administrator denial is removed only in the same transaction as a valid signed readmission. Invitation expiry is checked before consumption, not while approving an already pending request.
+
+Invitation strings use `hibiki-invite-v2:` and contain a secret key. Verification strings use `hibiki-verify-v1:` and bind the relay URL, channel, genesis hash, complete request hash and device ID. They are not interchangeable. `access_revoked` is an explicit control error code; clients display cached membership as inactive while allowing the narrowly scoped reapplication flow.
+
 ## Capability negotiation
 
 Relay setup uses `Hello.capabilities` for the server declaration and
 `Authenticate.capabilities` for the client declaration. Both lists are sorted and
 deduplicated before signing the Postcard tuple
 `(version, nonce, device_id, server_capabilities, client_capabilities)` under
-`server-auth/v2`. The server verifies that tuple against its actual declaration
+`server-auth/v3`. The server verifies that tuple against its actual declaration
 before registering the client. `Authenticated.capabilities` returns the
 intersection; the client checks it against the intersection it computed.
 Declarations are limited to 64 entries of 1–128 ASCII letters, digits or `._/-`.
@@ -106,8 +113,10 @@ secret-bearing message bodies are never logged.
 
 ## Baseline tests
 
-`lib/tests/fixtures/wire-v2.descriptor` freezes field numbers, types, oneof
-membership and enum values across all five schemas. `wire-v2.hex` freezes bytes for
+The old v2 fixture files remain unchanged as historical evidence; the v3 fixtures freeze the new live protocol.
+
+`lib/tests/fixtures/wire-v3.descriptor` freezes field numbers, types, oneof
+membership and enum values across all five schemas. `wire-v3.hex` freezes bytes for
 all network variants. `wire-identity.postcard` contains only a synthetic test
 identity; it also anchors legacy storage and signed preimages. Do not regenerate
 published fixtures to silence a compatibility failure.

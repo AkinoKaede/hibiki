@@ -3,8 +3,10 @@ pub mod assuan;
 pub mod channel;
 pub mod e2ee;
 pub mod identity;
+pub mod invitation;
 pub mod paths;
 pub mod protocol;
+pub mod qr;
 pub mod selection;
 pub mod wire;
 

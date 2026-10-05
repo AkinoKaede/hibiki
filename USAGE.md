@@ -99,7 +99,7 @@ sudo install -d -m 0700 -o "$(id -un)" -g "$(id -gn)" /var/lib/hibiki
 hibiki-server
 ```
 
-The server runs in the foreground and listens on `127.0.0.1:7749` by default. It serves WebSocket traffic at `/hibiki` and a health endpoint at `/healthz`. For remote use, expose it through a TLS endpoint and use a `wss://` URL. Channel admission relies on TLS to protect the pre-shared key (PSK).
+The server runs in the foreground and listens on `127.0.0.1:7749` by default. It serves WebSocket traffic at `/hibiki` and a health endpoint at `/healthz`. For remote use, expose it through a TLS endpoint and use a `wss://` URL. Channel admission relies on TLS to protect the one-use invitation key.
 
 The relay searches for configuration in this order:
 
@@ -125,32 +125,32 @@ Channel creation is reserved for the server administrator by default. On the rel
 hibiki-server channel create personal --server wss://hibiki.example.com/hibiki
 ```
 
-Keep the single-use `hibiki-psk-v1:...` initialization invitation. The invitation contains the PSK; share it only with the intended recipient through a trusted channel. For Docker, run the same command with `docker exec` and `--config /etc/hibiki/server.toml` as described in [Docker relay](#docker-relay).
+Keep the single-use initialization invitation. It includes its own secret key, expires after 24 hours, and must be shared only with the intended recipient. For Docker, run the same command with `docker exec` and `--config /etc/hibiki/server.toml` as described in [Docker relay](#docker-relay).
 
 On the first device (`--name` is optional and defaults to the system hostname), claim the channel and produce a member invitation:
 
 ```sh
 hibiki init --server wss://hibiki.example.com/hibiki --name laptop
-hibiki channel join 'hibiki-psk-v1:...'
+hibiki channel join 'hibiki-invite-v2:...'
 hibiki channel invite personal
 ```
 
-`join` uses the embedded PSK; this first claim does not need member approval. Reuse the generated invitation when sharing. To generate a new one, `channel invite` asks for the PSK again because Hibiki does not persist it (use `--psk-file` or `--prompt-psk` when creating a channel to choose a PSK you can retain), then emits one new `hibiki-psk-v1:...` member invitation on stdout. If the administrator explicitly sets `allow_client_channel_creation = true`, the first device can instead run `hibiki channel create personal` followed by `hibiki channel invite personal`.
+The first claim does not need member approval. Generate a separate invitation for each additional device with `channel invite`; no password is required. If the administrator sets `allow_client_channel_creation = true`, the first device can instead run `hibiki channel create personal`, which also prints one member invitation.
 
 On each additional device:
 
 ```sh
 hibiki init --server wss://hibiki.example.com/hibiki --name desktop
-hibiki channel join 'hibiki-psk-v1:...'
+hibiki channel join 'hibiki-invite-v2:...'
 ```
 
-`join` uses the embedded PSK and waits for approval. Older `hibiki-v1:` and `hibiki-init-v1:` invitations remain accepted and prompt for a PSK. An external PSK with an embedded-PSK invitation is an error. In another terminal on an existing member device, run:
+`join` consumes the invitation and waits for approval. Invitations expire after 24 hours, but submitted requests remain pending. Old PSK invitations are no longer accepted. In another terminal on an existing member device, run:
 
 ```sh
 hibiki channel approve personal
 ```
 
-Compare the joining device's request ID and all 24 public-key verification words before answering `y`. Approval defaults to No. Pending requests remain until approved, rejected by a member, withdrawn by the applicant, invalidated by PSK rotation, or removed with the channel. A waiting `join` exits when its request is removed. Ctrl-C only stops waiting; use `hibiki channel leave NAME` to cancel joining. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
+Compare the joining device's request ID and all 24 public-key verification words before answering `y`. Approval defaults to No. Pending requests remain until approved, rejected by a member, withdrawn by the applicant, invalidated when the invitation issuer loses membership, or removed with the channel. A waiting `join` exits when its request is removed. Ctrl-C only stops waiting; use `hibiki channel leave NAME` to cancel joining. Any existing member can approve a device. Initialize each device separately; do not copy another device's identity file.
 
 ### 3. Configure the services each device will provide
 
@@ -278,16 +278,15 @@ hibiki channel list
 hibiki device list
 hibiki channel pending personal
 hibiki channel reject personal REQUEST_ID
-hibiki channel rotate-psk personal
 hibiki channel revoke personal DEVICE_ID
 hibiki channel leave personal
 ```
 
-Any active member can reject one pending request; only its applicant can withdraw it. Rejection removes that request and does not permanently ban the device. A new admission still requires the PSK and member approval. Approval and removal are atomic: a removed request cannot subsequently be approved.
+Any active member can reject one pending request; only its applicant can withdraw it. Rejection removes that request and does not permanently ban the device. A new admission requires a fresh unused invitation and member approval. Approval and removal are atomic: a removed request cannot subsequently be approved.
 
 `hibiki channel leave NAME` withdraws all of this device's pending requests for the channel and leaves if it is already a member, including if approval happened just before cancellation. No request ID is needed. It also clears the default channel when applicable; repeating it after leaving is harmless.
 
-PSKs control admission. The relay stores Argon2id verifiers; rotating a PSK invalidates pending requests but preserves approved membership. Use `--psk-file` for automation. A revoked identity cannot rejoin the same channel; a device that voluntarily leaves can request admission again.
+Each invitation has an independent 256-bit key. The relay keeps only its hash and atomically consumes it when accepting one valid request. Retrying the identical request is safe; rejection and withdrawal do not restore a consumed key. Ordinary, subtree and administrator revocation permit fresh admission after new approval. Administrator-revoked devices remain blocked until approval commits. Generating another invitation does not invalidate existing unused invitations.
 
 Channel creation is reserved for the server administrator by default (`allow_client_channel_creation = false`):
 
@@ -297,7 +296,7 @@ hibiki-server channel list
 hibiki-server channel delete personal
 ```
 
-Server-side creation prints a single-use `hibiki-psk-v1:...` initialization invitation containing the PSK. The first device claims it with `hibiki channel join`; later devices use ordinary invitations. A running relay checks for administrator deletions every second and closes affected sessions. Recreating a channel name produces a new channel ID.
+Server-side creation prints a single-use `hibiki-invite-v2:...` initialization invitation containing its one-use key. The first device claims it with `hibiki channel join`; later devices use ordinary invitations. A running relay checks for administrator deletions every second and closes affected sessions. Recreating a channel name produces a new channel ID.
 
 ## Docker relay
 
@@ -447,8 +446,9 @@ saving; changes to programs, service switches or timeouts require manually
 restarting the daemon. Changing the default channel affects new adapter sessions.
 The TUI does not install or restart system services.
 
-New invitations always include the PSK; there is no `--include-psk` switch.
-Sharing an existing channel prompts for its PSK, or accepts `--psk-file PATH`.
+In TUI Channels, press `i` or choose Generate invitation from the actions menu. Press `v` in the result to switch text/QR views; `e` exports text or a PNG when the filename ends in `.png`. To reopen your pending verification code, select your request in Requests and choose Show verification QR / text. Every focused pane has a cyan double border and a `*` title marker. A QR that cannot fit the terminal is never clipped.
+
+CLI creation, invitation and joining also accept `--qr` to display a QR on stderr and `--qr-output PATH` to export a private PNG. Joining displays a separate public verification code bound to that request. On iOS, scan invitations with the camera or choose a QR image from Photos; in a pending request, Scan and Approve immediately approves only a matching verification code.
 The TUI masks secret input, clears secrets on closing their view, and exports only
 on an explicit action to a file with mode 0600. Overwriting requires confirmation.
 Invitations are credentials, while the 24 verification words are public identity.
@@ -505,7 +505,7 @@ the waiting period.
 Revocation affects **only the named device by default**. Use
 `hibiki channel revoke NAME DEVICE_ID --subtree` to explicitly remove that device
 and its approval subtree. Subtree revocation is restricted to descendants so it
-cannot accidentally include the caller. Revoked identities cannot rejoin. An
+cannot accidentally include the caller. Revoked identities can rejoin with a valid unused invitation, a fresh request and new approval. An
 ordinary revocation leaves descendants active, and ancestry remains verifiable
 through departed intermediaries. Readmission must not reverse ancestry or create
 a cycle.

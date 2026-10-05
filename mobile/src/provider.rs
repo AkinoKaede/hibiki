@@ -3,7 +3,7 @@ use crate::{
     card,
     pinentry::Pinentry,
     provider_cards::{CardSetSession, matches_target},
-    types::{CardInfo, CardTransport, NativeEvent, PinPrompt, PromptKind, RegisteredCard},
+    types::{CardInfo, CardTransport, NativeEvent, PinPrompt, PromptKind},
 };
 use anyhow::{Context, Result, bail};
 use hibiki_core::{
@@ -31,29 +31,44 @@ use zeroize::Zeroizing;
 struct SessionCards {
     prepared: Option<CardInfo>,
     usb: Option<CardInfo>,
-    confirmed_nfc: Option<String>,
+    nfc_used: bool,
+    stop: CancellationToken,
 }
 
 pub struct MobileProvider {
     pub broker: Arc<Broker>,
-    pub cards: Arc<Mutex<Vec<RegisteredCard>>>,
+    pub nfc_card: Arc<Mutex<Option<CardInfo>>>,
     pub card_enabled: AtomicBool,
     pub pin_enabled: AtomicBool,
     pub usb_present: Arc<AtomicBool>,
     pub nfc_available: Arc<AtomicBool>,
-    pub selected_nfc: Arc<Mutex<Option<String>>>,
+    pub slots: Arc<Semaphore>,
     sessions: Mutex<HashMap<String, Weak<Mutex<SessionCards>>>>,
 }
 impl MobileProvider {
-    pub fn new(broker: Arc<Broker>, cards: Vec<RegisteredCard>) -> Arc<Self> {
+    pub fn cancel_nfc_sessions(&self) {
+        for session in self
+            .sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter_map(Weak::upgrade)
+        {
+            let state = session.lock().unwrap();
+            if state.nfc_used {
+                state.stop.cancel();
+            }
+        }
+    }
+    pub fn new(broker: Arc<Broker>) -> Arc<Self> {
         Arc::new(Self {
             broker,
-            cards: Arc::new(Mutex::new(cards)),
+            nfc_card: Arc::new(Mutex::new(None)),
             card_enabled: AtomicBool::new(true),
             pin_enabled: AtomicBool::new(true),
             usb_present: Arc::new(AtomicBool::new(false)),
             nfc_available: Arc::new(AtomicBool::new(false)),
-            selected_nfc: Arc::new(Mutex::new(None)),
+            slots: Arc::new(Semaphore::new(1)),
             sessions: Mutex::new(HashMap::new()),
         })
     }
@@ -93,11 +108,11 @@ impl Provider for MobileProvider {
         target: hibiki_lib::protocol::CardTarget,
         context: ProviderContext,
     ) -> Result<Box<dyn hibiki_core::provider::Preparation>> {
-        let cards = self.cards.clone();
+        let slots = self.slots.clone();
+        let cards = self.nfc_card.clone();
         let broker = self.broker.clone();
         let nfc_available = self.nfc_available.clone();
         let usb_present = self.usb_present.clone();
-        let selected_nfc = self.selected_nfc.clone();
         let prepared = self
             .sessions
             .lock()
@@ -109,24 +124,17 @@ impl Provider for MobileProvider {
             let stop = CancellationToken::new();
             target.validate()?;
             prepared.lock().unwrap().prepared = None;
-            let candidates: Vec<_> = cards
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|c| {
-                    nfc_available.load(Ordering::Acquire) && matches_target(&c.card, &target)
-                })
-                .cloned()
-                .collect();
-            let selected = selected_nfc.lock().unwrap().clone();
-            let confirmed = prepared.lock().unwrap().confirmed_nfc.take();
-            if let Some(entry) = candidates.iter().find(|c| {
-                selected.as_deref() == Some(&c.card.serial)
-                    || confirmed.as_deref() == Some(&c.card.serial)
-            }) {
-                let info = entry.card.clone();
+            if nfc_available.load(Ordering::Acquire)
+                && let Some(info) = cards
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .filter(|c| matches_target(c, &target))
+            {
                 let serial = info.serial.clone();
-                prepared.lock().unwrap().prepared = Some(info);
+                let mut state = prepared.lock().unwrap();
+                state.prepared = Some(info);
+                state.nfc_used = true;
                 return Ok(serial);
             }
             let known_usb = prepared
@@ -144,41 +152,31 @@ impl Provider for MobileProvider {
                 prepared.lock().unwrap().prepared = Some(info);
                 return Ok(serial);
             }
-            let registered = (candidates.len() == 1).then(|| &candidates[0]);
-            let nfc = registered.is_some();
             let prompt_stop = stop.child_token();
             let _guard = CancelOnDrop(stop.clone());
             let make_prompt = || async {
                 let serial = target
                     .serial
                     .as_deref()
-                    .or_else(|| registered.map(|c| c.card.serial.as_str()))
                     .or_else(|| known_usb.as_ref().map(|c| c.serial.as_str()))
                     .context("card serial number is required for insertion prompt")?;
-                confirm_card(&app, &context, &broker, &prompt_stop, serial, nfc).await
+                confirm_card(&app, &context, &broker, &prompt_stop, serial, false).await
             };
             let mut prompt = Box::pin(make_prompt());
-            let mut acknowledged = false;
             let mut prompt_started = false;
             loop {
                 if stop.is_cancelled() {
                     bail!("card preparation canceled");
-                }
-                if nfc && !nfc_available.load(Ordering::Acquire) {
-                    bail!("NFC reading is unavailable on this device");
-                }
-                if acknowledged && nfc {
-                    let mut info = registered.unwrap().card.clone();
-                    info.transport = CardTransport::Nfc;
-                    let serial = info.serial.clone();
-                    prepared.lock().unwrap().prepared = Some(info);
-                    return Ok(serial);
                 }
                 // Once shown, keep polling the prompt while USB detection is in flight.
                 // A ready card must not overtake an already submitted cancellation.
                 prompt_started |= !usb_present.load(Ordering::Acquire);
                 let probe = async {
                     if usb_present.load(Ordering::Acquire) {
+                        let Ok(_permit) = slots.clone().try_acquire_owned() else {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            return Ok(None);
+                        };
                         match inspect_usb(&broker, &stop).await {
                             Ok(Some(info)) if matches_target(&info, &target) => {
                                 let serial = info.serial.clone();
@@ -199,7 +197,7 @@ impl Provider for MobileProvider {
                     tokio::select! {
                         biased;
                         _=stop.cancelled()=>bail!("card preparation canceled"),
-                        result=&mut prompt, if !acknowledged && prompt_started && candidates.len() <= 1=>{
+                        result=&mut prompt, if prompt_started=>{
                             if let Err(error) = result {
                                 if error.is::<crate::broker::OperationCancelled>()
                                     || error.is::<crate::broker::RequestCancelled>()
@@ -208,14 +206,11 @@ impl Provider for MobileProvider {
                                 }
                                 return Err(error);
                             }
-                            if nfc { acknowledged = true; break; } else { prompt = Box::pin(make_prompt()); }
+                            prompt = Box::pin(make_prompt());
                         },
                         serial=&mut probe=>{
                             if let Some(serial) = serial? { return Ok(serial); }
                             prompt_started = true;
-                            if candidates.len() > 1 {
-                                bail!("specify a card serial number when multiple cards match");
-                            }
                             break;
                         },
                     }
@@ -235,18 +230,15 @@ impl Provider for MobileProvider {
             if !self.enabled(kind) {
                 bail!("service disabled");
             }
-            let permit = if kind == ServiceKind::Scdaemon {
-                Some(slots.try_acquire_owned().context("card busy")?)
-            } else {
-                None
-            };
-            let registry = self.cards.clone();
-            let selected_nfc = self.selected_nfc.clone();
+            let nfc_card = self.nfc_card.clone();
             let mut card_set = CardSetSession::new();
             let broker = self.broker.clone();
             let usb_present = self.usb_present.clone();
             let nfc_available = self.nfc_available.clone();
-            let prepared = Arc::new(Mutex::new(SessionCards::default()));
+            let prepared = Arc::new(Mutex::new(SessionCards {
+                stop: stop.clone(),
+                ..SessionCards::default()
+            }));
             if kind == ServiceKind::Scdaemon {
                 let mut sessions = self.sessions.lock().unwrap();
                 sessions.retain(|_, value| value.strong_count() > 0);
@@ -258,7 +250,6 @@ impl Provider for MobileProvider {
             let finished = done.clone();
             let cancel = stop.clone();
             tokio::spawn(async move {
-                let _permit = permit;
                 let mut pinentry = Pinentry::default();
                 let run = async {
                     let mut last = 0;
@@ -272,6 +263,16 @@ impl Provider for MobileProvider {
                         last = request;
                         let command_stop = cancel.child_token();
                         let _guard = CancelOnDrop(command_stop.clone());
+                        let _permit = if kind == ServiceKind::Scdaemon {
+                            Some(
+                                slots
+                                    .clone()
+                                    .try_acquire_owned()
+                                    .context("card is in use")?,
+                            )
+                        } else {
+                            None
+                        };
                         let result = if assuan::validate_command(kind, &line).is_err() {
                             AssuanResult::error(
                                 assuan::NOT_SUPPORTED,
@@ -320,11 +321,9 @@ impl Provider for MobileProvider {
                                         })
                                         .await?
                                     } else if cmd == "SERIALNO" {
-                                        let cards = registry.lock().unwrap().clone();
+                                        let card = nfc_card.lock().unwrap().clone();
                                         let query = SerialQuery {
-                                            cards: &cards,
-                                            selected_nfc: selected_nfc.lock().unwrap().clone(),
-                                            session: &prepared,
+                                            card: card.as_ref(),
                                             broker: &broker,
                                             usb_present: usb_present.load(Ordering::Acquire),
                                             nfc_available: nfc_available.load(Ordering::Acquire),
@@ -336,6 +335,9 @@ impl Provider for MobileProvider {
                                                     prepared.lock().unwrap().usb =
                                                         Some(info.clone());
                                                 }
+                                                if info.transport == CardTransport::Nfc {
+                                                    prepared.lock().unwrap().nfc_used = true;
+                                                }
                                                 card_set.bind(info);
                                                 card_set.card.command(&line)
                                             }
@@ -346,19 +348,20 @@ impl Provider for MobileProvider {
                                         }
                                     } else {
                                         if matches!(cmd, "RESET" | "RESTART") {
-                                            *prepared.lock().unwrap() = SessionCards::default();
+                                            *prepared.lock().unwrap() = SessionCards {
+                                                stop: cancel.clone(),
+                                                ..SessionCards::default()
+                                            };
                                         }
                                         let mut cards: Vec<CardInfo> =
                                             if nfc_available.load(Ordering::Acquire) {
-                                                registry
-                                                    .lock()
-                                                    .unwrap()
-                                                    .iter()
-                                                    .map(|c| c.card.clone())
-                                                    .collect()
+                                                nfc_card.lock().unwrap().iter().cloned().collect()
                                             } else {
                                                 vec![]
                                             };
+                                        if !cards.is_empty() {
+                                            prepared.lock().unwrap().nfc_used = true;
+                                        }
                                         let public_card_query = matches!(
                                             cmd,
                                             "LEARN"
@@ -441,13 +444,9 @@ impl Provider for MobileProvider {
         })
     }
 }
-// Presence queries never infer USB readiness from a saved registration.
-// An explicitly selected NFC key is advertised without asking; only a demand
-// for another registered NFC key may open an availability prompt.
+// NFC discovery uses only this process's explicitly recorded snapshot.
 struct SerialQuery<'a> {
-    cards: &'a [RegisteredCard],
-    selected_nfc: Option<String>,
-    session: &'a Arc<Mutex<SessionCards>>,
+    card: Option<&'a CardInfo>,
     broker: &'a Arc<Broker>,
     usb_present: bool,
     nfc_available: bool,
@@ -456,8 +455,8 @@ impl SerialQuery<'_> {
     async fn run(
         &self,
         args: &str,
-        app: &App,
-        context: &ProviderContext,
+        _app: &App,
+        _context: &ProviderContext,
         stop: &CancellationToken,
     ) -> Result<Option<CardInfo>> {
         let serial = args
@@ -469,31 +468,12 @@ impl SerialQuery<'_> {
         {
             return Ok(Some(info));
         }
-        let selected = self.selected_nfc.as_deref().and_then(|selected| {
-            self.cards.iter().find(|c| {
-                self.nfc_available
-                    && c.card.serial.eq_ignore_ascii_case(selected)
-                    && serial.is_none_or(|s| s.eq_ignore_ascii_case(&c.card.serial))
+        Ok(self
+            .card
+            .filter(|c| {
+                self.nfc_available && serial.is_none_or(|s| s.eq_ignore_ascii_case(&c.serial))
             })
-        });
-        if let Some(entry) = selected {
-            let mut info = entry.card.clone();
-            info.transport = CardTransport::Nfc;
-            return Ok(Some(info));
-        }
-        let nfc = serial.and_then(|serial| {
-            self.cards
-                .iter()
-                .find(|c| self.nfc_available && c.card.serial.eq_ignore_ascii_case(serial))
-        });
-        if let Some(entry) = nfc {
-            confirm_card(app, context, self.broker, stop, &entry.card.serial, true).await?;
-            self.session.lock().unwrap().confirmed_nfc = Some(entry.card.serial.clone());
-            let mut info = entry.card.clone();
-            info.transport = CardTransport::Nfc;
-            return Ok(Some(info));
-        }
-        Ok(None)
+            .cloned())
     }
 }
 
@@ -602,7 +582,7 @@ mod tests {
     use super::*;
     #[test]
     fn services_start_enabled_and_can_be_disabled_independently() {
-        let provider = MobileProvider::new(Broker::new(), vec![]);
+        let provider = MobileProvider::new(Broker::new());
         assert!(provider.enabled(ServiceKind::Scdaemon));
         assert!(provider.enabled(ServiceKind::Pinentry));
         assert!(!provider.nfc_available.load(Ordering::Acquire));

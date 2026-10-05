@@ -1,6 +1,6 @@
-// hibiki/2: never reuse tags or enum values; reserve deleted names and numbers.
+// hibiki/3: never reuse tags or enum values; reserve deleted names and numbers.
 syntax = "proto3";
-package hibiki.v2;
+package hibiki.v3;
 import "membership.proto";
 import "operation.proto";
 
@@ -44,6 +44,8 @@ message Control {
     ControlWithdrawJoin withdraw_join = 20;
     ControlJoinStatus join_status = 21;
     ControlWithdrawPending withdraw_pending = 22;
+    ControlRegisterInvitation register_invitation = 23;
+    ControlResolveInvitation resolve_invitation = 24;
   }
 }
 
@@ -83,7 +85,7 @@ message ControlEndOperation {
 
 message ControlCreate {
   ChannelGenesis genesis = 1;
-  string verifier = 2;
+  reserved 2;
 }
 
 message ControlGetChannel {
@@ -98,8 +100,9 @@ message ControlChannelSnapshot {
 }
 
 message ControlJoin {
-  JoinRequest request = 1;
-  string psk = 2;
+  AdmissionRequest request = 1;
+  reserved 2;
+  OneTimeInvitation invitation = 3;
 }
 
 message ControlPending {
@@ -108,7 +111,7 @@ message ControlPending {
 
 message ControlAppend {
   MembershipEvent event = 1;
-  optional string verifier = 2;
+  reserved 2;
 }
 
 message ControlAnnounce {
@@ -121,7 +124,8 @@ message ControlPeers {
 
 message ControlClaim {
   ChannelGenesis genesis = 1;
-  string psk = 2;
+  reserved 2;
+  OneTimeInvitation invitation = 3;
 }
 
 message ControlPolicy {
@@ -157,6 +161,7 @@ message Reply {
     ReplyPeers peers = 7;
     ReplyPolicy policy = 8;
     ReplyJoinStatus join_status = 9;
+    ReplyInvitationProof invitation_proof = 10;
   }
 }
 
@@ -182,7 +187,7 @@ message ReplyChannelSnapshot {
 }
 
 message ReplyRequests {
-  repeated JoinRequest value = 1;
+  repeated AdmissionRequest value = 1;
 }
 
 message ReplyPeers {
@@ -196,3 +201,7 @@ message ReplyPolicy {
 message ReplyJoinStatus {
   JoinState value = 1;
 }
+
+message ControlRegisterInvitation { InvitationMetadata metadata = 1; }
+message ControlResolveInvitation { OneTimeInvitation invitation = 1; }
+message ReplyInvitationProof { MembershipProof proof = 1; uint64 access_revision = 2; }

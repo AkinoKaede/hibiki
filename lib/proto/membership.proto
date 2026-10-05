@@ -1,6 +1,6 @@
-// hibiki/2: never reuse tags or enum values; reserve deleted names and numbers.
+// hibiki/3: never reuse tags or enum values; reserve deleted names and numbers.
 syntax = "proto3";
-package hibiki.v2;
+package hibiki.v3;
 
 message Device {
   string name = 1;
@@ -63,6 +63,8 @@ message MembershipAction {
     MembershipActionLeave leave = 4;
     MembershipActionRename rename = 5;
     MembershipActionRevokeSubtree revoke_subtree = 6;
+    MembershipActionEnableInvitations enable_invitations = 7;
+    AdmissionRequest accept = 8;
   }
 }
 
@@ -88,3 +90,9 @@ message MembershipActionRename {
 message MembershipActionRevokeSubtree {
   string device_id = 1;
 }
+
+// Canonical signed v3 data; preserving its Postcard bytes is part of the signature contract.
+message AdmissionRequest { bytes canonical = 1; }
+message InvitationMetadata { bytes canonical = 1; }
+message OneTimeInvitation { InvitationMetadata metadata = 1; bytes key = 2; }
+message MembershipActionEnableInvitations {}

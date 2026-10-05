@@ -105,12 +105,11 @@ def main():
             a = Device(root, 'requester', f'ws://127.0.0.1:{proxy.port}/hibiki')
             b = Device(root, 'provider', f'ws://127.0.0.1:{port}/hibiki')
             devices = [a, b]
-            psk = root/'psk'; psk.write_text('isolated-performance-psk'); psk.chmod(0o600)
             # Invite server addresses must match. Pair through the same proxy, then
             # move only the provider connection to the direct endpoint.
             b.config.write_text(b.config.read_text().replace(f':{port}/', f':{proxy.port}/'))
-            a.cli('channel', 'create', 'perf', '--psk-file', psk)
-            invite = a.cli('channel', 'invite', 'perf', '--psk-file', psk).stdout.decode().strip()
+            a.cli('channel', 'create', 'perf')
+            invite = a.cli('channel', 'invite', 'perf').stdout.decode().strip()
             request = b.cli('channel', 'join', invite, '--no-wait').stdout.decode().split()[1]
             a.cli('channel', 'approve', 'perf', request, data=b'y\n')
             b.cli('channel', 'list')

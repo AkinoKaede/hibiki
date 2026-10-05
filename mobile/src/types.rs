@@ -52,10 +52,11 @@ pub struct PendingInfo {
 pub struct Invitation {
     pub channel: String,
     pub invite: String,
-    pub psk: String,
+    pub expires_at: u64,
 }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct JoinInfo {
+    pub verification: String,
     pub channel: String,
     pub request: String,
 }
@@ -85,11 +86,6 @@ pub struct CardInfo {
     pub serial: String,
     pub transport: CardTransport,
     pub keys: Vec<CardKey>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, uniffi::Record)]
-pub struct RegisteredCard {
-    pub card: CardInfo,
-    pub name: String,
 }
 #[derive(Clone, Debug, uniffi::Enum)]
 pub enum PromptKind {
@@ -147,4 +143,12 @@ pub enum NativeEvent {
     CardChanged {
         card: CardInfo,
     },
+}
+
+#[derive(Clone, Debug, uniffi::Record)]
+pub struct InvitationPreview {
+    pub server: String,
+    pub channel: String,
+    pub name: String,
+    pub expires_at: u64,
 }

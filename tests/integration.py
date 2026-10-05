@@ -369,19 +369,20 @@ def test_all():
                 return re.search(r'listening on 127.0.0.1:(\d+)',server_log.read_text())
             port=wait_for(listening).group(1);url='ws://127.0.0.1:%s/hibiki'%port
             a,b,c=[Device(root,name,url) for name in ('a','b','c')];devices=[a,b,c]
-            psk=root/'psk';psk.write_text(secrets.token_urlsafe(32));psk.chmod(0o600)
-            a.cli('channel','create','forbidden','--psk-file',psk,ok=False)
-            created=run([SERVER,'--config',config,'channel','create','test','--server',url,'--psk-file',psk]).stdout.decode().splitlines()
+            a.cli('channel','create','forbidden',ok=False)
+            created=run([SERVER,'--config',config,'channel','create','test','--server',url]).stdout.decode().splitlines()
             bootstrap=created[1].split()[1]
             a.cli('channel','join',bootstrap)
             b.cli('channel','join',bootstrap,ok=False)
-            invite=a.cli('channel','invite','test','--psk-file',psk).stdout.decode().strip()
+            invite=a.cli('channel','invite','test').stdout.decode().strip()
             # Removing a request terminates the waiting CLI without admitting it.
+            invite = a.cli('channel', 'invite', 'test').stdout.decode().strip()
             waiting = subprocess.Popen([str(CLIENT), 'channel', 'join', invite],
                                        env=b.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 request = waiting.stdout.readline().decode().split()[1]
-                c.cli('channel', 'join', invite, '--no-wait')
+                c_invite = a.cli('channel', 'invite', 'test').stdout.decode().strip()
+                c.cli('channel', 'join', c_invite, '--no-wait')
                 c.cli('channel', 'leave', 'test')
                 assert request.encode() in a.cli('channel', 'pending', 'test').stdout
                 a.cli('channel', 'reject', 'test', request)
@@ -390,12 +391,13 @@ def test_all():
                 assert request.encode() not in a.cli('channel', 'pending', 'test').stdout
             finally:
                 if waiting.poll() is None: waiting.kill(); waiting.wait()
+            invite = a.cli('channel', 'invite', 'test').stdout.decode().strip()
             waiting = subprocess.Popen([str(CLIENT), 'channel', 'join', invite],
                                        env=b.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
                 request = waiting.stdout.readline().decode().split()[1]
                 second = b.cli('channel', 'join', invite, '--no-wait').stdout.decode().split()[1]
-                assert request != second
+                assert request == second  # Identical retries reuse the signed request and consumed key.
                 b.cli('channel', 'leave', 'test')
                 _, error = waiting.communicate(timeout=10)
                 assert waiting.returncode != 0 and b'rejected, withdrawn or invalidated' in error
@@ -407,6 +409,7 @@ def test_all():
                 if waiting.poll() is None: waiting.kill(); waiting.wait()
             print('PASS: leave cancels all own pending requests and ends waiting admission', flush=True)
             for member,approver in [(b,a),(c,b)]:
+                invite=approver.cli('channel','invite','test').stdout.decode().strip()
                 joined=member.cli('channel','join',invite,'--no-wait')
                 request=joined.stdout.decode().split()[1]
                 approver.cli('channel','approve','test',request,data=b'\n')
@@ -420,6 +423,7 @@ def test_all():
             assert json.loads(b.cli('channel', 'list', '--json').stdout)['channels'][0]['member'] is False
             assert json.loads(a.cli('channel', 'list', '--json').stdout)['channels'][0]['member'] is True
             b.cli('channel', 'leave', 'test')
+            invite = a.cli('channel', 'invite', 'test').stdout.decode().strip()
             request = b.cli('channel', 'join', invite, '--no-wait').stdout.decode().split()[1]
             a.cli('channel', 'approve', 'test', request, data=b'y\n')
             assert json.loads(b.cli('channel', 'list', '--json').stdout)['channels'][0]['member'] is True

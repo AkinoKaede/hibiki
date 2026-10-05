@@ -44,7 +44,7 @@ pub fn setup(app: &App) {
     eprintln!("\n{HEADING}Next steps (show again with hibiki setup):{HEADING:#}");
     eprintln!("1. Join an administrator/member invitation: hibiki channel join 'INVITATION'");
     eprintln!(
-        "   New invitations include the PSK; older invitations ask for it. Compare all verification words before approval."
+        "   Invitations contain a one-use key and expire after 24 hours. Compare all verification words or scan the verification QR before approval."
     );
     eprintln!("2. On requesting devices, select the joined channel: hibiki use NAME");
     eprintln!(

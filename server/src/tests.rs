@@ -1,5 +1,6 @@
 use super::{db::Database, service::Service};
-use hibiki_lib::{channel::*, digest, identity::Identity, now};
+use hibiki_lib::{channel::*, identity::Identity, invitation::*, now, random_id};
+use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
 
 #[test]
 fn server_defaults_and_shipped_configs_use_system_storage_and_admin_creation() {
@@ -77,8 +78,34 @@ fn invalid_or_unreadable_preferred_config_never_falls_back() {
     assert!(error.to_string().contains("could not read configuration"));
 }
 
+pub(crate) async fn invitation_request(
+    db: &Database,
+    proof: &MembershipProof,
+    issuer: &Identity,
+    subject: &Identity,
+) -> (AdmissionRequest, OneTimeInvitation) {
+    let state = proof.verify().unwrap();
+    let invitation = OneTimeInvitation::new(
+        "wss://example.test/hibiki".into(),
+        state.id.clone(),
+        state.name.clone(),
+        Some((&state, &issuer.device.id())),
+    )
+    .unwrap();
+    db.register_invitation(&issuer.device.id(), invitation.metadata.clone())
+        .await
+        .unwrap();
+    let (_, revision) = db
+        .resolve_invitation(&subject.device.id(), invitation.clone())
+        .await
+        .unwrap();
+    let request =
+        AdmissionRequest::create(subject, &state, invitation.metadata.id.clone(), revision)
+            .unwrap();
+    (request, invitation)
+}
 struct Fixture {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     db: Database,
     a: Identity,
     b: Identity,
@@ -92,858 +119,589 @@ impl Fixture {
         let b = Identity::generate("b".into()).unwrap();
         db.register(&a.device).await.unwrap();
         db.register(&b.device).await.unwrap();
-        let verifier = hash_psk("test-secret").unwrap();
-        let genesis = ChannelGenesis::create(&a, "Team".into(), &verifier).unwrap();
-        let proof = db.create(&a.device.id(), genesis, verifier).await.unwrap();
+        let genesis = ChannelGenesis::without_psk(&a, random_id(), "Team".into()).unwrap();
+        let proof = db.create(&a.device.id(), genesis).await.unwrap();
         Self {
-            _dir: dir,
+            dir,
             db,
             a,
             b,
             proof,
         }
     }
-    fn request(&self) -> JoinRequest {
-        JoinRequest::create(&self.b, &self.proof.verify().unwrap()).unwrap()
+    async fn request(&self) -> (AdmissionRequest, OneTimeInvitation) {
+        invitation_request(&self.db, &self.proof, &self.a, &self.b).await
     }
-    async fn admit(&mut self) {
-        let request = self.request();
-        self.db
-            .join(&self.b.device.id(), request.clone(), "test-secret".into())
-            .await
-            .unwrap();
-        let event = MembershipEvent::create(
-            &self.a,
-            &self.proof.verify().unwrap(),
-            MembershipAction::Admit(request),
-        )
-        .unwrap();
+    fn event(&self, issuer: &Identity, action: MembershipAction) -> MembershipEvent {
+        MembershipEvent::create(issuer, &self.proof.verify().unwrap(), action).unwrap()
+    }
+    async fn append(&mut self, action: MembershipAction) {
         self.proof = self
             .db
-            .append(&self.a.device.id(), event, None)
+            .append(&self.a.device.id(), self.event(&self.a, action))
             .await
             .unwrap();
     }
-}
-#[tokio::test]
-async fn admission_requires_psk_pending_and_one_authorized_signature() {
-    let mut f = Fixture::new().await;
-    let request = f.request();
-    assert!(
-        f.db.join(&f.b.device.id(), request.clone(), "wrong".into())
-            .await
-            .is_err()
-    );
-    assert!(
-        f.db.pending(&f.b.device.id(), &f.proof.genesis.body.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let event = MembershipEvent::create(
-        &f.a,
-        &f.proof.verify().unwrap(),
-        MembershipAction::Admit(request.clone()),
-    )
-    .unwrap();
-    assert!(
-        f.db.append(&f.a.device.id(), event.clone(), None)
-            .await
-            .is_err()
-    );
-    f.db.join(&f.b.device.id(), request, "test-secret".into())
-        .await
-        .unwrap();
-    assert!(
-        f.db.append(&f.b.device.id(), event.clone(), None)
-            .await
-            .is_err()
-    );
-    let mut forged = event.clone();
-    forged.signature[0] ^= 1;
-    assert!(f.db.append(&f.a.device.id(), forged, None).await.is_err());
-    f.proof =
-        f.db.append(&f.a.device.id(), event.clone(), None)
+    async fn admit(&mut self) -> AdmissionRequest {
+        let (request, invite) = self.request().await;
+        self.db
+            .join(&self.b.device.id(), request.clone(), invite)
             .await
             .unwrap();
-    assert!(f.proof.verify().unwrap().member(&f.b.device.id()).is_ok());
-    assert!(f.db.append(&f.a.device.id(), event, None).await.is_err());
-    assert!(
-        f.db.pending(&f.a.device.id(), &f.proof.genesis.body.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+        self.append(MembershipAction::Accept(request.clone())).await;
+        request
+    }
 }
+
 #[tokio::test]
-async fn pending_requests_do_not_expire_and_approval_is_atomic() {
-    let f = Fixture::new().await;
-    let mut request = f.request();
-    request.body.created_at = now() - 86400;
-    request.signature = f.b.sign("join/v1", &request.body).unwrap();
+async fn admission_requires_key_pending_and_authorized_signature() {
+    let mut f = Fixture::new().await;
+    let (request, invite) = f.request().await;
+    let mut wrong = invite.clone();
+    wrong.key[0] ^= 1;
     assert!(
-        f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
+        f.db.join(&f.b.device.id(), request.clone(), wrong)
             .await
-            .is_ok()
+            .is_err()
     );
-    f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
+    let event = f.event(&f.a, MembershipAction::Accept(request.clone()));
+    assert!(f.db.append(&f.a.device.id(), event.clone()).await.is_err());
+    f.db.join(&f.b.device.id(), request.clone(), invite.clone())
         .await
         .unwrap();
-    let reopened = Database::open(&f._dir.path().join("db")).await.unwrap();
+    assert!(f.db.append(&f.b.device.id(), event.clone()).await.is_err());
+    let mut forged = event.clone();
+    forged.signature[0] ^= 1;
+    assert!(f.db.append(&f.a.device.id(), forged).await.is_err());
+    // Failed approvals roll back their deletion of the pending row.
     assert_eq!(
-        reopened
-            .pending(&f.a.device.id(), &f.proof.genesis.body.id)
+        f.db.pending(&f.a.device.id(), &f.proof.genesis.body.id)
             .await
             .unwrap(),
         vec![request.clone()]
     );
-    let event = MembershipEvent::create(
-        &f.a,
+    f.proof = f.db.append(&f.a.device.id(), event.clone()).await.unwrap();
+    assert!(f.db.append(&f.a.device.id(), event).await.is_err());
+    f.db.join(&f.b.device.id(), request, invite).await.unwrap(); // lost response retry
+    assert!(f.proof.verify().unwrap().member(&f.b.device.id()).is_ok());
+}
+
+#[tokio::test]
+async fn one_key_has_one_winner_and_retries_survive_restart() {
+    let f = Fixture::new().await;
+    let (request, invite) = f.request().await;
+    let c = Identity::generate("c".into()).unwrap();
+    let second = AdmissionRequest::create(
+        &c,
         &f.proof.verify().unwrap(),
-        MembershipAction::Admit(request),
+        invite.metadata.id.clone(),
+        0,
     )
     .unwrap();
-    let caller = f.a.device.id();
-    let (a, b) = tokio::join!(
-        f.db.append(&caller, event.clone(), None),
-        f.db.append(&caller, event, None)
+    let b_id = f.b.device.id();
+    let c_id = c.device.id();
+    let other = Database::open(&f.dir.path().join("db")).await.unwrap();
+    let (one, two) = tokio::join!(
+        f.db.join(&b_id, request.clone(), invite.clone()),
+        other.join(&c_id, second.clone(), invite.clone())
     );
-    assert_ne!(a.is_ok(), b.is_ok());
-    assert_eq!(
-        f.db.get(&f.proof.genesis.body.id)
-            .await
-            .unwrap()
-            .verify()
-            .unwrap()
-            .sequence,
-        1
-    );
-}
-#[tokio::test]
-async fn members_rotate_but_only_ancestors_revoke_and_old_requests_cannot_return() {
-    let mut f = Fixture::new().await;
-    f.admit().await;
-    let c = Identity::generate("c".into()).unwrap();
-    let stale = JoinRequest::create(&c, &f.proof.verify().unwrap()).unwrap();
-    f.db.join(&c.device.id(), stale.clone(), "test-secret".into())
+    assert_ne!(one.is_ok(), two.is_ok());
+    let (caller, winner) = if one.is_ok() {
+        (&b_id, request)
+    } else {
+        (&c_id, second)
+    };
+    other
+        .join(caller, winner.clone(), invite.clone())
         .await
         .unwrap();
-    let verifier = hash_psk("replacement-secret").unwrap();
-    let rotate = MembershipEvent::create(
-        &f.b,
-        &f.proof.verify().unwrap(),
-        MembershipAction::ChangePsk {
-            verifier_commitment: digest(verifier.as_bytes()),
-        },
+    assert_eq!(
+        other
+            .pending(&f.a.device.id(), &f.proof.genesis.body.id)
+            .await
+            .unwrap(),
+        vec![winner.clone()]
+    );
+    let mut replay = winner.clone();
+    replay.body.nonce = random_id();
+    let identity = if one.is_ok() { &f.b } else { &c };
+    replay.signature = identity.sign("join/v3", &replay.body).unwrap();
+    assert!(other.join(caller, replay, invite).await.is_err());
+}
+
+#[tokio::test]
+async fn committed_admission_retry_survives_inviter_departure_but_not_revocation() {
+    let mut f = Fixture::new().await;
+    let (request, invite) = f.request().await;
+    f.db.join(&f.b.device.id(), request.clone(), invite.clone())
+        .await
+        .unwrap();
+    f.append(MembershipAction::Accept(request.clone())).await;
+    f.append(MembershipAction::Leave).await;
+    f.db.join(&f.b.device.id(), request.clone(), invite.clone())
+        .await
+        .unwrap();
+    f.db.admin_revoke(&f.proof.genesis.body.id, &f.b.device.id(), false)
+        .await
+        .unwrap();
+    assert!(f.db.join(&f.b.device.id(), request, invite).await.is_err());
+}
+
+#[tokio::test]
+async fn invitations_are_independent_and_expiry_only_limits_submission() {
+    let mut f = Fixture::new().await;
+    let (request, mut invite) = f.request().await;
+    let (_, second) = f.request().await;
+    assert_ne!(invite.key, second.key);
+    assert_ne!(invite.metadata.id, second.metadata.id);
+    f.db.join(&f.b.device.id(), request.clone(), invite.clone())
+        .await
+        .unwrap();
+    // Advance expiry in the persisted fixture to avoid waiting a day.
+    invite.metadata.expires_at = now();
+    super::entities::invitation::Entity::update_many()
+        .col_expr(
+            super::entities::invitation::Column::Metadata,
+            sea_orm::sea_query::Expr::value(hibiki_lib::encode(&invite.metadata).unwrap()),
+        )
+        .filter(super::entities::invitation::Column::Id.eq(&invite.metadata.id))
+        .exec(&f.db.connection)
+        .await
+        .unwrap();
+    f.db.join(&f.b.device.id(), request.clone(), invite)
+        .await
+        .unwrap();
+    f.append(MembershipAction::Accept(request)).await;
+    let (_, mut expired) = invitation_request(
+        &f.db,
+        &f.proof,
+        &f.a,
+        &Identity::generate("d".into()).unwrap(),
     )
-    .unwrap();
-    f.proof =
-        f.db.append(&f.b.device.id(), rotate, Some(verifier))
+    .await;
+    expired.metadata.expires_at = now();
+    super::entities::invitation::Entity::update_many()
+        .col_expr(
+            super::entities::invitation::Column::Metadata,
+            sea_orm::sea_query::Expr::value(hibiki_lib::encode(&expired.metadata).unwrap()),
+        )
+        .filter(super::entities::invitation::Column::Id.eq(&expired.metadata.id))
+        .exec(&f.db.connection)
+        .await
+        .unwrap();
+    assert!(
+        f.db.resolve_invitation(&f.b.device.id(), expired)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn rejected_and_withdrawn_keys_are_not_reusable() {
+    let f = Fixture::new().await;
+    for withdraw in [false, true] {
+        let (request, invite) = f.request().await;
+        f.db.join(&f.b.device.id(), request.clone(), invite.clone())
             .await
             .unwrap();
-    let state = f.proof.verify().unwrap();
-    assert!(state.member(&f.a.device.id()).is_ok());
-    assert!(state.member(&f.b.device.id()).is_ok());
-    assert!(
-        f.db.pending(&f.a.device.id(), &state.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        f.db.join(&c.device.id(), stale.clone(), "replacement-secret".into())
+        assert!(
+            f.db.remove_pending(
+                &f.a.device.id(),
+                &request.body.channel_id,
+                &request.id().unwrap(),
+                true
+            )
             .await
             .is_err()
-    );
-    let invalid = MembershipEvent::create(&f.a, &state, MembershipAction::Admit(stale)).unwrap();
-    assert!(f.db.append(&f.a.device.id(), invalid, None).await.is_err());
-    let fresh = JoinRequest::create(&c, &state).unwrap();
-    assert!(
-        f.db.join(&c.device.id(), fresh.clone(), "test-secret".into())
-            .await
-            .is_err()
-    );
-    f.db.join(&c.device.id(), fresh, "replacement-secret".into())
+        );
+        let caller = if withdraw { &f.b } else { &f.a };
+        f.db.remove_pending(
+            &caller.device.id(),
+            &request.body.channel_id,
+            &request.id().unwrap(),
+            withdraw,
+        )
         .await
         .unwrap();
-    let revoke = MembershipEvent::create(
-        &f.b,
-        &state,
-        MembershipAction::Revoke {
-            device_id: f.a.device.id(),
-        },
-    )
-    .unwrap();
-    assert!(f.db.append(&f.b.device.id(), revoke, None).await.is_err());
-    assert!(
-        f.db.get(&state.id)
+        assert!(
+            f.db.join(&f.b.device.id(), request.clone(), invite)
+                .await
+                .is_err()
+        );
+        assert!(
+            f.db.append(
+                &f.a.device.id(),
+                f.event(&f.a, MembershipAction::Accept(request))
+            )
             .await
-            .unwrap()
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordinary_revoke_and_leave_allow_fresh_readmission_without_replay() {
+    for leave in [false, true] {
+        let mut f = Fixture::new().await;
+        let original = f.admit().await;
+        let first_round = f
+            .proof
             .verify()
             .unwrap()
-            .member(&f.a.device.id())
-            .is_ok()
+            .admission_id(&f.b.device.id())
+            .unwrap()
+            .to_owned();
+        let event = if leave {
+            f.event(&f.b, MembershipAction::Leave)
+        } else {
+            f.event(
+                &f.a,
+                MembershipAction::Revoke {
+                    device_id: f.b.device.id(),
+                },
+            )
+        };
+        let caller = event.body.issuer_device_id.clone();
+        f.proof = f.db.append(&caller, event).await.unwrap();
+        assert!(
+            f.db.append(
+                &f.a.device.id(),
+                f.event(&f.a, MembershipAction::Accept(original))
+            )
+            .await
+            .is_err()
+        );
+        let request = f.admit().await;
+        assert_ne!(first_round, request.id().unwrap());
+        assert!(!f.proof.verify().unwrap().can_revoke_at(
+            &f.b.device.id(),
+            &f.a.device.id(),
+            now() + 29 * 86400
+        ));
+    }
+}
+
+#[tokio::test]
+async fn admin_revoked_founder_remains_blocked_until_atomic_readmission() {
+    let mut f = Fixture::new().await;
+    f.admit().await;
+    let id = f.proof.genesis.body.id.clone();
+    f.db.admin_revoke(&id, &f.a.device.id(), false)
+        .await
+        .unwrap();
+    assert!(f.db.require_access(&id, &f.a.device.id()).await.is_err());
+    let (request, invite) = invitation_request(&f.db, &f.proof, &f.b, &f.a).await;
+    f.db.join(&f.a.device.id(), request.clone(), invite)
+        .await
+        .unwrap();
+    assert_eq!(
+        f.db.join_status(&f.a.device.id(), &id, &request.id().unwrap())
+            .await
+            .unwrap(),
+        hibiki_lib::protocol::JoinState::Pending
     );
-    let allowed = MembershipEvent::create(
-        &f.a,
-        &state,
-        MembershipAction::Revoke {
-            device_id: f.b.device.id(),
-        },
-    )
-    .unwrap();
-    f.proof = f.db.append(&f.a.device.id(), allowed, None).await.unwrap();
-    assert!(f.proof.verify().unwrap().member(&f.b.device.id()).is_err());
+    assert!(f.db.require_access(&id, &f.a.device.id()).await.is_err());
+    let event = f.event(&f.b, MembershipAction::Accept(request.clone()));
+    f.proof = f.db.append(&f.b.device.id(), event).await.unwrap();
+    f.db.require_access(&id, &f.a.device.id()).await.unwrap();
+    let state = f.proof.verify().unwrap();
+    assert!(state.can_revoke(&f.b.device.id(), &f.a.device.id()));
+    assert!(!state.can_revoke(&f.a.device.id(), &f.b.device.id()));
+    assert!(state.can_revoke_at(&f.a.device.id(), &f.b.device.id(), now() + 30 * 86400 + 1));
+}
+
+#[tokio::test]
+async fn repeated_admin_revoke_invalidates_pending_reinstatement() {
+    let mut f = Fixture::new().await;
+    f.admit().await;
+    let id = f.proof.genesis.body.id.clone();
+    f.db.admin_revoke(&id, &f.b.device.id(), false)
+        .await
+        .unwrap();
+    let (request, invite) = f.request().await;
+    f.db.join(&f.b.device.id(), request.clone(), invite.clone())
+        .await
+        .unwrap();
+    f.db.admin_revoke(&id, &f.b.device.id(), false)
+        .await
+        .unwrap();
     assert!(
-        f.db.pending(&f.b.device.id(), &state.id)
+        f.db.append(
+            &f.a.device.id(),
+            f.event(&f.a, MembershipAction::Accept(request.clone()))
+        )
+        .await
+        .is_err()
+    );
+    assert!(f.db.join(&f.b.device.id(), request, invite).await.is_err());
+    f.admit().await;
+    f.db.require_access(&id, &f.b.device.id()).await.unwrap();
+}
+
+#[tokio::test]
+async fn issuer_departure_invalidates_unused_invitations_and_pending_requests() {
+    for admin in [false, true] {
+        let mut f = Fixture::new().await;
+        f.admit().await;
+        let c = Identity::generate("c".into()).unwrap();
+        let (request, used) = invitation_request(&f.db, &f.proof, &f.b, &c).await;
+        let (_, unused) = invitation_request(&f.db, &f.proof, &f.b, &c).await;
+        f.db.join(&c.device.id(), request.clone(), used)
+            .await
+            .unwrap();
+        if admin {
+            f.db.admin_revoke(&f.proof.genesis.body.id, &f.b.device.id(), false)
+                .await
+                .unwrap();
+        } else {
+            f.append(MembershipAction::Revoke {
+                device_id: f.b.device.id(),
+            })
+            .await;
+        }
+        assert!(
+            f.db.resolve_invitation(&c.device.id(), unused)
+                .await
+                .is_err()
+        );
+        assert!(
+            f.db.append(
+                &f.a.device.id(),
+                f.event(&f.a, MembershipAction::Accept(request))
+            )
+            .await
+            .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn member_subtree_and_admin_subtree_remove_only_the_selected_branch() {
+    for admin in [false, true] {
+        let mut f = Fixture::new().await;
+        f.admit().await;
+        let c = Identity::generate("c".into()).unwrap();
+        let (request, invitation) = invitation_request(&f.db, &f.proof, &f.b, &c).await;
+        f.db.join(&c.device.id(), request.clone(), invitation)
+            .await
+            .unwrap();
+        f.proof =
+            f.db.append(
+                &f.b.device.id(),
+                f.event(&f.b, MembershipAction::Accept(request)),
+            )
+            .await
+            .unwrap();
+        if admin {
+            let (_, affected) =
+                f.db.admin_revoke(&f.proof.genesis.body.id, &f.b.device.id(), true)
+                    .await
+                    .unwrap();
+            assert_eq!(affected.len(), 2);
+            assert!(
+                f.db.require_access(&f.proof.genesis.body.id, &c.device.id())
+                    .await
+                    .is_err()
+            );
+        } else {
+            f.append(MembershipAction::RevokeSubtree {
+                device_id: f.b.device.id(),
+            })
+            .await;
+            assert!(f.proof.verify().unwrap().member(&c.device.id()).is_err());
+        }
+        f.admit().await;
+        let state = f.proof.verify().unwrap();
+        assert!(!state.can_revoke(&f.b.device.id(), &c.device.id()));
+    }
+}
+
+#[tokio::test]
+async fn concurrent_withdrawal_approval_and_withdraw_all_are_consistent() {
+    let mut f = Fixture::new().await;
+    for _ in 0..4 {
+        let (request, invitation) = f.request().await;
+        f.db.join(&f.b.device.id(), request.clone(), invitation)
+            .await
+            .unwrap();
+        let event = f.event(&f.a, MembershipAction::Accept(request.clone()));
+        let a = f.a.device.id();
+        let b = f.b.device.id();
+        let id = f.proof.genesis.body.id.clone();
+        let (withdrawn, approved) =
+            tokio::join!(f.db.withdraw_pending(&b, &id), f.db.append(&a, event));
+        let observed = withdrawn.unwrap().verify().unwrap();
+        assert_eq!(observed.member(&b).is_ok(), approved.is_ok());
+        f.proof = f.db.get(&id).await.unwrap();
+        assert!(f.db.pending(&a, &id).await.unwrap().is_empty());
+        if approved.is_ok() {
+            f.append(MembershipAction::Revoke { device_id: b }).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn initialization_is_single_use_refreshable_and_delete_cannot_resurrect() {
+    let f = Fixture::new().await;
+    let old =
+        f.db.reserve("wss://example.test/hibiki".into(), "Empty".into())
+            .await
+            .unwrap();
+    let invitation =
+        f.db.reserve_invitation("wss://example.test/hibiki".into(), "Empty")
+            .await
+            .unwrap();
+    assert_ne!(old.key, invitation.key);
+    let id = invitation.metadata.channel.clone();
+    let a = ChannelGenesis::without_psk(&f.a, id.clone(), "Empty".into()).unwrap();
+    let b = ChannelGenesis::without_psk(&f.b, id.clone(), "Empty".into()).unwrap();
+    let aid = f.a.device.id();
+    let bid = f.b.device.id();
+    let (one, two) = tokio::join!(
+        f.db.claim(&aid, a.clone(), invitation.clone()),
+        f.db.claim(&bid, b, old)
+    );
+    assert_ne!(one.is_ok(), two.is_ok());
+    if one.is_ok() {
+        f.db.claim(&aid, a.clone(), invitation.clone())
+            .await
+            .unwrap();
+    }
+    f.db.delete(&id).await.unwrap();
+    assert!(f.db.claim(&aid, a.clone(), invitation).await.is_err());
+    assert!(f.db.create(&aid, a).await.is_err());
+    assert!(f.db.get(&f.proof.genesis.body.id).await.is_ok());
+}
+
+#[tokio::test]
+async fn persistence_identity_pinning_and_legacy_migration_are_repeatable() {
+    use super::entities::{channel, pending, registry, revoked};
+    let f = Fixture::new().await;
+    // Published v2 wire bytes and identity: migration must not regenerate or
+    // reinterpret their genesis, device certificate or membership signature.
+    use hibiki_lib::protocol::{Control, Envelope, Reply};
+    let founder: Identity = hibiki_lib::decode(include_bytes!(
+        "../../lib/tests/fixtures/wire-identity.postcard"
+    ))
+    .unwrap();
+    let old_envelope = |name: &str| {
+        let line = include_str!("../../lib/tests/fixtures/wire-v2.hex")
+            .lines()
+            .find(|line| line.starts_with(&format!("{name} ")))
+            .unwrap();
+        hibiki_lib::wire::decode::<Envelope>(&hex::decode(line.split_once(' ').unwrap().1).unwrap())
+            .unwrap()
+    };
+    let Envelope::Response {
+        result: Ok(Reply::Proof(mut legacy)),
+        ..
+    } = old_envelope("envelope-43")
+    else {
+        panic!("published v2 proof fixture changed");
+    };
+    let Envelope::Request {
+        command: Control::Append { event },
+        ..
+    } = old_envelope("envelope-38")
+    else {
+        panic!("published v2 membership fixture changed");
+    };
+    legacy.events.push(event);
+    let checkpoint = legacy.verify().unwrap().checkpoint();
+    let root = legacy.genesis.hash().unwrap();
+    f.db.register(&founder.device).await.unwrap();
+    let id = legacy.genesis.body.id.clone();
+    let bytes = hibiki_lib::encode(&legacy).unwrap();
+    registry::ActiveModel {
+        id: Set(id.clone()),
+        name: Set(legacy.genesis.body.name.clone()),
+    }
+    .insert(&f.db.connection)
+    .await
+    .unwrap();
+    channel::ActiveModel {
+        id: Set(id.clone()),
+        name: Set(legacy.genesis.body.name.clone()),
+        proof: Set(bytes.clone()),
+        head: Set(legacy.verify().unwrap().head.to_vec()),
+        verifier: Set("old-verifier".into()),
+    }
+    .insert(&f.db.connection)
+    .await
+    .unwrap();
+    pending::ActiveModel {
+        id: Set("old-request".into()),
+        channel: Set(id.clone()),
+        request: Set(hibiki_lib::encode(
+            &JoinRequest::create(&f.b, &legacy.verify().unwrap()).unwrap(),
+        )
+        .unwrap()),
+        epoch: Set(0),
+    }
+    .insert(&f.db.connection)
+    .await
+    .unwrap();
+    revoked::ActiveModel {
+        channel: Set(id.clone()),
+        device: Set(f.b.device.id()),
+        revoked_at: Set(1),
+    }
+    .insert(&f.db.connection)
+    .await
+    .unwrap();
+    f.db.connection
+        .execute_unprepared("PRAGMA user_version=2")
+        .await
+        .unwrap();
+    let reopened = Database::open(&f.dir.path().join("db")).await.unwrap();
+    assert_eq!(
+        hibiki_lib::encode(&reopened.get(&id).await.unwrap()).unwrap(),
+        bytes
+    );
+    assert!(
+        reopened
+            .pending(&founder.device.id(), &id)
             .await
             .unwrap()
             .is_empty()
     );
-}
-#[tokio::test]
-async fn persistence_and_identity_binding_are_pinned() {
-    let mut f = Fixture::new().await;
-    f.admit().await;
-    let reopened = Database::open(&f._dir.path().join("db")).await.unwrap();
-    assert_eq!(
-        reopened.get(&f.proof.genesis.body.id).await.unwrap(),
-        f.proof
+    assert!(
+        reopened
+            .require_access(&id, &f.b.device.id())
+            .await
+            .is_err()
     );
-    let mut changed = f.a.device.clone();
+    let upgrade = MembershipEvent::create(
+        &founder,
+        &legacy.verify().unwrap(),
+        MembershipAction::EnableInvitations,
+    )
+    .unwrap();
+    let upgraded = reopened
+        .append(&founder.device.id(), upgrade)
+        .await
+        .unwrap();
+    upgraded.verify_from(&root, &checkpoint).unwrap();
+    assert_eq!(upgraded.genesis, legacy.genesis);
+    assert_eq!(upgraded.events[0], legacy.events[0]);
+    let row = channel::Entity::find_by_id(&id)
+        .one(&reopened.connection)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(row.verifier.is_empty());
+    let (request, invite) = invitation_request(&reopened, &upgraded, &founder, &f.b).await;
+    reopened
+        .join(&f.b.device.id(), request.clone(), invite)
+        .await
+        .unwrap();
+    let reopened = Database::open(&f.dir.path().join("db")).await.unwrap();
+    assert_eq!(
+        reopened.pending(&founder.device.id(), &id).await.unwrap(),
+        vec![request]
+    );
+    let mut changed = founder.device.clone();
     changed.noise_key[0] ^= 1;
     assert!(reopened.register(&changed).await.is_err());
     let _ = Service::new(reopened, true);
-}
-
-#[tokio::test]
-async fn empty_channel_claim_requires_psk_and_has_exactly_one_founder() {
-    let f = Fixture::new().await;
-    let verifier = hash_psk("empty-secret").unwrap();
-    let invitation =
-        f.db.reserve(
-            "wss://example.test/hibiki".into(),
-            "Empty".into(),
-            verifier.clone(),
-        )
-        .await
-        .unwrap();
-    assert!(
-        f.db.admin_list()
-            .await
-            .unwrap()
-            .iter()
-            .any(|(id, _, empty)| id == &invitation.id && *empty)
-    );
-    assert!(f.db.get(&invitation.id).await.is_err());
-    assert!(
-        f.db.reserve(
-            invitation.server.clone(),
-            invitation.name.clone(),
-            verifier.clone()
-        )
-        .await
-        .is_err()
-    );
-    let ga = invitation.founder_genesis(&f.a).unwrap();
-    let gb = invitation.founder_genesis(&f.b).unwrap();
-    // Neither a remote Create nor a forged founder may steal the reservation.
-    assert!(
-        f.db.create(&f.a.device.id(), ga.clone(), verifier.clone())
-            .await
-            .is_err()
-    );
-    assert!(
-        f.db.claim(&f.b.device.id(), ga.clone(), "empty-secret".into())
-            .await
-            .is_err()
-    );
-    assert!(
-        f.db.claim(&f.a.device.id(), ga.clone(), "wrong-psk".into())
-            .await
-            .is_err()
-    );
-    let mut altered = invitation.clone();
-    altered.name = "Substituted".into();
-    assert!(
-        f.db.claim(
-            &f.a.device.id(),
-            altered.founder_genesis(&f.a).unwrap(),
-            "empty-secret".into()
-        )
-        .await
-        .is_err()
-    );
-    let aid = f.a.device.id();
-    let bid = f.b.device.id();
-    let (a, b) = tokio::join!(
-        f.db.claim(&aid, ga, "empty-secret".into()),
-        f.db.claim(&bid, gb, "empty-secret".into())
-    );
-    assert_ne!(a.is_ok(), b.is_ok());
-    let proof = f.db.get(&invitation.id).await.unwrap();
-    assert_eq!(proof.verify().unwrap().members().len(), 1);
-    assert!(
-        f.db.claim(
-            &aid,
-            invitation.founder_genesis(&f.a).unwrap(),
-            "empty-secret".into()
-        )
-        .await
-        .is_err()
-    );
-    assert!(
-        !f.db
-            .admin_list()
-            .await
-            .unwrap()
-            .iter()
-            .find(|(id, _, _)| id == &invitation.id)
-            .unwrap()
-            .2
-    );
-    let (founder, newcomer) = if a.is_ok() {
-        (&f.a, &f.b)
-    } else {
-        (&f.b, &f.a)
-    };
-    let request = JoinRequest::create(newcomer, &proof.verify().unwrap()).unwrap();
-    f.db.join(
-        &newcomer.device.id(),
-        request.clone(),
-        "empty-secret".into(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        f.db.get(&invitation.id)
-            .await
-            .unwrap()
-            .verify()
-            .unwrap()
-            .members()
-            .len(),
-        1
-    );
-    let approve = MembershipEvent::create(
-        founder,
-        &proof.verify().unwrap(),
-        MembershipAction::Admit(request),
-    )
-    .unwrap();
-    assert_eq!(
-        f.db.append(&founder.device.id(), approve, None)
-            .await
-            .unwrap()
-            .verify()
-            .unwrap()
-            .members()
-            .len(),
-        2
-    );
-}
-
-#[tokio::test]
-async fn delete_cleans_pending_preserves_other_channels_and_never_reuses_id() {
-    use crate::entities::pending;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-    let f = Fixture::new().await;
-    let verifier = hash_psk("test-secret").unwrap();
-    let invitation =
-        f.db.reserve(
-            "ws://localhost/hibiki".into(),
-            "Empty".into(),
-            verifier.clone(),
-        )
-        .await
-        .unwrap();
-    assert!(f.db.delete(&invitation.id[..5]).await.is_err());
-    assert_eq!(
-        f.db.delete(&invitation.id[..6]).await.unwrap(),
-        invitation.id
-    );
-    assert!(
-        f.db.claim(
-            &f.a.device.id(),
-            invitation.founder_genesis(&f.a).unwrap(),
-            "test-secret".into()
-        )
-        .await
-        .is_err()
-    );
-    let pending_request = f.request();
-    f.db.join(&f.b.device.id(), pending_request, "test-secret".into())
-        .await
-        .unwrap();
-    let replacement =
-        f.db.reserve(
-            "ws://localhost/hibiki".into(),
-            "Empty".into(),
-            verifier.clone(),
-        )
-        .await
-        .unwrap();
-    assert_ne!(replacement.id, invitation.id);
-    assert_eq!(f.db.delete("Team").await.unwrap(), f.proof.genesis.body.id);
-    assert!(f.db.get(&f.proof.genesis.body.id).await.is_err());
-    assert!(
-        f.db.admin_list()
-            .await
-            .unwrap()
-            .iter()
-            .any(|(id, _, _)| id == &replacement.id)
-    );
-    assert!(
-        f.db.create(&f.a.device.id(), f.proof.genesis.clone(), verifier.clone())
-            .await
-            .is_err()
-    );
-    assert!(f.db.delete("Team").await.is_err());
-    let connection = sea_orm::Database::connect(format!(
-        "sqlite:{}?mode=rw",
-        f._dir.path().join("db").display()
-    ))
-    .await
-    .unwrap();
-    assert!(
-        pending::Entity::find()
-            .filter(pending::Column::Channel.eq(&f.proof.genesis.body.id))
-            .all(&connection)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    let restored_name =
-        f.db.reserve("ws://localhost/hibiki".into(), "Team".into(), verifier)
-            .await
-            .unwrap();
-    assert_ne!(restored_name.id, f.proof.genesis.body.id);
-}
-
-#[tokio::test]
-async fn concurrent_claim_and_delete_never_resurrects_a_channel() {
-    let f = Fixture::new().await;
-    let invite =
-        f.db.reserve(
-            "ws://localhost/hibiki".into(),
-            "Race".into(),
-            hash_psk("race-secret").unwrap(),
-        )
-        .await
-        .unwrap();
-    let caller = f.a.device.id();
-    let (claimed, removed) = tokio::join!(
-        f.db.claim(
-            &caller,
-            invite.founder_genesis(&f.a).unwrap(),
-            "race-secret".into()
-        ),
-        f.db.delete("Race")
-    );
-    assert_eq!(removed.unwrap(), invite.id);
-    if let Ok(proof) = claimed {
-        assert_eq!(proof.genesis.body.id, invite.id);
-    }
-    assert!(!f.db.exists(&invite.id).await.unwrap());
-    assert!(
-        !f.db
-            .admin_list()
-            .await
-            .unwrap()
-            .iter()
-            .any(|(id, _, _)| id == &invite.id)
-    );
-    assert!(
-        f.db.claim(
-            &caller,
-            invite.founder_genesis(&f.a).unwrap(),
-            "race-secret".into()
-        )
-        .await
-        .is_err()
-    );
-}
-
-#[tokio::test]
-async fn member_can_leave_and_rejoin_only_after_new_approval() {
-    let mut f = Fixture::new().await;
-    f.admit().await;
-    let leave =
-        MembershipEvent::create(&f.b, &f.proof.verify().unwrap(), MembershipAction::Leave).unwrap();
-    assert!(
-        f.db.append(&f.a.device.id(), leave.clone(), None)
-            .await
-            .is_err()
-    );
-    f.proof =
-        f.db.append(&f.b.device.id(), leave.clone(), None)
-            .await
-            .unwrap();
-    assert!(f.proof.verify().unwrap().member(&f.b.device.id()).is_err());
-    assert!(f.db.append(&f.b.device.id(), leave, None).await.is_err());
-    assert!(
-        f.db.pending(&f.b.device.id(), &f.proof.genesis.body.id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    f.admit().await;
-    assert!(f.proof.verify().unwrap().member(&f.b.device.id()).is_ok());
-    // An empty membership after voluntary departure is not a new unclaimed reservation.
-    for identity in [&f.b, &f.a] {
-        let leave = MembershipEvent::create(
-            identity,
-            &f.proof.verify().unwrap(),
-            MembershipAction::Leave,
-        )
-        .unwrap();
-        f.proof =
-            f.db.append(&identity.device.id(), leave, None)
-                .await
-                .unwrap();
-    }
-    assert!(f.proof.verify().unwrap().members().is_empty());
-    assert!(
-        f.db.claim(
-            &f.a.device.id(),
-            f.proof.genesis.clone(),
-            "test-secret".into()
-        )
-        .await
-        .is_err()
-    );
-}
-
-#[tokio::test]
-async fn pending_removal_checks_ownership_and_blocks_stale_approval() {
-    use hibiki_lib::protocol::JoinState;
-    let f = Fixture::new().await;
-    let request = f.request();
-    let id = request.id().unwrap();
-    let channel = &f.proof.genesis.body.id;
-    let outsider = Identity::generate("outsider".into()).unwrap();
-    f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
-        .await
-        .unwrap();
-    assert_eq!(
-        f.db.pending(&f.b.device.id(), channel).await.unwrap().len(),
-        1
-    );
-    assert!(
-        f.db.pending(&outsider.device.id(), channel)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        f.db.pending(&f.a.device.id(), channel).await.unwrap().len(),
-        1
-    );
-    assert_eq!(
-        f.db.join_status(&f.b.device.id(), channel, &id)
-            .await
-            .unwrap(),
-        JoinState::Pending
-    );
-    assert!(
-        f.db.remove_pending(&outsider.device.id(), channel, &id, false)
-            .await
-            .is_err()
-    );
-    assert!(
-        f.db.remove_pending(&outsider.device.id(), channel, &id, true)
-            .await
-            .is_err()
-    );
-    assert!(
-        f.db.remove_pending(&f.a.device.id(), channel, &id, true)
-            .await
-            .is_err()
-    );
-    assert!(
-        f.db.join_status(&outsider.device.id(), channel, &id)
-            .await
-            .is_err()
-    );
-    let event = MembershipEvent::create(
-        &f.a,
-        &f.proof.verify().unwrap(),
-        MembershipAction::Admit(request.clone()),
-    )
-    .unwrap();
-    f.db.remove_pending(&f.b.device.id(), channel, &id, true)
-        .await
-        .unwrap();
-    assert_eq!(
-        f.db.join_status(&f.b.device.id(), channel, &id)
-            .await
-            .unwrap(),
-        JoinState::Absent
-    );
-    assert!(
-        f.db.append(&f.a.device.id(), event.clone(), None)
-            .await
-            .is_err()
-    );
-    assert!(
-        f.db.get(channel)
-            .await
-            .unwrap()
-            .verify()
-            .unwrap()
-            .member(&f.b.device.id())
-            .is_err()
-    );
-    f.db.join(&f.b.device.id(), request, "test-secret".into())
-        .await
-        .unwrap();
-    f.db.remove_pending(&f.a.device.id(), channel, &id, false)
-        .await
-        .unwrap();
-    assert!(f.db.append(&f.a.device.id(), event, None).await.is_err());
-    assert!(
-        f.db.pending(&f.a.device.id(), channel)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
-
-#[tokio::test]
-async fn concurrent_withdrawal_and_approval_have_only_one_winner() {
-    let f = Fixture::new().await;
-    let request = f.request();
-    let id = request.id().unwrap();
-    let channel = &f.proof.genesis.body.id;
-    f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
-        .await
-        .unwrap();
-    let event = MembershipEvent::create(
-        &f.a,
-        &f.proof.verify().unwrap(),
-        MembershipAction::Admit(request),
-    )
-    .unwrap();
-    let other = Database::open(&f._dir.path().join("db")).await.unwrap();
-    let a = f.a.device.id();
-    let b = f.b.device.id();
-    let (approved, withdrawn) = tokio::join!(
-        f.db.append(&a, event, None),
-        other.remove_pending(&b, channel, &id, true),
-    );
-    assert_ne!(approved.is_ok(), withdrawn.is_ok());
-    let state = f.db.get(channel).await.unwrap().verify().unwrap();
-    assert_eq!(state.member(&b).is_ok(), approved.is_ok());
-    assert!(f.db.pending(&a, channel).await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn withdraw_all_is_scoped_to_device_and_channel_and_blocks_old_requests() {
-    let f = Fixture::new().await;
-    let channel = &f.proof.genesis.body.id;
-    let a = f.a.device.id();
-    let b = f.b.device.id();
-    let outsider = Identity::generate("outsider".into()).unwrap();
-    let requests = [f.request(), f.request()];
-    for request in &requests {
-        f.db.join(&b, request.clone(), "test-secret".into())
-            .await
-            .unwrap();
-    }
-    let other_request = JoinRequest::create(&outsider, &f.proof.verify().unwrap()).unwrap();
-    f.db.join(
-        &outsider.device.id(),
-        other_request.clone(),
-        "test-secret".into(),
-    )
-    .await
-    .unwrap();
-    let verifier = hash_psk("test-secret").unwrap();
-    let other_channel =
-        f.db.create(
-            &a,
-            ChannelGenesis::create(&f.a, "Other".into(), &verifier).unwrap(),
-            verifier,
-        )
-        .await
-        .unwrap();
-    let other_channel_request =
-        JoinRequest::create(&f.b, &other_channel.verify().unwrap()).unwrap();
-    f.db.join(&b, other_channel_request.clone(), "test-secret".into())
-        .await
-        .unwrap();
-
-    // A member with no own pending requests cannot remove anyone else's.
-    assert_eq!(f.db.withdraw_pending(&a, channel).await.unwrap(), f.proof);
-    assert_eq!(f.db.pending(&a, channel).await.unwrap().len(), 3);
-    assert_eq!(f.db.withdraw_pending(&b, channel).await.unwrap(), f.proof);
-    assert_eq!(
-        f.db.pending(&a, channel).await.unwrap(),
-        vec![other_request]
-    );
-    assert_eq!(
-        f.db.pending(&a, &other_channel.genesis.body.id)
-            .await
-            .unwrap(),
-        vec![other_channel_request]
-    );
-    for request in requests {
-        let event = MembershipEvent::create(
-            &f.a,
-            &f.proof.verify().unwrap(),
-            MembershipAction::Admit(request),
-        )
-        .unwrap();
-        assert!(f.db.append(&a, event, None).await.is_err());
-    }
-    assert_eq!(f.db.withdraw_pending(&b, channel).await.unwrap(), f.proof);
-}
-
-#[tokio::test]
-async fn withdraw_all_after_approval_returns_membership_and_cancels_remaining_requests() {
-    let f = Fixture::new().await;
-    let channel = &f.proof.genesis.body.id;
-    let a = f.a.device.id();
-    let b = f.b.device.id();
-    let requests = [f.request(), f.request()];
-    for request in &requests {
-        f.db.join(&b, request.clone(), "test-secret".into())
-            .await
-            .unwrap();
-    }
-    let approval = MembershipEvent::create(
-        &f.a,
-        &f.proof.verify().unwrap(),
-        MembershipAction::Admit(requests[0].clone()),
-    )
-    .unwrap();
-    f.db.append(&a, approval, None).await.unwrap();
-    let proof = f.db.withdraw_pending(&b, channel).await.unwrap();
-    assert!(proof.verify().unwrap().member(&b).is_ok());
-    let departure =
-        MembershipEvent::create(&f.b, &proof.verify().unwrap(), MembershipAction::Leave).unwrap();
-    let proof = f.db.append(&b, departure, None).await.unwrap();
-    assert!(proof.verify().unwrap().member(&b).is_err());
-    let stale = MembershipEvent::create(
-        &f.a,
-        &proof.verify().unwrap(),
-        MembershipAction::Admit(requests[1].clone()),
-    )
-    .unwrap();
-    assert!(f.db.append(&a, stale, None).await.is_err());
-    assert!(f.db.pending(&a, channel).await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn withdraw_all_racing_approval_returns_a_consistent_membership_snapshot() {
-    let f = Fixture::new().await;
-    let channel = &f.proof.genesis.body.id;
-    let a = f.a.device.id();
-    let b = f.b.device.id();
-    let request = f.request();
-    f.db.join(&b, request.clone(), "test-secret".into())
-        .await
-        .unwrap();
-    let event = MembershipEvent::create(
-        &f.a,
-        &f.proof.verify().unwrap(),
-        MembershipAction::Admit(request),
-    )
-    .unwrap();
-    let other = Database::open(&f._dir.path().join("db")).await.unwrap();
-    let (approved, withdrawn) = tokio::join!(
-        f.db.append(&a, event, None),
-        other.withdraw_pending(&b, channel),
-    );
-    let proof = match withdrawn {
-        Ok(proof) => proof,
-        Err(error) => {
-            assert!(error.to_string().contains("CONFLICT"));
-            other.withdraw_pending(&b, channel).await.unwrap()
-        }
-    };
-    assert_eq!(proof.verify().unwrap().member(&b).is_ok(), approved.is_ok());
-    assert!(f.db.pending(&a, channel).await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn admin_subtree_is_opt_in_and_member_subtree_removes_descendants() {
-    let mut f = Fixture::new().await;
-    f.admit().await;
-    let c = Identity::generate("C".into()).unwrap();
-    f.db.register(&c.device).await.unwrap();
-    let request = JoinRequest::create(&c, &f.proof.verify().unwrap()).unwrap();
-    f.db.join(&c.device.id(), request.clone(), "test-secret".into())
-        .await
-        .unwrap();
-    let event = MembershipEvent::create(
-        &f.b,
-        &f.proof.verify().unwrap(),
-        MembershipAction::Admit(request),
-    )
-    .unwrap();
-    f.proof = f.db.append(&f.b.device.id(), event, None).await.unwrap();
-    let (_, affected) =
-        f.db.admin_revoke("Team", &f.b.device.id(), true)
-            .await
-            .unwrap();
-    assert_eq!(affected.len(), 2);
-    assert!(
-        f.db.require_access(&f.proof.genesis.body.id, &f.a.device.id())
-            .await
-            .is_ok()
-    );
-    assert!(
-        f.db.require_access(&f.proof.genesis.body.id, &c.device.id())
-            .await
-            .is_err()
-    );
-    let event =
-        MembershipEvent::create(&c, &f.proof.verify().unwrap(), MembershipAction::Leave).unwrap();
-    assert!(f.db.append(&c.device.id(), event, None).await.is_err());
-    let event = MembershipEvent::create(
-        &f.a,
-        &f.proof.verify().unwrap(),
-        MembershipAction::RevokeSubtree {
-            device_id: f.b.device.id(),
-        },
-    )
-    .unwrap();
-    let state =
-        f.db.append(&f.a.device.id(), event, None)
-            .await
-            .unwrap()
-            .verify()
-            .unwrap();
-    assert_eq!(state.members().len(), 1);
-}
-
-#[tokio::test]
-async fn reverse_revocation_cannot_use_future_event_time_or_backdated_admission() {
-    let mut f = Fixture::new().await;
-    let request = f.request();
-    f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
-        .await
-        .unwrap();
-    let mut event = MembershipEvent::create(
-        &f.a,
-        &f.proof.verify().unwrap(),
-        MembershipAction::Admit(request),
-    )
-    .unwrap();
-    event.body.issued_at = now() - 31 * 86400;
-    event.signature = f.a.sign("membership/v1", &event.body).unwrap();
-    assert!(f.db.append(&f.a.device.id(), event, None).await.is_err());
-    f.admit().await;
-    let mut event = MembershipEvent::create(
-        &f.b,
-        &f.proof.verify().unwrap(),
-        MembershipAction::Revoke {
-            device_id: f.a.device.id(),
-        },
-    )
-    .unwrap();
-    event.body.issued_at = now() + 30 * 86400;
-    event.signature = f.b.sign("membership/v1", &event.body).unwrap();
-    assert!(f.db.append(&f.b.device.id(), event, None).await.is_err());
 }

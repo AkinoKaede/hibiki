@@ -9,12 +9,12 @@ final class CoreBridgeTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let model = AppModel(defaults: defaults)
         XCTAssertNil(model.allowChannelCreation)
-        model.rememberPairing(JoinInfo(channel: "channel", request: "request"))
+        model.rememberPairing(JoinInfo(verification: "", channel: "channel", request: "request"))
         let restored = AppModel(defaults: defaults)
         XCTAssertEqual(restored.pairing?.request, "request")
         restored.rememberPairing(nil)
         XCTAssertNil(AppModel(defaults: defaults).pairing)
-        restored.rememberPairing(JoinInfo(channel: "claimed", request: ""))
+        restored.rememberPairing(JoinInfo(verification: "", channel: "claimed", request: ""))
         XCTAssertNil(restored.pairing)
     }
 
@@ -215,7 +215,7 @@ final class CoreBridgeTests: XCTestCase {
         let second = try MobileClient(directory: directory.path, server: "wss://example.com/hibiki", identity: identity, skipTlsCertificateValidation: false)
         XCTAssertEqual(try first.device().id, try second.device().id)
         XCTAssertEqual(try first.device().words.split(separator: " ").count, 24)
-        XCTAssertTrue(first.registeredCards().isEmpty)
+        XCTAssertNil(first.nfcCard())
         XCTAssertFalse(first.requestIsPending(token: "expired"))
         XCTAssertThrowsError(try first.respond(token: "expired", data: Data("PIN".utf8), accepted: true))
     }

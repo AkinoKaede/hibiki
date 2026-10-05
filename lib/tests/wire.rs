@@ -1,3 +1,4 @@
+use hibiki_lib::invitation::*;
 use hibiki_lib::{
     assuan::{self, Line},
     channel::*,
@@ -70,7 +71,38 @@ fn event(action: MembershipAction) -> MembershipEvent {
         body,
     }
 }
+fn modern() -> (AdmissionRequest, OneTimeInvitation) {
+    let identity = identity();
+    let genesis =
+        ChannelGenesis::without_psk(&identity, "a".repeat(32), "wire-test".into()).unwrap();
+    let state = MembershipProof {
+        genesis,
+        events: vec![],
+    }
+    .verify()
+    .unwrap();
+    let mut request = AdmissionRequest::create(&identity, &state, "b".repeat(32), 0).unwrap();
+    request.body.nonce = "c".repeat(32);
+    request.body.created_at = 1;
+    request.signature = identity.sign("join/v3", &request.body).unwrap();
+    let invitation = OneTimeInvitation {
+        metadata: InvitationMetadata {
+            id: "b".repeat(32),
+            server: "wss://example.test/hibiki".into(),
+            channel: state.id.clone(),
+            name: state.name.clone(),
+            genesis_hash: Some(state.genesis_hash),
+            checkpoint: state.checkpoint(),
+            issuer_admission: state.admission_id(&identity.device.id()).unwrap().into(),
+            expires_at: 86401,
+            key_hash: hibiki_lib::digest(&[3; 32]),
+        },
+        key: [3; 32],
+    };
+    (request, invitation)
+}
 fn envelopes() -> Vec<Envelope> {
+    let (admission, invitation) = modern();
     let (identity, genesis, join, proof) = trust();
     let id = "id".to_owned();
     let channel = "channel".to_owned();
@@ -153,18 +185,23 @@ fn envelopes() -> Vec<Envelope> {
         },
         Control::Create {
             genesis: genesis.clone(),
-            verifier: "verifier".into(),
         },
         Control::GetChannel {
             channel: channel.clone(),
         },
         Control::ListChannels,
+        Control::RegisterInvitation {
+            metadata: invitation.metadata.clone(),
+        },
+        Control::ResolveInvitation {
+            invitation: invitation.clone(),
+        },
         Control::ChannelSnapshot {
             channel: channel.clone(),
         },
         Control::Join {
-            request: join.clone(),
-            psk: "test-psk".into(),
+            request: admission.clone(),
+            invitation: invitation.clone(),
         },
         Control::Pending {
             channel: channel.clone(),
@@ -177,7 +214,7 @@ fn envelopes() -> Vec<Envelope> {
         },
         Control::Claim {
             genesis,
-            psk: "test-psk".into(),
+            invitation: invitation.clone(),
         },
         Control::Policy,
         Control::RejectJoin {
@@ -195,6 +232,8 @@ fn envelopes() -> Vec<Envelope> {
         Control::WithdrawPending { channel },
     ];
     for action in [
+        MembershipAction::EnableInvitations,
+        MembershipAction::Accept(admission.clone()),
         MembershipAction::Admit(join.clone()),
         MembershipAction::Revoke {
             device_id: peer.clone(),
@@ -212,12 +251,10 @@ fn envelopes() -> Vec<Envelope> {
     ] {
         controls.push(Control::Append {
             event: event(action),
-            verifier: None,
         });
     }
     controls.push(Control::Append {
         event: event(MembershipAction::Leave),
-        verifier: Some(String::new()),
     });
     messages.extend(controls.into_iter().map(|command| Envelope::Request {
         id: id.clone(),
@@ -229,11 +266,15 @@ fn envelopes() -> Vec<Envelope> {
         Reply::Proof(proof.clone()),
         Reply::Proofs(vec![proof.clone()]),
         Reply::ChannelSnapshot {
-            proof,
+            proof: proof.clone(),
             online: vec![peer.clone()],
             revoked: vec![peer.clone()],
         },
-        Reply::Requests(vec![join]),
+        Reply::Requests(vec![admission.clone()]),
+        Reply::InvitationProof {
+            proof: proof.clone(),
+            access_revision: 1,
+        },
         Reply::Peers(vec![peer]),
         Reply::Policy {
             allow_client_channel_creation: false,
@@ -304,7 +345,7 @@ fn private_messages() -> Vec<PrivateMessage> {
             capabilities: vec![],
         },
         PrivateMessage::ServiceOpened {
-            proof,
+            proof: proof.clone(),
             enabled: false,
             capabilities: vec![],
         },
@@ -418,7 +459,7 @@ fn explicit_card_rejection_roundtrips_with_baseline_unavailable_fallback() {
 }
 #[test]
 fn baseline_byte_fixtures_are_stable() {
-    let expected = std::fs::read_to_string(fixture("wire-v2.hex")).unwrap();
+    let expected = std::fs::read_to_string(fixture("wire-v3.hex")).unwrap();
     let actual = fixture_bytes();
     assert_eq!(
         actual, expected,
@@ -445,18 +486,13 @@ fn fixture_bytes() -> String {
 #[ignore = "one-time unpublished baseline creation; never regenerate a published baseline"]
 fn create_unpublished_baseline() {
     assert!(
-        !fixture("wire-identity.postcard").exists(),
-        "baseline already exists"
+        !fixture("wire-v3.hex").exists(),
+        "v3 baseline already exists"
     );
+    std::fs::write(fixture("wire-v3.hex"), fixture_bytes()).unwrap();
     std::fs::write(
-        fixture("wire-identity.postcard"),
-        hibiki_lib::encode(&Identity::generate("synthetic-fixture".into()).unwrap()).unwrap(),
-    )
-    .unwrap();
-    std::fs::write(fixture("wire-v2.hex"), fixture_bytes()).unwrap();
-    std::fs::write(
-        fixture("wire-v2.descriptor"),
-        include_bytes!(concat!(env!("OUT_DIR"), "/hibiki-v2.bin")),
+        fixture("wire-v3.descriptor"),
+        include_bytes!(concat!(env!("OUT_DIR"), "/hibiki-v3.bin")),
     )
     .unwrap();
 }
@@ -553,7 +589,7 @@ fn capabilities_default_to_baseline_and_are_normalized_authenticated_and_bounded
     let identity = identity();
     let body = wire::authentication_body(VERSION, "nonce", &identity.device.id(), &server, &client)
         .unwrap();
-    let signature = identity.sign("server-auth/v2", &body).unwrap();
+    let signature = identity.sign("server-auth/v3", &body).unwrap();
     let normalized = wire::authentication_body(
         VERSION,
         "nonce",
@@ -564,7 +600,7 @@ fn capabilities_default_to_baseline_and_are_normalized_authenticated_and_bounded
     .unwrap();
     verify(
         &identity.device.signing_key,
-        "server-auth/v2",
+        "server-auth/v3",
         &normalized,
         &signature,
     )
@@ -572,13 +608,13 @@ fn capabilities_default_to_baseline_and_are_normalized_authenticated_and_bounded
     for changed in [
         wire::authentication_body(VERSION, "nonce", &identity.device.id(), &[], &client).unwrap(),
         wire::authentication_body(VERSION, "nonce", &identity.device.id(), &server, &[]).unwrap(),
-        wire::authentication_body("hibiki/3", "nonce", &identity.device.id(), &server, &client)
+        wire::authentication_body("hibiki/2", "nonce", &identity.device.id(), &server, &client)
             .unwrap(),
     ] {
         assert!(
             verify(
                 &identity.device.signing_key,
-                "server-auth/v2",
+                "server-auth/v3",
                 &changed,
                 &signature
             )
@@ -629,7 +665,9 @@ fn network_conversion_preserves_signed_history_hashes_and_postcard_storage() {
         checkpoint: proof.verify().unwrap().checkpoint(),
     };
     assert_eq!(
-        Invite::import(&invite.export().unwrap()).unwrap().genesis,
+        hibiki_lib::decode::<Invite>(&hibiki_lib::encode(&invite).unwrap())
+            .unwrap()
+            .genesis,
         decoded.genesis
     );
     let stored = hibiki_lib::encode(&decoded).unwrap();
@@ -684,13 +722,13 @@ fn check_message(old: &DescriptorProto, new: &DescriptorProto) {
 #[test]
 fn published_schema_field_numbers_types_and_enum_values_are_frozen() {
     let old = FileDescriptorSet::decode(
-        std::fs::read(fixture("wire-v2.descriptor"))
+        std::fs::read(fixture("wire-v3.descriptor"))
             .unwrap()
             .as_slice(),
     )
     .unwrap();
     let new = FileDescriptorSet::decode(
-        include_bytes!(concat!(env!("OUT_DIR"), "/hibiki-v2.bin")).as_slice(),
+        include_bytes!(concat!(env!("OUT_DIR"), "/hibiki-v3.bin")).as_slice(),
     )
     .unwrap();
     for file in old.file {

@@ -144,6 +144,10 @@ impl Service {
             Control::Create { genesis, .. } | Control::Claim { genesis, .. } => {
                 (genesis.body.id.clone(), true)
             }
+            Control::RegisterInvitation { metadata } => (metadata.channel.clone(), true),
+            Control::ResolveInvitation { invitation } => {
+                (invitation.metadata.channel.clone(), false)
+            }
             Control::Join { request, .. } => (request.body.channel_id.clone(), false),
             Control::Append { event, .. } => (event.body.channel_id.clone(), true),
         };
@@ -399,37 +403,53 @@ impl Service {
                 }
                 Ok(Reply::Operation(op))
             }
-            Control::Create { genesis, verifier } => {
+            Control::Create { genesis } => {
                 if !self.allow_client_channel_creation {
                     bail!(
                         "client channel creation is disabled; ask the server administrator for an initialization invitation"
                     );
                 }
-                Ok(Reply::Proof(
-                    self.db.create(device, genesis, verifier).await?,
-                ))
+                Ok(Reply::Proof(self.db.create(device, genesis).await?))
             }
-            Control::Claim { genesis, psk } => {
-                Ok(Reply::Proof(self.db.claim(device, genesis, psk).await?))
+            Control::Claim {
+                genesis,
+                invitation,
+            } => Ok(Reply::Proof(
+                self.db.claim(device, genesis, invitation).await?,
+            )),
+            Control::RegisterInvitation { metadata } => {
+                self.db.register_invitation(device, metadata).await?;
+                Ok(Reply::Ok)
+            }
+            Control::ResolveInvitation { invitation } => {
+                let (proof, access_revision) =
+                    self.db.resolve_invitation(device, invitation).await?;
+                Ok(Reply::InvitationProof {
+                    proof,
+                    access_revision,
+                })
             }
             Control::GetChannel { channel } => {
                 self.db.require_access(&channel, device).await?;
                 Ok(Reply::Proof(self.channel(&channel).await?))
             }
             Control::ListChannels => Ok(Reply::Proofs(self.db.list(device).await?)),
-            Control::Join { request, psk } => {
+            Control::Join {
+                request,
+                invitation,
+            } => {
                 self.channel(&request.body.channel_id).await?;
-                self.db.join(device, request, psk).await?;
+                self.db.join(device, request, invitation).await?;
                 Ok(Reply::Ok)
             }
             Control::Pending { channel } => {
                 self.channel(&channel).await?;
                 Ok(Reply::Requests(self.db.pending(device, &channel).await?))
             }
-            Control::Append { event, verifier } => {
+            Control::Append { event } => {
                 let id = event.body.channel_id.clone();
                 self.channel(&id).await?;
-                let proof = self.db.append(device, event, verifier).await?;
+                let proof = self.db.append(device, event).await?;
                 let state = proof.verify()?;
                 let targets: Vec<_> = {
                     let mut executors = self.executors.lock().unwrap();
@@ -595,6 +615,9 @@ impl Service {
                     .control(device, connection, tx, command, stop)
                     .await
                     .map_err(|e| {
+                        if let Some(error) = e.downcast_ref::<WireError>() {
+                            return error.clone();
+                        }
                         let message = e.to_string();
                         let code = if message.contains("CONFLICT") {
                             "conflict"
@@ -731,7 +754,7 @@ async fn session(service: Service, mut socket: WebSocket) -> Result<()> {
     let device_id = device.id();
     verify(
         &device.signing_key,
-        "server-auth/v2",
+        "server-auth/v3",
         &wire::authentication_body(
             VERSION,
             &nonce,
@@ -881,6 +904,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::invitation_request;
     use hibiki_lib::{channel::*, identity::Identity};
 
     struct QueueFixture {
@@ -901,20 +925,20 @@ mod tests {
             let b = Identity::generate("executor".into()).unwrap();
             db.register(&a.device).await.unwrap();
             db.register(&b.device).await.unwrap();
-            let verifier = hash_psk("test-secret").unwrap();
-            let genesis = ChannelGenesis::create(&a, "queue".into(), &verifier).unwrap();
-            let proof = db.create(&a.device.id(), genesis, verifier).await.unwrap();
-            let request = JoinRequest::create(&b, &proof.verify().unwrap()).unwrap();
-            db.join(&b.device.id(), request.clone(), "test-secret".into())
+            let genesis =
+                ChannelGenesis::without_psk(&a, hibiki_lib::random_id(), "queue".into()).unwrap();
+            let proof = db.create(&a.device.id(), genesis).await.unwrap();
+            let (request, invitation) = invitation_request(&db, &proof, &a, &b).await;
+            db.join(&b.device.id(), request.clone(), invitation.clone())
                 .await
                 .unwrap();
             let event = MembershipEvent::create(
                 &a,
                 &proof.verify().unwrap(),
-                MembershipAction::Admit(request),
+                MembershipAction::Accept(request),
             )
             .unwrap();
-            db.append(&a.device.id(), event, None).await.unwrap();
+            db.append(&a.device.id(), event).await.unwrap();
             let (tx, rx) = mpsc::channel(64);
             let f = Self {
                 dir,
@@ -1014,7 +1038,7 @@ mod tests {
             let client_caps = wire::supported_capabilities();
             let signature = identity
                 .sign(
-                    "server-auth/v2",
+                    "server-auth/v3",
                     &wire::authentication_body(
                         &version,
                         &nonce,
@@ -1090,12 +1114,12 @@ mod tests {
             },
         )
         .unwrap();
-        let verifier = hash_psk("other-secret").unwrap();
-        let genesis = ChannelGenesis::create(&f.a, "other".into(), &verifier).unwrap();
+        let genesis =
+            ChannelGenesis::without_psk(&f.a, hibiki_lib::random_id(), "other".into()).unwrap();
         let other = f
             .service
             .db
-            .create(&f.a.device.id(), genesis, verifier)
+            .create(&f.a.device.id(), genesis)
             .await
             .unwrap();
         let lock = f.service.channel_authority(&f.channel);
@@ -1115,14 +1139,7 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        let mut revoke = Box::pin(f.command(
-            &f.a,
-            "a",
-            Control::Append {
-                event,
-                verifier: None,
-            },
-        ));
+        let mut revoke = Box::pin(f.command(&f.a, "a", Control::Append { event }));
         // Poll once to enqueue the exclusive acquisition behind the held reader.
         tokio::select! {
             biased;
@@ -1223,31 +1240,27 @@ mod tests {
         let mut socket = TestSocket::new(f.service.clone(), &f.a).await;
         socket.announce(&f.channel).await;
         // Subscribe the same executors to a second channel with the same members.
-        let verifier = hash_psk("test-secret").unwrap();
-        let genesis = ChannelGenesis::create(&f.a, "other".into(), &verifier).unwrap();
+        let genesis =
+            ChannelGenesis::without_psk(&f.a, hibiki_lib::random_id(), "other".into()).unwrap();
         let proof = f
             .service
             .db
-            .create(&f.a.device.id(), genesis, verifier)
+            .create(&f.a.device.id(), genesis)
             .await
             .unwrap();
-        let request = JoinRequest::create(&f.b, &proof.verify().unwrap()).unwrap();
+        let (request, invitation) = invitation_request(&f.service.db, &proof, &f.a, &f.b).await;
         f.service
             .db
-            .join(&f.b.device.id(), request.clone(), "test-secret".into())
+            .join(&f.b.device.id(), request.clone(), invitation.clone())
             .await
             .unwrap();
         let event = MembershipEvent::create(
             &f.a,
             &proof.verify().unwrap(),
-            MembershipAction::Admit(request),
+            MembershipAction::Accept(request),
         )
         .unwrap();
-        f.service
-            .db
-            .append(&f.a.device.id(), event, None)
-            .await
-            .unwrap();
+        f.service.db.append(&f.a.device.id(), event).await.unwrap();
         let other = proof.genesis.body.id;
         for executor in f.service.executors.lock().unwrap().values_mut() {
             executor.channels.insert(other.clone());
@@ -1879,16 +1892,9 @@ mod tests {
             },
         )
         .unwrap();
-        f.command(
-            &f.a,
-            "a",
-            Control::Append {
-                event,
-                verifier: None,
-            },
-        )
-        .await
-        .unwrap();
+        f.command(&f.a, "a", Control::Append { event })
+            .await
+            .unwrap();
         assert!(f.command(&f.b, "b", f.claim(&revoked.id)).await.is_err());
         f.service.db.delete("queue").await.unwrap();
         assert_eq!(
@@ -1912,40 +1918,33 @@ mod tests {
         let b = Identity::generate("b".into()).unwrap();
         let (tx, mut rx) = mpsc::channel(64);
         let stop = CancellationToken::new();
-        let verifier = hash_psk("test-secret").unwrap();
-        let genesis = ChannelGenesis::create(&a, "arbitrary-name".into(), &verifier).unwrap();
+        let genesis =
+            ChannelGenesis::without_psk(&a, hibiki_lib::random_id(), "arbitrary-name".into())
+                .unwrap();
         assert!(
             service
-                .control(
-                    &a.device.id(),
-                    "a",
-                    &tx,
-                    Control::Create {
-                        genesis,
-                        verifier: verifier.clone()
-                    },
-                    &stop
-                )
+                .control(&a.device.id(), "a", &tx, Control::Create { genesis }, &stop)
                 .await
                 .is_err()
         );
         let invite = db
-            .reserve(
-                "ws://localhost/hibiki".into(),
-                "arbitrary-name".into(),
-                verifier.clone(),
-            )
+            .reserve("ws://localhost/hibiki".into(), "arbitrary-name".into())
             .await
             .unwrap();
-        let id = invite.id.clone();
+        let id = invite.metadata.channel.clone();
         let Reply::Proof(proof) = service
             .control(
                 &a.device.id(),
                 "a",
                 &tx,
                 Control::Claim {
-                    genesis: invite.founder_genesis(&a).unwrap(),
-                    psk: "test-secret".into(),
+                    genesis: ChannelGenesis::without_psk(
+                        &a,
+                        invite.metadata.channel.clone(),
+                        invite.metadata.name.clone(),
+                    )
+                    .unwrap(),
+                    invitation: invite.clone(),
                 },
                 &stop,
             )
@@ -1954,7 +1953,7 @@ mod tests {
         else {
             panic!()
         };
-        let request = JoinRequest::create(&b, &proof.verify().unwrap()).unwrap();
+        let (request, invitation) = invitation_request(&db, &proof, &a, &b).await;
         service
             .control(
                 &b.device.id(),
@@ -1962,7 +1961,7 @@ mod tests {
                 &tx,
                 Control::Join {
                     request: request.clone(),
-                    psk: "test-secret".into(),
+                    invitation: invitation.clone(),
                 },
                 &stop,
             )
@@ -1998,20 +1997,11 @@ mod tests {
         let event = MembershipEvent::create(
             &a,
             &proof.verify().unwrap(),
-            MembershipAction::Admit(request),
+            MembershipAction::Accept(request),
         )
         .unwrap();
         service
-            .control(
-                &a.device.id(),
-                "a",
-                &tx,
-                Control::Append {
-                    event,
-                    verifier: None,
-                },
-                &stop,
-            )
+            .control(&a.device.id(), "a", &tx, Control::Append { event }, &stop)
             .await
             .unwrap();
         for (device, connection) in [(&a, "a"), (&b, "b")] {
@@ -2114,19 +2104,11 @@ mod tests {
         );
         let open = Service::new(db, true);
         for name in ["Team", "team", "Other", "工作"] {
-            let genesis = ChannelGenesis::create(&a, name.into(), &verifier).unwrap();
-            open.control(
-                &a.device.id(),
-                "a",
-                &tx,
-                Control::Create {
-                    genesis,
-                    verifier: verifier.clone(),
-                },
-                &stop,
-            )
-            .await
-            .unwrap();
+            let genesis =
+                ChannelGenesis::without_psk(&a, hibiki_lib::random_id(), name.into()).unwrap();
+            open.control(&a.device.id(), "a", &tx, Control::Create { genesis }, &stop)
+                .await
+                .unwrap();
         }
     }
     #[tokio::test]
@@ -2158,7 +2140,7 @@ mod tests {
             let capabilities = vec!["future/query".to_owned()];
             let signature = identity
                 .sign(
-                    "server-auth/v2",
+                    "server-auth/v3",
                     &wire::authentication_body(
                         &version,
                         &nonce,

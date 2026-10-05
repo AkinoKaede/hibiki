@@ -55,10 +55,6 @@ fn fixture() -> (
             created_at: 0,
         }],
     };
-    client.provider.cards.lock().unwrap().push(RegisteredCard {
-        card: card.clone(),
-        name: "test".into(),
-    });
     (root, client, context, card)
 }
 async fn next(client: &MobileClient) -> NativeEvent {
@@ -247,13 +243,13 @@ async fn private_operation_stops_on_native_cancellation_or_fault_without_fallbac
 }
 
 #[tokio::test]
-async fn serial_queries_require_usb_or_an_explicit_registered_nfc_demand() {
-    for (registered, nfc_available) in [(true, true), (true, false), (false, true)] {
+async fn serial_queries_use_only_the_current_volatile_record_without_prompting() {
+    for (recorded, available) in [(true, true), (true, false), (false, true)] {
         let (_root, client, context, card) = fixture();
-        if !registered {
-            client.provider.cards.lock().unwrap().clear();
+        if recorded {
+            *client.provider.nfc_card.lock().unwrap() = Some(card.clone());
         }
-        client.set_nfc_available(nfc_available);
+        client.set_nfc_available(available);
         let mut ep = client
             .provider
             .open(
@@ -265,185 +261,20 @@ async fn serial_queries_require_usb_or_an_explicit_registered_nfc_demand() {
             )
             .await
             .unwrap();
-        for command in ["SERIALNO", "SERIALNO --all", "SERIALNO --demand=ABCD"] {
-            let result = hibiki_core::preparation::query(&mut ep, command.into())
+        for command in [
+            "SERIALNO".to_owned(),
+            "SERIALNO --all".into(),
+            format!("SERIALNO --demand={}", card.serial),
+        ] {
+            let result = hibiki_core::preparation::query(&mut ep, command.as_str().into())
                 .await
                 .unwrap();
-            assert!(matches!(
-                assuan::parse_response(result.lines.last().unwrap()).unwrap(),
-                assuan::Response::Err(assuan::CARD_NOT_PRESENT)
-            ));
+            assert_eq!(result.success(), recorded && available);
         }
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), client.broker.next())
-                .await
-                .is_err()
-        );
-        let command: Line = format!("SERIALNO --demand={}", card.serial).as_str().into();
-        if registered && nfc_available {
-            for accept in [true, false] {
-                ep.command(command.clone()).await.unwrap();
-                let NativeEvent::Prompt { prompt } = next(&client).await else {
-                    panic!()
-                };
-                assert!(matches!(prompt.kind, PromptKind::CardNfc));
-                assert_eq!(
-                    prompt.description,
-                    hibiki_lib::card_prompt::description(&card.serial, "")
-                );
-                if accept {
-                    client.respond(prompt.token, vec![], true).unwrap();
-                    assert_eq!(
-                        &*ep.next().await.unwrap(),
-                        format!("S SERIALNO {}", card.serial).as_bytes()
-                    );
-                    assert_eq!(&*ep.next().await.unwrap(), b"OK");
-                } else {
-                    client.cancel_request(prompt.token).unwrap();
-                    assert!(matches!(
-                        assuan::parse_response(&ep.next().await.unwrap()).unwrap(),
-                        assuan::Response::Err(assuan::CANCELED)
-                    ));
-                }
-                assert!(matches!(next(&client).await, NativeEvent::Cancelled { .. }));
-            }
-            ep.command(command).await.unwrap();
-            let NativeEvent::Prompt { prompt } = next(&client).await else {
-                panic!()
-            };
-            ep.close().await;
-            assert!(!client.request_is_pending(prompt.token));
-        } else {
-            let result = hibiki_core::preparation::query(&mut ep, command)
-                .await
-                .unwrap();
-            assert!(matches!(
-                assuan::parse_response(result.lines.last().unwrap()).unwrap(),
-                assuan::Response::Err(assuan::CARD_NOT_PRESENT)
-            ));
-            ep.close().await;
-        }
-    }
-}
-
-#[tokio::test]
-async fn selected_nfc_is_volatile_optional_and_cleared_when_unavailable() {
-    let (root, client, context, card) = fixture();
-    let mut registry = crate::registry::Registry {
-        cards: client.provider.cards.lock().unwrap().clone(),
-    };
-    let mut second = registry.cards[0].clone();
-    second.card.serial = "D2760001240103040000000000020000".into();
-    registry.cards.push(second.clone());
-    client.save_registry(registry).unwrap();
-    assert!(client.selected_nfc_card().is_none());
-    assert!(client.select_nfc_card(Some("missing".into())).is_err());
-    let mut ep = client
-        .provider
-        .open(
-            client.app.clone(),
-            ServiceKind::Scdaemon,
-            client.slots.clone(),
-            CancellationToken::new(),
-            context,
-        )
-        .await
-        .unwrap();
-    for serial in [
-        Some(card.serial.clone()),
-        Some(second.card.serial.clone()),
-        None,
-    ] {
-        client.select_nfc_card(serial.clone()).unwrap();
-        assert_eq!(client.selected_nfc_card(), serial);
-        let result = hibiki_core::preparation::query(&mut ep, "SERIALNO".into())
+        let result = hibiki_core::preparation::query(&mut ep, "SERIALNO --demand=ABCD".into())
             .await
             .unwrap();
-        assert_eq!(result.success(), serial.is_some());
-        if let Some(serial) = serial {
-            assert_eq!(&*result.lines[0], format!("S SERIALNO {serial}").as_bytes());
-        }
-    }
-    assert!(
-        tokio::time::timeout(Duration::from_millis(20), client.broker.next())
-            .await
-            .is_err()
-    );
-    ep.close().await;
-    client.select_nfc_card(Some(card.serial.clone())).unwrap();
-    client.set_nfc_available(false);
-    client.set_nfc_available(true);
-    assert!(client.selected_nfc_card().is_none());
-    client.select_nfc_card(Some(card.serial.clone())).unwrap();
-    client.remove_card(card.serial.clone()).await.unwrap();
-    assert!(client.selected_nfc_card().is_none());
-    client
-        .select_nfc_card(Some(second.card.serial.clone()))
-        .unwrap();
-    let restored = MobileClient::new(
-        root.path().join("mobile").to_string_lossy().into(),
-        "wss://example.com/hibiki".into(),
-        create_identity("phone".into()).unwrap(),
-        false,
-    )
-    .unwrap();
-    restored.set_nfc_available(true);
-    assert_eq!(restored.registered_cards().len(), 1);
-    assert!(restored.selected_nfc_card().is_none());
-    client.remove_card(second.card.serial).await.unwrap();
-    assert!(client.selected_nfc_card().is_none());
-}
-
-#[tokio::test]
-async fn selected_or_demand_confirmed_nfc_prepares_without_another_prompt() {
-    for selected in [true, false] {
-        let (_root, client, context, card) = fixture();
-        let mut ep = client
-            .provider
-            .open(
-                client.app.clone(),
-                ServiceKind::Scdaemon,
-                client.slots.clone(),
-                CancellationToken::new(),
-                context.clone(),
-            )
-            .await
-            .unwrap();
-        if selected {
-            client.select_nfc_card(Some(card.serial.clone())).unwrap();
-        } else {
-            ep.command(format!("SERIALNO --demand={}", card.serial).as_str().into())
-                .await
-                .unwrap();
-            let NativeEvent::Prompt { prompt } = next(&client).await else {
-                panic!()
-            };
-            client.respond(prompt.token, vec![], true).unwrap();
-            assert!(ep.next().await.unwrap().starts_with(b"S SERIALNO"));
-            assert_eq!(&*ep.next().await.unwrap(), b"OK");
-            assert!(matches!(next(&client).await, NativeEvent::Cancelled { .. }));
-        }
-        let mut preparation = client
-            .provider
-            .prepare(
-                client.app.clone(),
-                CardTarget {
-                    serial: Some(card.serial.clone()),
-                    key: Some(card.keys[0].keygrip.clone()),
-                },
-                context,
-            )
-            .unwrap();
-        assert_eq!(
-            tokio::time::timeout(
-                Duration::from_millis(100),
-                preparation.poll(&mut ep, CancellationToken::new())
-            )
-            .await
-            .unwrap()
-            .unwrap(),
-            Some(card.serial)
-        );
+        assert!(!result.success());
         assert!(
             tokio::time::timeout(Duration::from_millis(20), client.next_event())
                 .await
@@ -451,4 +282,46 @@ async fn selected_or_demand_confirmed_nfc_prepares_without_another_prompt() {
         );
         ep.close().await;
     }
+}
+
+#[tokio::test]
+async fn recorded_nfc_prepares_without_prompt_and_clear_cancels_dependent_session() {
+    let (_root, client, context, card) = fixture();
+    *client.provider.nfc_card.lock().unwrap() = Some(card.clone());
+    let mut ep = client
+        .provider
+        .open(
+            client.app.clone(),
+            ServiceKind::Scdaemon,
+            client.slots.clone(),
+            CancellationToken::new(),
+            context.clone(),
+        )
+        .await
+        .unwrap();
+    let mut preparation = client
+        .provider
+        .prepare(
+            client.app.clone(),
+            CardTarget {
+                serial: Some(card.serial.clone()),
+                key: Some(card.keys[0].keygrip.clone()),
+            },
+            context.clone(),
+        )
+        .unwrap();
+    assert_eq!(
+        preparation
+            .poll(&mut ep, CancellationToken::new())
+            .await
+            .unwrap(),
+        Some(card.serial)
+    );
+    let state = client.provider.sessions.lock().unwrap()[&context.session]
+        .upgrade()
+        .unwrap();
+    client.clear_nfc_card();
+    assert!(state.lock().unwrap().stop.is_cancelled());
+    assert!(client.nfc_card().is_none());
+    ep.close().await;
 }

@@ -64,38 +64,6 @@ pub fn inspect(
         OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
     snapshot(&mut card.transaction()?, transport)
 }
-/// Cardholder name is optional public OpenPGP data (5B), not a key UID.
-pub fn inspect_named(
-    broker: Arc<Broker>,
-    stop: CancellationToken,
-    transport: CardTransport,
-) -> Result<(CardInfo, String)> {
-    let backend = NativeCard::open(broker, stop, transport.clone())?;
-    let mut card =
-        OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
-    let mut tx = card.transaction()?;
-    let info = snapshot(&mut tx, transport)?;
-    let name = tx
-        .cardholder_related_data()
-        .ok()
-        .and_then(|data| {
-            data.name()
-                .map(|name| String::from_utf8_lossy(name).into_owned())
-        })
-        .unwrap_or_default();
-    Ok((info, cardholder_name(&name)))
-}
-fn cardholder_name(raw: &str) -> String {
-    // OpenPGP encodes surname<<given names with '<' in place of spaces.
-    let raw: String = raw.chars().filter(|c| !c.is_control()).collect();
-    let formatted = if let Some((surname, given)) = raw.split_once("<<") {
-        format!("{} {}", given.replace('<', " "), surname.replace('<', " "))
-    } else {
-        raw.replace('<', " ")
-    };
-    formatted.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// PIN entry identifies the target; reader selection happens after the reply.
 pub fn pin_description(info: &CardInfo) -> String {
     format!(
@@ -547,11 +515,4 @@ pub fn operation_error(error: &anyhow::Error) -> AssuanResult {
 }
 
 #[cfg(test)]
-mod name_tests {
-    #[test]
-    fn cardholder_names_are_readable_and_optional() {
-        assert_eq!(super::cardholder_name("DOE<<JANE<ANN"), "JANE ANN DOE");
-        assert_eq!(super::cardholder_name("小明"), "小明");
-        assert_eq!(super::cardholder_name("\0\r\n"), "");
-    }
-}
+mod name_tests {}

@@ -23,10 +23,14 @@ pub struct OperationCancelled;
 pub struct CardNotPresent;
 
 type Answer = Result<Zeroizing<Vec<u8>>>;
+struct Pending {
+    answer: oneshot::Sender<Answer>,
+    stop: CancellationToken,
+}
 pub struct Broker {
     tx: mpsc::Sender<NativeEvent>,
     rx: tokio::sync::Mutex<mpsc::Receiver<NativeEvent>>,
-    pending: Mutex<HashMap<String, oneshot::Sender<Answer>>>,
+    pending: Mutex<HashMap<String, Pending>>,
 }
 impl Broker {
     pub fn new() -> Arc<Self> {
@@ -47,6 +51,14 @@ impl Broker {
     }
     pub fn pending(&self, token: &str) -> bool {
         self.pending.lock().unwrap().contains_key(token)
+    }
+    pub fn request_stop(&self, token: &str) -> Result<CancellationToken> {
+        self.pending
+            .lock()
+            .unwrap()
+            .get(token)
+            .map(|p| p.stop.clone())
+            .ok_or_else(|| RequestCancelled.into())
     }
     pub fn respond(&self, token: &str, bytes: Vec<u8>, accepted: bool) -> Result<()> {
         let bytes = Zeroizing::new(bytes);
@@ -82,12 +94,15 @@ impl Broker {
             .unwrap()
             .remove(token)
             .ok_or_else(|| anyhow::anyhow!("request expired or already answered"))?;
-        tx.send(answer)
+        tx.stop.cancel();
+        tx.answer
+            .send(answer)
             .map_err(|_| anyhow::anyhow!("request expired"))
     }
     pub fn cancel_all(&self) {
         let pending = std::mem::take(&mut *self.pending.lock().unwrap());
-        for (token, _) in pending {
+        for (token, request) in pending {
+            request.stop.cancel();
             let _ = self.emit(NativeEvent::Cancelled { token });
         }
     }
@@ -107,7 +122,13 @@ impl Broker {
             if pending.len() >= 128 {
                 bail!("too many native requests");
             }
-            pending.insert(token.clone(), tx);
+            pending.insert(
+                token.clone(),
+                Pending {
+                    answer: tx,
+                    stop: CancellationToken::new(),
+                },
+            );
         }
         let _guard = RequestGuard {
             broker: self.clone(),
@@ -127,7 +148,9 @@ struct RequestGuard {
 }
 impl Drop for RequestGuard {
     fn drop(&mut self) {
-        self.broker.pending.lock().unwrap().remove(&self.token);
+        if let Some(request) = self.broker.pending.lock().unwrap().remove(&self.token) {
+            request.stop.cancel();
+        }
         let _ = self.broker.emit(NativeEvent::Cancelled {
             token: self.token.clone(),
         });

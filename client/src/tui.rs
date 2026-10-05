@@ -19,7 +19,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use std::{
     io::{IsTerminal, Write},
@@ -45,10 +45,9 @@ enum Action {
     Reject(String, String),
     Revoke(String, String, bool, u64),
     Leave(String),
-    Invite(String, Option<Zeroizing<String>>),
-    Join(Zeroizing<String>, Option<Zeroizing<String>>),
-    Create(String, Zeroizing<String>),
-    Rotate(String),
+    Invite(String),
+    Join(Zeroizing<String>),
+    Create(String),
     Settings(Box<Config>, Vec<u8>, Box<Config>),
     Export(Zeroizing<String>, PathBuf, bool),
 }
@@ -102,7 +101,6 @@ enum FormKind {
     Init,
     Join,
     Create,
-    Invite(String),
     Settings(Box<Config>, Vec<u8>),
     Export(Zeroizing<String>),
 }
@@ -127,6 +125,7 @@ enum Modal {
         scroll: u16,
     },
     Secret {
+        qr: bool,
         title: String,
         text: Zeroizing<String>,
         scroll: u16,
@@ -141,6 +140,7 @@ enum Modal {
 enum ActionChoice {
     Execute(Action),
     Form(FormKind),
+    Verification(String),
 }
 struct Row {
     id: String,
@@ -320,23 +320,10 @@ impl Ui {
                     Field::new("Allow insecure ws (true/false)", "false", false),
                 ],
             ),
-            FormKind::Join => (
-                "Join channel",
-                vec![
-                    Field::new("Invitation", "", true),
-                    Field::new("PSK (blank if included)", "", true),
-                ],
-            ),
+            FormKind::Join => ("Join channel", vec![Field::new("Invitation", "", true)]),
             FormKind::Create => (
                 "Create channel",
-                vec![
-                    Field::new("Channel name", "", false),
-                    Field::new("PSK (blank to generate)", "", true),
-                ],
-            ),
-            FormKind::Invite(_) => (
-                "Generate invitation",
-                vec![Field::new("Channel PSK", "", true)],
+                vec![Field::new("Channel name", "", false)],
             ),
             FormKind::Export(_) => (
                 "Export secret (0600)",
@@ -429,11 +416,7 @@ impl Ui {
                     if c.member {
                         choices.push((
                             "Generate invitation".into(),
-                            ActionChoice::Form(FormKind::Invite(c.id.clone())),
-                        ));
-                        choices.push((
-                            "Rotate PSK".into(),
-                            ActionChoice::Execute(Action::Rotate(c.id.clone())),
+                            ActionChoice::Execute(Action::Invite(c.id.clone())),
                         ));
                     }
                     choices.push((
@@ -496,6 +479,10 @@ impl Ui {
             {
                 if p.own {
                     choices.push((
+                        "Show verification QR / text".into(),
+                        ActionChoice::Verification(p.verification.clone()),
+                    ));
+                    choices.push((
                         "Withdraw own request".into(),
                         ActionChoice::Execute(Action::Leave(p.channel.clone())),
                     ));
@@ -528,8 +515,16 @@ impl Ui {
     fn choose(&mut self, choice: ActionChoice, tx: &mpsc::Sender<Action>) {
         match choice {
             ActionChoice::Form(kind) => self.form(kind),
+            ActionChoice::Verification(text) => {
+                self.modal = Some(Modal::Secret {
+                    qr: true,
+                    title: "Waiting for approval · public verification code".into(),
+                    text: Zeroizing::new(text),
+                    scroll: 0,
+                });
+            }
             ActionChoice::Execute(action) => match &action {
-                Action::Select(_) | Action::Ping(..) => self.submit(action, tx),
+                Action::Select(_) | Action::Ping(..) | Action::Invite(_) => self.submit(action, tx),
                 _ => {
                     let approval = matches!(action, Action::Approve(..));
                     let explanation = match action {
@@ -537,10 +532,7 @@ impl Ui {
                             "Compare the complete request ID and all 24 words with the joining device. Press Space only after verifying."
                         }
                         Action::Revoke(..) => {
-                            "This device will lose access and this identity cannot rejoin this channel."
-                        }
-                        Action::Rotate(..) => {
-                            "Pending requests will be invalidated. Existing members keep access. Save the new PSK before closing it."
+                            "This device will lose access. Rejoining requires a fresh request and approval."
                         }
                         Action::Leave(..) => {
                             "Withdraw your pending requests and leave this channel. Other devices remain members."
@@ -623,24 +615,8 @@ impl Ui {
                 name: value(1),
                 insecure: boolean(2)?,
             },
-            FormKind::Join => Action::Join(
-                Zeroizing::new(value(0)),
-                (!fields[1].value.is_empty()).then(|| Zeroizing::new(value(1))),
-            ),
-            FormKind::Create => Action::Create(
-                value(0),
-                Zeroizing::new(if fields[1].value.is_empty() {
-                    hibiki_lib::channel::make_psk()
-                } else {
-                    value(1)
-                }),
-            ),
-            FormKind::Invite(channel) => {
-                if fields[0].value.is_empty() {
-                    bail!("Enter the channel PSK");
-                }
-                Action::Invite(channel.clone(), Some(Zeroizing::new(value(0))))
-            }
+            FormKind::Join => Action::Join(Zeroizing::new(value(0))),
+            FormKind::Create => Action::Create(value(0)),
             FormKind::Export(text) => {
                 if fields[0].value.trim().is_empty() {
                     bail!("file path is required");
@@ -674,7 +650,13 @@ impl Ui {
             }
             match &mut modal {
                 Modal::Help => {}
-                Modal::Secret { text, scroll, .. } => match key.code {
+                Modal::Secret {
+                    text, scroll, qr, ..
+                } => match key.code {
+                    KeyCode::Char('v') => {
+                        *qr = !*qr;
+                        *scroll = 0;
+                    }
                     KeyCode::Char('e') => {
                         self.form(FormKind::Export(text.clone()));
                         return false;
@@ -794,6 +776,21 @@ impl Ui {
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Char('?') => self.modal = Some(Modal::Help),
+            KeyCode::Char('i') if self.page == 1 => {
+                if let Some(channel) = self
+                    .snapshot
+                    .as_ref()
+                    .filter(|s| s.relay_connected)
+                    .and_then(|s| {
+                        s.channels.iter().find(|c| {
+                            self.selected.as_ref() == Some(&c.id) && c.member && c.available
+                        })
+                    })
+                    .map(|c| c.id.clone())
+                {
+                    self.submit(Action::Invite(channel), tx);
+                }
+            }
             KeyCode::Tab => self.focus = (self.focus + 1) % 3,
             KeyCode::BackTab => self.focus = (self.focus + 2) % 3,
             KeyCode::Char('/') => {
@@ -896,15 +893,7 @@ impl Ui {
         let mut nav = ListState::default().with_selected(Some(self.page));
         f.render_stateful_widget(
             List::new(items)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title(if self.focus == 0 {
-                            "Navigation *"
-                        } else {
-                            "Navigation"
-                        }),
-                )
+                .block(pane("Navigation", self.focus == 0))
                 .highlight_style(
                     Style::default()
                         .fg(Color::Cyan)
@@ -926,11 +915,7 @@ impl Ui {
                 Paragraph::new(if self.page == 0 { overview } else { settings })
                     .wrap(Wrap { trim: false })
                     .scroll((self.detail_scroll, 0))
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title(PAGES[self.page]),
-                    ),
+                    .block(pane(PAGES[self.page], self.focus != 0)),
                 content,
             );
         } else {
@@ -958,12 +943,18 @@ impl Ui {
                 f.render_stateful_widget(
                     List::new(items)
                         .highlight_symbol("› ")
-                        .highlight_style(Style::default().fg(Color::Cyan))
-                        .block(Block::default().borders(Borders::ALL).title(format!(
-                            "{} · {}",
-                            PAGES[self.page],
-                            rows.len()
-                        ))),
+                        .highlight_style(if self.focus == 1 {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        })
+                        .block(pane(
+                            format!("{} · {}", PAGES[self.page], rows.len()),
+                            self.focus == 1,
+                        )),
                     split[0],
                     &mut selection,
                 );
@@ -977,11 +968,7 @@ impl Ui {
                     )
                     .wrap(Wrap { trim: false })
                     .scroll((self.detail_scroll, 0))
-                    .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Details · full identities"),
-                    ),
+                    .block(pane("Details · full identities", self.focus == 2)),
                     split[1],
                 );
             }
@@ -990,7 +977,7 @@ impl Ui {
             Paragraph::new(safe(&self.message)).wrap(Wrap { trim: false }),
             parts[2],
         );
-        f.render_widget(Paragraph::new(if self.filtering{format!("Filter: {}",safe(&self.filter))}else{"1–5 pages · Tab focus · ↑↓/jk move · Enter details · a actions · / filter · r refresh · ? help · q quit".into()}),parts[3]);
+        f.render_widget(Paragraph::new(if self.filtering{format!("Filter: {}",safe(&self.filter))}else{"1–5 pages · Tab focus · ↑↓/jk move · Enter details · a actions · i invite · / filter · r refresh · ? help · q quit".into()}),parts[3]);
         if let Some(modal) = &self.modal {
             let rect = Rect::new(
                 area.x + area.width / 20,
@@ -1016,12 +1003,43 @@ impl Ui {
                     let text=format!("{}\n\n{}\n{}",details,if *approval{if *verified{"[x] Identity verified (Space to change)"}else{"[ ] I compared the request ID and all 24 words (Space)"}}else{""},if *affirmative{"  Cancel     [ Confirm ]"}else{"[ Cancel ]     Confirm"});
                     f.render_widget(Paragraph::new(text).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(Block::default().borders(Borders::ALL).title(format!("{title} · ↑↓ scroll · Tab choose · Enter submit · Esc cancel"))),rect);
                 },
-                Modal::Secret{title,text,scroll}=>f.render_widget(Paragraph::new(safe(text)).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(Block::default().borders(Borders::ALL).title(format!("{title} · e export · ↑↓ scroll · Esc clear"))),rect),
+                Modal::Secret{title,text,scroll,qr}=> {
+                    let block = Block::default().borders(Borders::ALL).title(format!("{title} · v QR/text · e export (.png for image) · Esc clear"));
+                    if *qr {
+                        let rendered = hibiki_lib::qr::terminal(text).unwrap_or_else(|e| e.to_string());
+                        let width = rendered.lines().map(|l| l.chars().count()).max().unwrap_or(0);
+                        if width + 2 > rect.width as usize || rendered.lines().count() + 2 > rect.height as usize {
+                            f.render_widget(Paragraph::new("Terminal too small for this QR code. Enlarge it or press e to export a .png image.").wrap(Wrap{trim:false}).block(block),rect);
+                        } else {
+                            f.render_widget(Paragraph::new(rendered).style(Style::default().fg(Color::Black).bg(Color::White)).block(block),rect);
+                        }
+                    } else { f.render_widget(Paragraph::new(safe(text)).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(block),rect); }
+                },
                 Modal::Result{text,scroll}=>f.render_widget(Paragraph::new(text.as_str()).wrap(Wrap{trim:false}).scroll((*scroll,0)).block(Block::default().borders(Borders::ALL).title("Result · ↑↓ scroll · Esc close")),rect),
-                Modal::Help=>f.render_widget(Paragraph::new("1–5: page   Tab: focus   ↑↓ / j k: navigate\nEnter: details   a: actions   /: filter   r: refresh\nEsc: close/cancel   q / Ctrl-C: quit\n\nManagement uses a separate relay connection.\nOffline data is marked cached; online changes are disabled.\nService settings require a daemon restart; the TUI never restarts it.\nSecrets are not saved unless you explicitly export them.\nApproval always requires full identity comparison.\n\nPress Esc to close.").wrap(Wrap{trim:false}).block(Block::default().borders(Borders::ALL).title("Help")),rect),
+                Modal::Help=>f.render_widget(Paragraph::new("1–5: page   Tab: focus   ↑↓ / j k: navigate\nEnter: details   a: actions   i: invite (Channels)   /: filter   r: refresh\nEsc: close/cancel   q / Ctrl-C: quit\n\nManagement uses a separate relay connection.\nOffline data is marked cached; online changes are disabled.\nService settings require a daemon restart; the TUI never restarts it.\nSecrets are not saved unless you explicitly export them.\nApproval always requires full identity comparison.\n\nPress Esc to close.").wrap(Wrap{trim:false}).block(Block::default().borders(Borders::ALL).title("Help")),rect),
             }
         }
     }
+}
+
+fn pane(title: impl Into<String>, focused: bool) -> Block<'static> {
+    let title = title.into();
+    let title = if focused { format!("{title} *") } else { title };
+    Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_type(if focused {
+            BorderType::Double
+        } else {
+            BorderType::Plain
+        })
+        .border_style(if focused {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        })
 }
 
 async fn execute_action(
@@ -1060,41 +1078,28 @@ async fn execute_action(
             manager.leave(&c).await?;
             Ok(("Left channel / withdrew own requests.".into(), None))
         }
-        Action::Invite(c, p) => Ok((
-            "Invitation · share only with the intended recipient".into(),
-            Some(
-                manager
-                    .invitation(&c, p.as_ref().map(|v| v.to_string()))
-                    .await?,
-            ),
+        Action::Invite(c) => Ok((
+            "One-use invitation · expires in 24 hours".into(),
+            Some(manager.invitation(&c).await?),
         )),
-        Action::Join(text, psk) => {
-            let result = manager
-                .join(text.to_string(), psk.as_ref().map(|p| p.to_string()))
-                .await?;
+        Action::Join(text) => {
+            let result = manager.join(text.to_string()).await?;
             Ok((
                 format!(
                     "{}: {}",
                     if result.request.is_some() {
-                        "Waiting for approval"
+                        "Waiting for approval · show this verification code"
                     } else {
                         "Joined"
                     },
                     safe(&result.name)
                 ),
-                None,
+                (!result.verification.is_empty()).then(|| Zeroizing::new(result.verification)),
             ))
         }
-        Action::Create(name, psk) => {
-            let invite = manager.create(name, psk.to_string()).await?;
-            Ok((
-                "Channel created · save this invitation".into(),
-                Some(invite),
-            ))
-        }
-        Action::Rotate(c) => Ok((
-            "New PSK · save before closing".into(),
-            Some(manager.rotate(&c).await?),
+        Action::Create(name) => Ok((
+            "Channel created · one-use invitation · expires in 24 hours".into(),
+            Some(manager.create(name).await?),
         )),
         _ => bail!("unsupported online action"),
     }
@@ -1102,7 +1107,14 @@ async fn execute_action(
 fn export_secret(text: &str, path: &std::path::Path, overwrite: bool) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     if overwrite {
-        crate::storage::atomic_write(path, text.as_bytes())?;
+        crate::storage::atomic_write(
+            path,
+            &if path.extension().is_some_and(|e| e == "png") {
+                hibiki_lib::qr::png(text)?
+            } else {
+                text.as_bytes().to_vec()
+            },
+        )?;
     } else {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
@@ -1110,7 +1122,11 @@ fn export_secret(text: &str, path: &std::path::Path, overwrite: bool) -> Result<
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)?;
-        file.write_all(text.as_bytes())?;
+        file.write_all(&if path.extension().is_some_and(|e| e == "png") {
+            hibiki_lib::qr::png(text)?
+        } else {
+            text.as_bytes().to_vec()
+        })?;
         file.sync_all()?;
     }
     Ok(())
@@ -1296,7 +1312,7 @@ pub async fn run(explicit: Option<PathBuf>) -> Result<()> {
                 _=tokio::signal::ctrl_c()=>break,
                 update=output.recv()=>match update {
                     Some(Update::Snapshot(snapshot))=>ui.apply_snapshot(*snapshot),
-                    Some(Update::Done(message,secret))=>{ui.busy=false;ui.message=message.clone();if let Some(text)=secret{ui.modal=Some(Modal::Secret{title:message,text,scroll:0});}else if message.contains('\n'){ui.modal=Some(Modal::Result{text:message,scroll:0});}},
+                    Some(Update::Done(message,secret))=>{ui.busy=false;ui.message=message.clone();if let Some(text)=secret{ui.modal=Some(Modal::Secret{title:message,text,scroll:0,qr:false});}else if message.contains('\n'){ui.modal=Some(Modal::Result{text:message,scroll:0});}},
                     Some(Update::Error(message))=>{ui.busy=false;ui.message=message.clone();ui.modal=Some(Modal::Result{text:message,scroll:0});},
                     Some(Update::Offline(message))=>{ui.message=message;if let Some(s)=&mut ui.snapshot{s.relay_connected=false;}},
                     None=>bail!("management worker stopped"),
@@ -1353,6 +1369,7 @@ mod tests {
                 devices: vec![device.clone()],
                 pending: vec![PendingRow {
                     id: id.into(),
+                    verification: "hibiki-verify-v1:fixture".into(),
                     channel: "channel".into(),
                     channel_name: "test".into(),
                     device: device.clone(),

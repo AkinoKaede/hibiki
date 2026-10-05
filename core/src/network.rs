@@ -110,7 +110,7 @@ impl Connection {
         let capabilities =
             wire::negotiate_capabilities(&client_capabilities, &server_capabilities)?;
         let signature = identity.sign(
-            "server-auth/v2",
+            "server-auth/v3",
             &wire::authentication_body(
                 &version,
                 &nonce,
@@ -267,7 +267,9 @@ mod tests {
 
     #[tokio::test]
     async fn incompatible_hibiki_versions_are_rejected_before_authentication() {
-        for version in ["hibiki/0", "hibiki/1", "hibiki/3", "Hibiki/1", "1"] {
+        for version in [
+            "hibiki/0", "hibiki/1", "hibiki/2", "hibiki/4", "Hibiki/1", "1",
+        ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let url = format!("ws://{}{WS_PATH}", listener.local_addr().unwrap());
             let peer = tokio::spawn(async move {
@@ -328,7 +330,7 @@ mod tests {
             assert!(capabilities.is_empty());
             hibiki_lib::identity::verify(
                 &device.signing_key,
-                "server-auth/v2",
+                "server-auth/v3",
                 &wire::authentication_body(VERSION, "nonce", &device.id(), &offered, &capabilities)
                     .unwrap(),
                 &signature,

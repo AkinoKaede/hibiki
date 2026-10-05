@@ -1,6 +1,9 @@
 //! TEST ONLY: a line-oriented bridge for the isolated APDU emulator in tests/mobile.py.
 //! Never connect this diagnostic harness to real cards or production channels.
-use hibiki_mobile::{MobileClient, NativeEvent, check_relay, create_identity};
+use hibiki_mobile::{
+    CardReadCancellation, MobileClient, NativeEvent, PinPrompt, PromptKind, check_relay,
+    create_identity,
+};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -75,22 +78,11 @@ async fn main() -> anyhow::Result<()> {
 async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
     let text = |name: &str| v[name].as_str().unwrap_or_default().to_string();
     match text("action").as_str() {
-        "select_nfc" => {
-            client.select_nfc_card(v["serial"].as_str().map(str::to_owned))?;
-            emit(json!({"kind":"nfc-selected", "serial":client.selected_nfc_card()}));
-        }
         "nfc_capability" => {
             client.set_nfc_available(v["available"].as_bool().unwrap_or(false));
             emit(json!({"kind":"nfc-capability"}));
         }
-        "update_card" => {
-            client.update_card(text("serial"), "Fixture".into()).await?;
-            emit(json!({"kind":"card-updated"}));
-        }
-        "remove_card" => {
-            client.remove_card(text("serial")).await?;
-            emit(json!({"kind":"card-removed"}));
-        }
+
         "ping" => {
             let report = client
                 .ping_device(
@@ -126,7 +118,7 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
         "create" => {
             let result = client.create_channel(text("name")).await?;
             emit(
-                json!({"kind":"created","channel":result.channel,"invite":result.invite,"psk":result.psk}),
+                json!({"kind":"created","channel":result.channel,"invite":result.invite,"expires_at":result.expires_at}),
             );
         }
         "pending" => {
@@ -139,10 +131,6 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
             client.approve(text("channel"), text("request")).await?;
             emit(json!({"kind":"approved"}));
         }
-        "rotate" => {
-            let psk = client.rotate_psk(text("channel")).await?;
-            emit(json!({"kind":"rotated","psk":psk}));
-        }
         "revoke" => {
             client.revoke(text("channel"), text("device")).await?;
             emit(json!({"kind":"revoked"}));
@@ -151,19 +139,61 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
             client.leave(text("channel")).await?;
             emit(json!({"kind":"left"}));
         }
-        "join" => {
-            let joined = client.join(text("invite"), text("psk")).await?;
-            emit(json!({"kind":"joined","request":joined.request,"channel":joined.channel}));
+        "invite" => {
+            let value = client.invitation(text("channel")).await?;
+            emit(json!({"kind":"invitation","invite":value.invite,"expires_at":value.expires_at}));
         }
-        "register" => {
-            let card = client
-                .register_card(v["name"].as_str().unwrap_or("Test key").into())
+        "approve_verification" => {
+            let cancellation = hibiki_mobile::PairingCancellation::new();
+            if v["cancel"].as_bool().unwrap_or(false) {
+                cancellation.cancel();
+            }
+            client
+                .approve_verification(text("channel"), text("request"), text("code"), cancellation)
                 .await?;
+            emit(json!({"kind":"approved"}));
+        }
+        "join" => {
+            let joined = client.join(text("invite")).await?;
+            emit(
+                json!({"kind":"joined","request":joined.request,"channel":joined.channel,"verification":joined.verification}),
+            );
+        }
+        "record_nfc" => {
+            let card = client.record_nfc_card(CardReadCancellation::new()).await?;
             client.usb_present(v["present"].as_bool().unwrap_or(false));
             client.set_services(true, true);
-            emit(
-                json!({"kind":"registered","serial":card.serial,"keys":card.keys.len(),"name":client.registered_cards().iter().find(|c|c.card.serial == card.serial).map(|c|c.name.clone())}),
-            );
+            emit(json!({"kind":"recorded","serial":card.serial,"keys":card.keys.len()}));
+        }
+        "clear_nfc" => {
+            client.clear_nfc_card();
+            emit(json!({"kind":"nfc-cleared"}));
+        }
+        "continue_insertion" => {
+            let prompt = serde_json::from_value::<serde_json::Value>(v["prompt"].clone())?;
+            let p = PinPrompt {
+                token: prompt["token"].as_str().unwrap_or_default().into(),
+                session: String::new(),
+                request: 0,
+                channel: String::new(),
+                device_name: String::new(),
+                device_id: String::new(),
+                kind: PromptKind::Confirm,
+                title: String::new(),
+                description: prompt["description"].as_str().unwrap_or_default().into(),
+                label: String::new(),
+                error: String::new(),
+                repeat: String::new(),
+                repeat_error: String::new(),
+                ok: String::new(),
+                cancel: String::new(),
+                not_ok: String::new(),
+                timeout_seconds: 120,
+            };
+            client
+                .continue_card_insertion(p, CardReadCancellation::new())
+                .await?;
+            emit(json!({"kind":"insertion-continued"}));
         }
         "reply" => {
             let _ = client.respond(

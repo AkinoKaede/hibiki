@@ -181,21 +181,7 @@ fn psk_rotation_invalidates_pending_but_preserves_members() {
     p.events.push(event);
     assert!(p.verify().is_err());
 }
-#[test]
-fn invite_is_versioned_and_root_bound() {
-    let (_, proof) = root();
-    let invite = Invite {
-        version: 1,
-        server: "wss://relay.example/hibiki".into(),
-        checkpoint: proof.verify().unwrap().checkpoint(),
-        genesis: proof.genesis.clone(),
-    };
-    let encoded = invite.export().unwrap();
-    let decoded = Invite::import(&encoded).unwrap();
-    assert_eq!(decoded.genesis, proof.genesis);
-    assert!(!encoded.contains("verifier"));
-    assert!(Invite::import("hibiki-v2:abcd").is_err());
-}
+
 fn transports(channel: &str) -> (Transport, Transport) {
     let a = Identity::generate("A".into()).unwrap();
     let b = Identity::generate("B".into()).unwrap();
@@ -284,43 +270,6 @@ fn xdg_defaults_overrides_and_relative_values() {
     );
     assert!(paths.channel_dir("../../oops").is_err());
 }
-#[test]
-fn psk_hash_is_salted_and_checks_secret() {
-    let secret = make_psk();
-    let a = hash_psk(&secret).unwrap();
-    let b = hash_psk(&secret).unwrap();
-    assert_ne!(a, b);
-    assert!(a.starts_with("$argon2id$v=19$m=19456,t=2,p=1$"));
-    assert!(check_psk(&secret, &a));
-    assert!(!check_psk("incorrect", &a));
-}
-
-#[test]
-fn initialization_invitation_is_distinct_and_founder_signed() {
-    use hibiki_lib::{channel::*, identity::Identity, random_id};
-    let identity = Identity::generate("founder".into()).unwrap();
-    let invite = EmptyChannelInvite {
-        version: 1,
-        server: "wss://relay.example/hibiki".into(),
-        id: random_id(),
-        name: "reserved".into(),
-        psk_commitment: [4; 32],
-    };
-    let text = invite.export().unwrap();
-    assert_eq!(EmptyChannelInvite::import(&text).unwrap(), invite);
-    assert!(Invite::import(&text).is_err());
-    let genesis = invite.founder_genesis(&identity).unwrap();
-    assert_eq!(genesis.body.id, invite.id);
-    assert_eq!(genesis.body.name, invite.name);
-    assert_eq!(genesis.body.founder, identity.device);
-    genesis.verify().unwrap();
-    let mut changed = genesis;
-    changed.body.name = "substituted".into();
-    assert!(changed.verify().is_err());
-    let mut invalid = invite;
-    invalid.version = 2;
-    assert!(invalid.export().is_err());
-}
 
 #[test]
 fn hibiki_version_is_bound_to_authentication_and_noise() {
@@ -333,10 +282,10 @@ fn hibiki_version_is_bound_to_authentication_and_noise() {
     let b = Identity::generate("b".into()).unwrap();
     let payload =
         hibiki_lib::wire::authentication_body(VERSION, "nonce", &a.device.id(), &[], &[]).unwrap();
-    let signature = a.sign("server-auth/v2", &payload).unwrap();
+    let signature = a.sign("server-auth/v3", &payload).unwrap();
     verify(
         &a.device.signing_key,
-        "server-auth/v2",
+        "server-auth/v3",
         &payload,
         &signature,
     )
@@ -344,7 +293,7 @@ fn hibiki_version_is_bound_to_authentication_and_noise() {
     assert!(
         verify(
             &a.device.signing_key,
-            "server-auth/v2",
+            "server-auth/v3",
             &hibiki_lib::wire::authentication_body(
                 "hibiki/invalid",
                 "nonce",
@@ -448,57 +397,6 @@ fn public_key_words_encode_the_complete_public_key_without_secret_material() {
     assert_ne!(mnemonic.to_entropy(), a.noise_secret());
 }
 
-#[test]
-fn embedded_psk_invites_preserve_identity_and_redact_credentials() {
-    let (_, proof) = root();
-    let invitation = InvitationKind::Member(Invite {
-        version: 1,
-        server: "wss://example.com/hibiki".into(),
-        genesis: proof.genesis.clone(),
-        checkpoint: proof.verify().unwrap().checkpoint(),
-    });
-    let legacy = invitation.export().unwrap();
-    assert!(ParsedInvitation::import(&legacy).unwrap().psk.is_none());
-    let text = invitation_with_psk(invitation.clone(), "secret-123456".into()).unwrap();
-    assert!(text.starts_with("hibiki-psk-v1:"));
-    let parsed = ParsedInvitation::import(&text).unwrap();
-    assert!(!format!("{parsed:?}").contains("secret"));
-    assert_eq!(
-        parsed.psk.as_deref().map(|s| s.as_str()),
-        Some("secret-123456")
-    );
-    assert!(parsed.secret(Some("secret-123456".into())).is_err());
-    assert_eq!(
-        ParsedInvitation::import(&text)
-            .unwrap()
-            .invitation
-            .export()
-            .unwrap(),
-        legacy
-    );
-    for secret in ["short".to_string(), "x".repeat(1025)] {
-        assert!(invitation_with_psk(invitation.clone(), secret).is_err());
-    }
-    for text in [
-        "hibiki-psk-v1:%%%".to_string(),
-        format!("hibiki-psk-v1:{}", "a".repeat(32769)),
-        "hibiki-psk-v1:hibiki-psk-v1:x".into(),
-    ] {
-        assert!(ParsedInvitation::import(&text).is_err());
-    }
-    let initialization = InvitationKind::Initialization(EmptyChannelInvite {
-        version: 1,
-        id: random_id(),
-        server: "wss://example.com/hibiki".into(),
-        name: "Empty".into(),
-        psk_commitment: [0; 32],
-    });
-    let text = invitation_with_psk(initialization, "initial-secret".into()).unwrap();
-    assert!(matches!(
-        ParsedInvitation::import(&text).unwrap().invitation,
-        InvitationKind::Initialization(_)
-    ));
-}
 #[test]
 fn renaming_preserves_keys_and_cannot_change_another_member() {
     let (a, mut proof) = root();

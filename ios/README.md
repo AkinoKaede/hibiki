@@ -169,16 +169,14 @@ actionlint .github/workflows/build.yml
    connections. **Get started** saves only a successfully authenticated server
    URL, including the detected protocol. Each probe has a 15-second limit (up to
    30 seconds for both protocols); failed setup keeps the address editable.
-2. Create a channel, or paste a `hibiki-psk-v1:` invitation containing its PSK.
-   Older `hibiki-v1:` / `hibiki-init-v1:` invitations ask for the separately shared PSK.
-   Sharing an existing channel asks for its PSK again; the app does not save it.
+2. Create a channel, paste a `hibiki-invite-v2:` invitation, scan it with the camera, or choose a QR image from Photos. Each invitation includes an independent one-use key and expires after 24 hours. Review the channel and relay before submitting. Sharing a channel generates a fresh invitation and offers its QR, text and image; no PSK is needed.
 3. For member invitations, compare **all 24 public-key words and the request ID**
    on an existing member before approving. The words are public identity data,
    not a recovery phrase. Pending requests remain until approved or invalidated; they have no time limit.
 4. Configure Pinentry and Scdaemon. Both start enabled. On the
    requesting computer, configure the Hibiki adapters as described in the
    [desktop usage guide](../USAGE.md#4-connect-the-requesting-devices-agent).
-   The app can approve members, share invitations, rotate PSKs, revoke
+   The app can approve members, share one-use invitations and QR images, revoke
    identities, and leave channels.
 
 To switch servers, open **Settings → Connection → Disconnect from server** and
@@ -298,6 +296,7 @@ cargo test --locked --workspace
 cargo build --locked --workspace
 python3 tests/integration.py
 python3 tests/mobile.py
+python3 tests/pairing.py
 python3 tests/mobile_tls.py
 xcodebuild -project ios/Hibiki.xcodeproj -scheme Hibiki \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
@@ -336,14 +335,14 @@ Hardware release checklist (must run on an actual iPhone and YubiKey):
 
 ## Server policy and pending requests
 
-The app uses the Protobuf `hibiki/2` baseline. Server and client application
+The app uses the Protobuf `hibiki/3` baseline. Upgrade the relay and desktop components together when moving from v2; identities, channels and members survive the migration. Server and client application
 versions may differ under the [compatibility contract](../PROTOCOL.md).
 The Channels screen shows Create only when the connected server permits client channel
 creation. Otherwise, obtain an initialization invitation from the administrator.
 
 A joining device can withdraw its pending request from Status or Join channel.
 The pending request ID is saved locally so this remains available after reopening
-the app. Approval, rejection, withdrawal or PSK rotation ends the waiting state.
+the app. Approval, rejection, withdrawal or inviter departure ends the waiting state. Invitation expiry does not expire an already submitted request.
 An active member can reject a request from its verification screen; rejection
 removes only that request and permits a later new application.
 
@@ -388,7 +387,7 @@ RESET/RESTART or a new request session permits another attempt. Desktop insertio
 and PIN dialogs also cancel the whole operation when Cancel is clicked.
 
 When replacing an unpublished Postcard build, upgrade all components to the
-Protobuf `hibiki/2` baseline once. Later same-major releases support separate
+Protobuf `hibiki/3` baseline once. Later same-major releases support separate
 upgrades through capability negotiation.
 
 ### Approval-chain authority
@@ -404,7 +403,7 @@ the waiting period.
 Revocation affects **only the named device by default**. Use
 `hibiki channel revoke NAME DEVICE_ID --subtree` to explicitly remove that device
 and its approval subtree. Subtree revocation is restricted to descendants so it
-cannot accidentally include the caller. Revoked identities cannot rejoin. An
+cannot accidentally include the caller. Revoked identities can rejoin with a valid unused invitation, a fresh request and new approval. An
 ordinary revocation leaves descendants active, and ancestry remains verifiable
 through departed intermediaries. Readmission must not reverse ancestry or create
 a cycle.
@@ -432,3 +431,7 @@ the one-second administration watcher interval. Other members see “Revoked by
 server”. The administrator does not possess members’ signing keys and does not
 rewrite their signed history. Local operations while disconnected remain available;
 server revocation cannot erase another machine’s offline keys or cached history.
+
+## QR verification and approval
+
+The joining device displays a `hibiki-verify-v1:` QR binding its public identity to the exact pending request. In that request on iOS, choose **Scan and Approve**, then use the camera or a Photos image. A matching code approves immediately; another request, device, channel, or invitation QR cannot approve it. The manual 24-word/request-ID path remains available. Camera access is requested only when opening the scanner; Photos uses the system picker and needs no full-library permission. Backgrounding or leaving the scanner stops capture and cancels unsubmitted work. Physical-camera readability still needs device acceptance testing.

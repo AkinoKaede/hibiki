@@ -249,9 +249,8 @@ def main():
             url = 'ws://127.0.0.1:%s/hibiki' % port
             a, keygen = [Device(root, name, url) for name in ('requester', 'keygen')]
             devices = [a, keygen]
-            psk = root/'psk'; psk.write_text('isolated-test-channel-psk'); psk.chmod(0o600)
-            a.cli('channel', 'create', 'mobile-test', '--psk-file', psk)
-            invite = a.cli('channel', 'invite', 'mobile-test', '--psk-file', psk).stdout.decode().strip()
+            a.cli('channel', 'create', 'mobile-test')
+            invite = a.cli('channel', 'invite', 'mobile-test').stdout.decode().strip()
             a.cli('use', 'mobile-test')
             fpr, public, card = make_card(keygen)
             a.gpg('--import', data=public)
@@ -260,7 +259,7 @@ def main():
             mobile.send(action='services', pin=False, card=False); mobile.wait('services')
             while mobile.wait('state')['state'] != 'online':
                 pass
-            mobile.send(action='join', invite=invite, psk='')
+            mobile.send(action='join', invite=invite)
             joined = mobile.wait('joined')
             a.cli('channel', 'approve', 'mobile-test', joined['request'], data=b'y\n')
             mobile.send(action='ping', channel=joined['channel'], device=a.id)
@@ -689,24 +688,31 @@ def main():
             mobile.send(action='create', name='phone-owned')
             created=mobile.wait('created')
             guest=Device(root,'guest',url); devices.append(guest)
-            guest_psk=root/'guest-psk'; guest_psk.write_text(created['psk']); guest_psk.chmod(0o600)
             mobile.send(action='policy'); assert mobile.wait('policy')['allow_creation']
             rejected = guest.cli('channel','join',created['invite'],'--no-wait').stdout.decode().split()[1]
             mobile.send(action='reject', channel=created['channel'], request=rejected); mobile.wait('rejected')
             mobile.send(action='pending', channel=created['channel'])
             assert not mobile.wait('pending')['requests']
-            joined_guest=guest.cli('channel','join',created['invite'],'--no-wait').stdout.decode().split()[1]
+            mobile.send(action='invite', channel=created['channel']); fresh=mobile.wait('invitation')
+            guest_join=guest.cli('channel','join',fresh['invite'],'--no-wait').stdout.decode().splitlines()
+            joined_guest=guest_join[0].split()[1]
+            verification=next(line.split()[1] for line in guest_join if line.startswith('verification '))
             mobile.send(action='pending',channel=created['channel']); pending=mobile.wait('pending')['requests']
             assert len(pending)==1 and pending[0]['id']==joined_guest and len(pending[0]['words'].split())==24
-            mobile.send(action='approve',channel=created['channel'],request=joined_guest); mobile.wait('approved')
+            mobile.send(action='approve_verification',channel=created['channel'],request=joined_guest,code=verification); mobile.wait('approved')
             assert json.loads(guest.cli('channel','list','--json').stdout)['channels'][0]['member'] is True
-            mobile.send(action='rotate',channel=created['channel']); assert mobile.wait('rotated')['psk']!=created['psk']
             mobile.send(action='revoke',channel=created['channel'],device=guest.id); mobile.wait('revoked')
             assert json.loads(guest.cli('channel','list','--json').stdout)['channels'][0]['member'] is False
+            mobile.send(action='invite',channel=created['channel']); reentry=mobile.wait('invitation')
+            new_join=guest.cli('channel','join',reentry['invite'],'--no-wait').stdout.decode().splitlines()
+            new_request=new_join[0].split()[1]
+            new_code=next(line.split()[1] for line in new_join if line.startswith('verification '))
+            mobile.send(action='approve_verification',channel=created['channel'],request=new_request,code=new_code); mobile.wait('approved')
+            assert json.loads(guest.cli('channel','list','--json').stdout)['channels'][0]['member'] is True
             mobile.send(action='leave',channel=created['channel']); mobile.wait('left')
-            a.cli('channel', 'create', 'withdraw-test', '--psk-file', psk)
-            withdrawal_invite = a.cli('channel', 'invite', 'withdraw-test', '--psk-file', psk).stdout.decode().strip()
-            mobile.send(action='join', invite=withdrawal_invite, psk='')
+            a.cli('channel', 'create', 'withdraw-test')
+            withdrawal_invite = a.cli('channel', 'invite', 'withdraw-test').stdout.decode().strip()
+            mobile.send(action='join', invite=withdrawal_invite)
             withdrawal = mobile.wait('joined')
             mobile.send(action='pairing_status', channel=withdrawal['channel'], request=withdrawal['request'])
             assert mobile.wait('pairing_status')['state'] == 'Pending'
@@ -715,7 +721,7 @@ def main():
             assert mobile.wait('pairing_status')['state'] == 'Absent'
             assert withdrawal['request'].encode() not in a.cli('channel', 'pending', 'withdraw-test').stdout
             print('PASS: mobile relay policy, request rejection, withdrawal and pairing status', flush=True)
-            print('PASS: mobile create/invite, pending verification, approval, PSK rotation, revocation and leave', flush=True)
+            print('PASS: mobile create/invite, pending verification, QR verification approval, revocation, readmission and leave', flush=True)
             mobile.send(action='stop'); mobile.wait('stopped')
             print('PASS: losing mobile prompt canceled; background stop cancels requests', flush=True)
         finally:

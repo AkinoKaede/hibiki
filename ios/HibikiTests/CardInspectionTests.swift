@@ -4,53 +4,36 @@ import SwiftUI
 
 @MainActor
 final class CardInspectionTests: XCTestCase {
-    func testCapabilityChangesHideNFCWithoutChangingRegistrations() async throws {
-        var available = false
-        let model = AppModel(nfcCapability: { available })
-        let entry = RegisteredCard(card: card("NFC only", .nfc), name: "NFC key")
-        model.registeredCards = [entry]
-        model.refreshHardwareCapabilities()
-        XCTAssertTrue(model.nfcCards.isEmpty)
-        model.cardInspection.select(.nfc)
-        XCTAssertEqual(model.cardInspection.transport, .usb)
-        available = true
-        model.refreshHardwareCapabilities()
-        XCTAssertEqual(model.nfcCards.count, 1)
-        model.cardInspection.select(.nfc)
-        XCTAssertEqual(model.cardInspection.transport, .nfc)
-        available = false
-        model.refreshHardwareCapabilities()
-        XCTAssertEqual(model.cardInspection.transport, .usb)
-        XCTAssertEqual(model.registeredCards, [entry])
-    }
-
-    func testNFCSelectionIsOptionalExclusiveAndNotPersisted() throws {
-        let suite = "hibiki-nfc-selection-\(UUID().uuidString)"
+    func testRecordIsVolatileAndIndependentOfInspection() async throws {
+        let suite = "hibiki-nfc-record-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
-        var available = true
-        let model = AppModel(defaults: defaults, nfcCapability: { available })
-        let first = RegisteredCard(card: card("one", .nfc), name: "One")
-        let second = RegisteredCard(card: card("two", .nfc), name: "Two")
-        model.registeredCards = [first, second]
-        XCTAssertNil(model.selectedNFCCard)
-        model.selectNFCCard("one")
-        XCTAssertEqual(model.selectedNFCCard, "one")
-        model.selectNFCCard("two")
-        XCTAssertEqual(model.selectedNFCCard, "two")
-        model.selectNFCCard(nil)
-        XCTAssertNil(model.selectedNFCCard)
-        model.selectNFCCard("one")
-        XCTAssertNil(AppModel(defaults: defaults, nfcCapability: { true }).selectedNFCCard)
-        model.registeredCards = [second]
-        XCTAssertNil(model.selectedNFCCard)
-        model.selectNFCCard("two")
-        available = false
-        model.refreshHardwareCapabilities()
-        XCTAssertNil(model.selectedNFCCard)
-        available = true
-        model.refreshHardwareCapabilities()
-        XCTAssertNil(model.selectedNFCCard)
+        let model = AppModel(defaults: defaults, nfcCapability: { true })
+        let recorded = card("recorded", .nfc)
+        model.recordedNFCCard = recorded
+        model.cardInspection.setNFCAvailable(true)
+        model.cardInspection.appear(usbPresent: false, active: true) { _ in self.card("viewed", .nfc) }
+        model.cardInspection.select(.nfc)
+        model.cardInspection.refresh()
+        try await eventually { model.cardInspection.info != nil }
+        XCTAssertEqual(model.recordedNFCCard, recorded)
+        model.clearNFCRecord()
+        XCTAssertNil(model.recordedNFCCard)
+        XCTAssertEqual(model.cardInspection.info?.serial, "viewed")
+        model.recordedNFCCard = recorded
+        model.sceneChanged(.inactive)
+        XCTAssertEqual(model.recordedNFCCard, recorded)
+        model.sceneChanged(.background)
+        model.sceneChanged(.active)
+        XCTAssertEqual(model.recordedNFCCard, recorded)
+        XCTAssertNil(AppModel(defaults: defaults, nfcCapability: { true }).recordedNFCCard)
+        model.cardInspection.disappear()
+    }
+
+    func testOnlyGnuPGInsertionDescriptionMatches() {
+        XCTAssertEqual(cardInsertionNumber(description: "Please insert the card with serial number:\n\n  0005 00001234\n  "), "0005 00001234")
+        XCTAssertNil(cardInsertionNumber(description: "Confirm deleting this key?"))
+        XCTAssertNil(cardInsertionNumber(description: "Please insert the card with serial number: invalid"))
     }
 
     private func card(_ serial: String, _ transport: CardTransport) -> CardInfo {
@@ -186,22 +169,20 @@ final class CardInspectionTests: XCTestCase {
         let info = CardInfo(serial: "D2760001240103040005000012340000", transport: .usb, keys: [
             CardKey(slot: 1, algorithm: "rsa4096", fingerprint: String(repeating: "A1", count: 20), keygrip: String(repeating: "B2", count: 20), publicKey: Data(), createdAt: 1_700_000_000)
         ])
-        let entry = RegisteredCard(card: info, name: "Daily security key")
-        model.registeredCards = [entry]
+        model.recordedNFCCard = info
         model.device = DeviceInfo(id: "test-device", name: "iPhone", words: "public verification words", online: false, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
         for language in ["en", "zh-Hans"] {
             model.cardInspection.select(.usb)
             try await render(NavigationStack { CardView(model: model) }, name: "USB-\(language)", language: language)
             // Each reader preview owns its lifecycle, including delayed onDisappear callbacks.
             let nfcModel = AppModel(defaults: defaults, nfcCapability: { true })
-            nfcModel.registeredCards = [entry]
+            nfcModel.recordedNFCCard = info
             nfcModel.refreshHardwareCapabilities()
             nfcModel.cardInspection.appear(usbPresent: false, active: true) { _ in info }
             nfcModel.cardInspection.select(.nfc)
             nfcModel.cardInspection.refresh()
             try await eventually { nfcModel.cardInspection.info != nil }
             try await render(NavigationStack { CardView(model: nfcModel) }, name: "NFC-\(language)", language: language)
-            try await render(EditRegisteredCardView(entry: entry, model: model), name: "Edit-\(language)", language: language)
             try await render(NavigationStack { SettingsView(model: model) }, name: "About-\(language)", language: language)
         }
         XCTAssertNotNil(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString"))

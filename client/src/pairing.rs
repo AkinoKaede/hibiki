@@ -5,10 +5,8 @@ use anstream::{
     stream::{AsLockedWrite, RawStream},
 };
 use anyhow::{Context, Result, bail};
-use hibiki_lib::{
-    channel::{JoinRequest, VerifiedChannelState},
-    identity::Device,
-};
+use hibiki_lib::invitation::AdmissionRequest;
+use hibiki_lib::{channel::VerifiedChannelState, identity::Device};
 use std::io::{BufRead, Read, Write};
 
 pub fn show_device(output: &mut (impl RawStream + AsLockedWrite), device: &Device) -> Result<()> {
@@ -44,12 +42,12 @@ fn answer(input: &mut impl BufRead, output: &mut impl Write, prompt: &str) -> Re
 }
 
 pub fn choose_approval(
-    requests: Vec<JoinRequest>,
+    requests: Vec<AdmissionRequest>,
     state: &VerifiedChannelState,
     request_id: Option<&str>,
     input: &mut impl BufRead,
     output: &mut (impl RawStream + AsLockedWrite),
-) -> Result<Option<JoinRequest>> {
+) -> Result<Option<AdmissionRequest>> {
     let mut output = AutoStream::auto(output);
     let output = &mut output;
     let mut candidates = Vec::new();
@@ -123,15 +121,17 @@ mod tests {
     };
     use std::io::Cursor;
 
-    fn fixture() -> (VerifiedChannelState, JoinRequest) {
+    fn fixture() -> (VerifiedChannelState, AdmissionRequest) {
         let founder = Identity::generate("founder".into()).unwrap();
         let applicant = Identity::generate("new device".into()).unwrap();
         let proof = MembershipProof {
-            genesis: ChannelGenesis::create(&founder, "test".into(), "verifier").unwrap(),
+            genesis: ChannelGenesis::without_psk(&founder, hibiki_lib::random_id(), "test".into())
+                .unwrap(),
             events: vec![],
         };
         let state = proof.verify().unwrap();
-        let request = JoinRequest::create(&applicant, &state).unwrap();
+        let request =
+            AdmissionRequest::create(&applicant, &state, hibiki_lib::random_id(), 0).unwrap();
         (state, request)
     }
     #[test]
@@ -172,8 +172,13 @@ mod tests {
     #[test]
     fn interactive_selection_approves_only_the_displayed_request() {
         let (state, first) = fixture();
-        let second =
-            JoinRequest::create(&Identity::generate("second".into()).unwrap(), &state).unwrap();
+        let second = AdmissionRequest::create(
+            &Identity::generate("second".into()).unwrap(),
+            &state,
+            hibiki_lib::random_id(),
+            0,
+        )
+        .unwrap();
         let mut expected = [first.clone(), second.clone()];
         expected.sort_by_key(|r| r.id().unwrap());
         let mut output = Vec::new();

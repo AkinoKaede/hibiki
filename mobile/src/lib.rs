@@ -9,8 +9,8 @@ mod keycodec;
 mod pinentry;
 mod provider;
 mod provider_cards;
-mod registry;
 mod types;
+use hibiki_lib::invitation::OneTimeInvitation;
 pub use types::*;
 
 use anyhow::{Context, Result, bail};
@@ -19,7 +19,7 @@ use hibiki_core::{
     management,
     network::{Connection, Event},
     session::{Hub, announce},
-    storage::{App, Config, atomic_write, private_dir},
+    storage::{App, Config, private_dir},
 };
 use hibiki_lib::{
     channel::*,
@@ -62,6 +62,22 @@ impl PingCancellation {
     }
 }
 
+/// Stops scan approval before any subsequent network step after the scanner closes.
+#[derive(uniffi::Object, Default)]
+pub struct PairingCancellation {
+    stop: CancellationToken,
+}
+#[uniffi::export]
+impl PairingCancellation {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    pub fn cancel(&self) {
+        self.stop.cancel();
+    }
+}
+
 /// A request-scoped handle because Swift task cancellation is not forwarded by UniFFI.
 #[derive(uniffi::Object, Default)]
 pub struct CardReadCancellation {
@@ -76,6 +92,12 @@ impl CardReadCancellation {
     pub fn cancel(&self) {
         self.stop.cancel();
     }
+}
+
+/// Identify supported GnuPG insertion descriptions after Assuan unescaping.
+#[uniffi::export]
+pub fn card_insertion_number(description: String) -> Option<String> {
+    hibiki_lib::card_prompt::insertion_number(&description)
 }
 
 /// Use the same human-readable card number as insertion requests.
@@ -138,7 +160,7 @@ pub struct MobileClient {
     broker: Arc<Broker>,
     provider: Arc<MobileProvider>,
     slots: Arc<Semaphore>,
-    registry: Mutex<registry::Registry>,
+    nfc_record_stop: Mutex<CancellationToken>,
     hub: Mutex<Option<Arc<Hub>>>,
     lifecycle: tokio::sync::Mutex<()>,
     stop: Mutex<CancellationToken>,
@@ -153,15 +175,81 @@ impl MobileClient {
             .filter(|h| !h.connection().closed.is_cancelled())
             .context("relay is offline")
     }
-    fn registry_path(&self) -> PathBuf {
-        self.app.paths.data.join("nfc-cards.bin")
-    }
-    fn save_registry(&self, registry: registry::Registry) -> Result<()> {
-        atomic_write(&self.registry_path(), &encode(&registry)?)?;
-        *self.provider.cards.lock().unwrap() = registry.cards.clone();
-        self.selected_nfc_card();
-        *self.registry.lock().unwrap() = registry;
-        Ok(())
+    async fn read_recorded_card(
+        &self,
+        insertion: Option<(&str, &str)>,
+        cancellation: Arc<CardReadCancellation>,
+    ) -> Result<CardInfo> {
+        let permit = self
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .context("card is in use")?;
+        let stop = cancellation.stop.child_token();
+        let _guard = provider::CancelOnDrop(stop.clone());
+        let lifecycle_stop = self.stop.lock().unwrap().clone();
+        let record_stop = self.nfc_record_stop.lock().unwrap().child_token();
+        let request_stop = if let Some((token, _)) = insertion {
+            self.broker.request_stop(token)?
+        } else {
+            CancellationToken::new()
+        };
+        let broker = self.broker.clone();
+        let read_stop = stop.clone();
+        let usb = insertion.is_some() && self.provider.usb_present.load(Ordering::Acquire);
+        let nfc = self.provider.nfc_available.load(Ordering::Acquire);
+        let expected = insertion.map(|(_, number)| number.to_owned());
+        let mut read = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let info = if usb {
+                match card::inspect(broker.clone(), read_stop.clone(), CardTransport::Usb) {
+                    Ok(info) => Some(info),
+                    Err(error) if error.is::<broker::CardNotPresent>() => None,
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            let info = match info {
+                Some(info) => info,
+                None => {
+                    if !nfc {
+                        bail!("NFC reading is unavailable on this device");
+                    }
+                    card::inspect(broker, read_stop, CardTransport::Nfc)?
+                }
+            };
+            if let Some(expected) = expected
+                && !hibiki_lib::card_prompt::card_number(&info.serial)
+                    .eq_ignore_ascii_case(&expected)
+                && !info.serial.eq_ignore_ascii_case(&expected)
+            {
+                bail!("The security key does not match the requested card.");
+            }
+            Ok(info)
+        });
+        let info = tokio::select! {
+            biased;
+            _ = lifecycle_stop.cancelled() => { stop.cancel(); let _ = read.await; return Err(broker::RequestCancelled.into()); },
+            _ = record_stop.cancelled() => { stop.cancel(); let _ = read.await; return Err(broker::RequestCancelled.into()); },
+            _ = request_stop.cancelled() => { stop.cancel(); let _ = read.await; return Err(broker::RequestCancelled.into()); },
+            result = &mut read => result??,
+        };
+        let _record_guard = self.nfc_record_stop.lock().unwrap();
+        if stop.is_cancelled()
+            || lifecycle_stop.is_cancelled()
+            || request_stop.is_cancelled()
+            || record_stop.is_cancelled()
+        {
+            return Err(broker::RequestCancelled.into());
+        }
+        if matches!(info.transport, CardTransport::Nfc) {
+            *self.provider.nfc_card.lock().unwrap() = Some(info.clone());
+            let _ = self
+                .broker
+                .emit(NativeEvent::CardChanged { card: info.clone() });
+        }
+        Ok(info)
     }
     fn channel_info(&self, proof: MembershipProof, online: &[String]) -> Result<ChannelInfo> {
         let state = proof.verify()?;
@@ -298,16 +386,23 @@ impl MobileClient {
                 config,
                 identity: Arc::new(identity),
             });
-            let registry = registry::Registry::load(&app.paths.data)?;
+            // Retire both historical public-key registries, without decoding them.
+            for name in ["nfc-cards.bin", "cards.bin"] {
+                match std::fs::remove_file(app.paths.data.join(name)) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
             let broker = Broker::new();
-            let provider = MobileProvider::new(broker.clone(), registry.cards.clone());
+            let provider = MobileProvider::new(broker.clone());
             Ok(Arc::new(Self {
                 app,
                 skip_tls_certificate_validation,
                 broker,
+                nfc_record_stop: Mutex::new(CancellationToken::new()),
+                slots: provider.slots.clone(),
                 provider,
-                slots: Arc::new(Semaphore::new(1)),
-                registry: Mutex::new(registry),
                 hub: Mutex::new(None),
                 lifecycle: tokio::sync::Mutex::new(()),
                 stop: Mutex::new(CancellationToken::new()),
@@ -397,7 +492,7 @@ impl MobileClient {
             .nfc_available
             .swap(available, Ordering::AcqRel);
         if !available {
-            *self.provider.selected_nfc.lock().unwrap() = None;
+            self.clear_nfc_card();
         }
         if was_available
             && !available
@@ -452,113 +547,44 @@ impl MobileClient {
         .await;
         result.map_err(Into::into)
     }
-    pub async fn register_card(&self, name: String) -> MobileResult<CardInfo> {
+    /// Read and remember one public NFC snapshot for this process only.
+    pub async fn record_nfc_card(
+        &self,
+        cancellation: Arc<CardReadCancellation>,
+    ) -> MobileResult<CardInfo> {
+        self.read_recorded_card(None, cancellation)
+            .await
+            .map_err(Into::into)
+    }
+    pub fn nfc_card(&self) -> Option<CardInfo> {
+        self.provider.nfc_card.lock().unwrap().clone()
+    }
+    pub fn clear_nfc_card(&self) {
+        let mut stop = self.nfc_record_stop.lock().unwrap();
+        stop.cancel();
+        *stop = CancellationToken::new();
+        *self.provider.nfc_card.lock().unwrap() = None;
+        self.provider.cancel_nfc_sessions();
+    }
+    /// Only a recognized two-button CONFIRM may use the insertion workflow.
+    /// The caller refreshes native USB presence immediately before calling.
+    pub async fn continue_card_insertion(
+        &self,
+        prompt: PinPrompt,
+        cancellation: Arc<CardReadCancellation>,
+    ) -> MobileResult<()> {
         let result = async {
-            if !self.provider.nfc_available.load(Ordering::Acquire) {
-                bail!("NFC reading is unavailable on this device");
+            if !matches!(prompt.kind, PromptKind::Confirm) {
+                bail!("not a card insertion confirmation");
             }
-            let _permit = self
-                .slots
-                .clone()
-                .try_acquire_owned()
-                .context("card is in use")?;
-            let stop = self.stop.lock().unwrap().child_token();
-            let broker = self.broker.clone();
-            let _guard = provider::CancelOnDrop(stop.clone());
-            let (info, detected_name) = tokio::task::spawn_blocking(move || {
-                card::inspect_named(broker, stop, CardTransport::Nfc)
-            })
-            .await??;
-            let name = if name.trim().is_empty() {
-                detected_name
-            } else {
-                name
-            };
-            let mut registry = self.registry.lock().unwrap().clone();
-            registry.upsert(info.clone(), name);
-            self.save_registry(registry)?;
-            let _ = self
-                .broker
-                .emit(NativeEvent::CardChanged { card: info.clone() });
-            if let Ok(hub) = self.connected() {
-                let _ = announce(&hub).await;
-            }
-            Ok(info)
-        }
-        .await;
-        result.map_err(|e: anyhow::Error| e.into())
-    }
-    /// Volatile discovery choice; never written to the card registry or config.
-    pub fn select_nfc_card(&self, serial: Option<String>) -> MobileResult<()> {
-        let cards = self.provider.cards.lock().unwrap();
-        let selected = if let Some(serial) = serial {
-            Some(
-                cards
-                    .iter()
-                    .find(|c| {
-                        self.provider.nfc_available.load(Ordering::Acquire)
-                            && c.card.serial.eq_ignore_ascii_case(&serial)
-                    })
-                    .ok_or_else(|| MobileError::Failed {
-                        message: "NFC card is unavailable".into(),
-                    })?
-                    .card
-                    .serial
-                    .clone(),
-            )
-        } else {
-            None
-        };
-        *self.provider.selected_nfc.lock().unwrap() = selected;
-        Ok(())
-    }
-    pub fn selected_nfc_card(&self) -> Option<String> {
-        let cards = self.provider.cards.lock().unwrap();
-        let mut selected = self.provider.selected_nfc.lock().unwrap();
-        if selected.as_ref().is_some_and(|serial| {
-            !self.provider.nfc_available.load(Ordering::Acquire)
-                || !cards.iter().any(|c| c.card.serial == *serial)
-        }) {
-            *selected = None;
-        }
-        selected.clone()
-    }
-    pub fn registered_cards(&self) -> Vec<RegisteredCard> {
-        self.registry.lock().unwrap().cards.clone()
-    }
-    pub async fn update_card(&self, serial: String, name: String) -> MobileResult<()> {
-        let result: Result<()> = async {
-            let _permit = self
-                .slots
-                .clone()
-                .try_acquire_owned()
-                .context("card is in use")?;
-            let mut registry = self.registry.lock().unwrap().clone();
-            registry.update(&serial, name)?;
-            self.save_registry(registry)?;
-            if let Ok(hub) = self.connected() {
-                let _ = announce(&hub).await;
-            }
-            Ok(())
+            let expected = hibiki_lib::card_prompt::insertion_number(&prompt.description)
+                .context("not a card insertion confirmation")?;
+            self.read_recorded_card(Some((&prompt.token, &expected)), cancellation)
+                .await?;
+            self.broker.respond(&prompt.token, vec![], true)
         }
         .await;
         result.map_err(Into::into)
-    }
-    pub async fn remove_card(&self, serial: String) -> MobileResult<()> {
-        let _permit = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| MobileError::Failed {
-                message: "card is in use".into(),
-            })?;
-        let mut registry = self.registry.lock().unwrap().clone();
-        registry.remove(&serial);
-        self.save_registry(registry).map_err(MobileError::from)?;
-        if let Ok(hub) = self.connected() {
-            let _ = announce(&hub).await;
-        }
-        Ok(())
     }
     pub async fn channels(&self) -> MobileResult<Vec<ChannelInfo>> {
         let result = async {
@@ -566,8 +592,17 @@ impl MobileClient {
             let mut out = Vec::new();
             for proof in self.app.proofs()? {
                 let id = proof.genesis.body.id.clone();
+                let mut denied = false;
                 let current = if let Some(h) = &hub {
-                    h.refresh(&id).await.unwrap_or(proof)
+                    match h.refresh(&id).await {
+                        Ok(proof) => proof,
+                        Err(e) => {
+                            denied = e
+                                .downcast_ref::<hibiki_lib::protocol::WireError>()
+                                .is_some_and(|e| e.code == "access_revoked");
+                            proof
+                        }
+                    }
                 } else {
                     proof
                 };
@@ -596,6 +631,7 @@ impl MobileClient {
                     (vec![], vec![])
                 };
                 let mut info = self.channel_info(self.app.proof(&id).unwrap_or(current), &peers)?;
+                info.active &= !denied;
                 for device in &mut info.members {
                     device.revoked_by_server = revoked.contains(&device.id);
                     if device.revoked_by_server {
@@ -646,147 +682,81 @@ impl MobileClient {
         result.map_err(Into::into)
     }
     pub async fn create_channel(&self, name: String) -> MobileResult<Invitation> {
-        let result = async {
+        let result: Result<Invitation> = async {
             let hub = self.connected()?;
-            let psk = Zeroizing::new(make_psk());
-            let verifier = hash_psk(&psk)?;
-            let genesis = ChannelGenesis::create(&self.app.identity, name, &verifier)?;
-            let expected = genesis.clone();
-            let Reply::Proof(proof) = hub
-                .connection()
-                .request(Control::Create { genesis, verifier })
-                .await?
-            else {
-                bail!("invalid creation response")
-            };
-            if proof.genesis != expected || !proof.events.is_empty() {
-                bail!("server altered genesis");
-            }
-            let proof = self.app.bootstrap(proof, None)?;
-            let state = proof.verify()?;
-            let invite = hibiki_lib::channel::invitation_with_psk(
-                InvitationKind::Member(Invite {
-                    version: 1,
-                    server: self.app.config.server.clone(),
-                    genesis: proof.genesis,
-                    checkpoint: state.checkpoint(),
-                }),
-                psk.to_string(),
-            )?;
+            let value = management::create_channel(&self.app, &hub.connection(), name).await?;
             announce(&hub).await?;
             Ok(Invitation {
-                channel: state.id,
-                invite,
-                psk: String::new(),
+                channel: value.metadata.channel.clone(),
+                invite: value.export()?.to_string(),
+                expires_at: value.metadata.expires_at,
             })
         }
         .await;
-        result.map_err(|e: anyhow::Error| e.into())
+        result.map_err(Into::into)
     }
-    pub async fn invitation(&self, channel: String) -> MobileResult<String> {
-        let result = async {
-            let hub = self.connected()?;
-            let proof = hub.refresh(&channel).await?;
-            let state = proof.verify()?;
-            state.member(&self.app.identity.device.id())?;
-            Ok(Invite {
-                version: 1,
-                server: self.app.config.server.clone(),
-                genesis: proof.genesis,
-                checkpoint: state.checkpoint(),
-            }
-            .export()?)
+    pub async fn invitation(&self, channel: String) -> MobileResult<Invitation> {
+        let result: Result<Invitation> = async {
+            let value =
+                management::invitation(&self.app, &self.connected()?.connection(), &channel)
+                    .await?;
+            Ok(Invitation {
+                channel,
+                invite: value.export()?.to_string(),
+                expires_at: value.metadata.expires_at,
+            })
         }
         .await;
-        result.map_err(|e: anyhow::Error| e.into())
+        result.map_err(Into::into)
     }
-    pub async fn invitation_with_psk(&self, channel: String, psk: String) -> MobileResult<String> {
-        let psk = Zeroizing::new(psk);
-        let text = self.invitation(channel).await?;
-        hibiki_lib::channel::invitation_with_psk(
-            InvitationKind::import(&text).map_err(anyhow::Error::from)?,
-            psk.to_string(),
-        )
-        .map_err(anyhow::Error::from)
-        .map_err(Into::into)
+    pub fn invitation_preview(&self, text: String) -> MobileResult<InvitationPreview> {
+        let value = OneTimeInvitation::import(&text).map_err(anyhow::Error::from)?;
+        if value.metadata.expires_at <= hibiki_lib::now() {
+            return Err(anyhow::anyhow!("invitation expired; obtain a new invitation").into());
+        }
+        if value.metadata.server != self.app.config.server {
+            return Err(anyhow::anyhow!("invitation relay differs from configured relay").into());
+        }
+        Ok(InvitationPreview {
+            server: value.metadata.server.clone(),
+            channel: value.metadata.channel.clone(),
+            name: value.metadata.name.clone(),
+            expires_at: value.metadata.expires_at,
+        })
     }
-
-    pub async fn join(&self, invitation: String, psk: String) -> MobileResult<JoinInfo> {
-        let result = async {
+    pub async fn join(&self, invitation: String) -> MobileResult<JoinInfo> {
+        let result: Result<JoinInfo> = async {
+            let hub = self.connected()?;
             let invitation = Zeroizing::new(invitation);
-            let parsed = ParsedInvitation::import(&invitation)?;
-            let (kind, psk) = parsed.secret((!psk.is_empty()).then_some(psk))?;
-            let psk = psk.context("a channel PSK is required")?;
-            let hub = self.connected()?;
-            if let InvitationKind::Initialization(invite) = &kind {
-                if invite.server != self.app.config.server {
-                    bail!("invitation relay differs from configured relay");
-                }
-                let genesis = invite.founder_genesis(&self.app.identity)?;
-                let existing = hub
-                    .connection()
-                    .request(Control::GetChannel {
-                        channel: invite.id.clone(),
-                    })
-                    .await;
-                let proof = if let Ok(Reply::Proof(proof)) = existing {
-                    proof
-                } else {
-                    let Reply::Proof(proof) = hub
-                        .connection()
-                        .request(Control::Claim {
-                            genesis: genesis.clone(),
-                            psk: psk.to_string(),
-                        })
-                        .await?
-                    else {
-                        bail!("invalid claim response")
-                    };
-                    proof
-                };
-                if proof.genesis != genesis {
-                    bail!("initialization invite already claimed or altered");
-                }
-                proof.verify()?.member(&self.app.identity.device.id())?;
-                self.app.bootstrap(proof, None)?;
+            let result = management::join(&self.app, &hub.connection(), &invitation).await?;
+            if result.request.is_none() {
                 announce(&hub).await?;
-                return Ok(JoinInfo {
-                    channel: invite.id.clone(),
-                    request: String::new(),
-                });
             }
-            let InvitationKind::Member(invite) = kind else {
-                unreachable!()
-            };
-            if invite.server != self.app.config.server {
-                bail!("invitation relay differs from configured relay");
-            }
-            let id = invite.genesis.body.id.clone();
-            let Reply::Proof(proof) = hub
-                .connection()
-                .request(Control::GetChannel {
-                    channel: id.clone(),
-                })
-                .await?
-            else {
-                bail!("invalid channel response")
-            };
-            let state = self.app.bootstrap(proof, Some(&invite))?.verify()?;
-            let request = JoinRequest::create(&self.app.identity, &state)?;
-            let result = JoinInfo {
-                channel: id,
-                request: request.id()?,
-            };
-            hub.connection()
-                .request(Control::Join {
-                    request,
-                    psk: psk.to_string(),
-                })
-                .await?;
-            Ok(result)
+            Ok(JoinInfo {
+                channel: result.channel,
+                request: result.request.unwrap_or_default(),
+                verification: result.verification,
+            })
         }
         .await;
-        result.map_err(|e: anyhow::Error| e.into())
+        result.map_err(Into::into)
+    }
+    pub async fn approve_verification(
+        &self,
+        channel: String,
+        request_id: String,
+        code: String,
+        cancellation: Arc<PairingCancellation>,
+    ) -> MobileResult<()> {
+        let hub = self.connected().map_err(MobileError::from)?;
+        let stop = self.stop.lock().unwrap().clone();
+        let connection = hub.connection();
+        tokio::select! {
+            biased;
+            _ = cancellation.stop.cancelled() => Err(MobileError::Cancelled),
+            _ = stop.cancelled() => Err(MobileError::Cancelled),
+            result = management::approve_verification(&self.app, &connection, &channel, &request_id, &code) => result.map_err(Into::into),
+        }
     }
     pub async fn allows_channel_creation(&self) -> MobileResult<bool> {
         let result: Result<bool> = async {
@@ -929,8 +899,7 @@ impl MobileClient {
                 &self.app,
                 &hub.connection(),
                 &channel,
-                MembershipAction::Admit(request),
-                None,
+                MembershipAction::Accept(request),
             )
             .await
         }
@@ -980,7 +949,6 @@ impl MobileClient {
                 &hub.connection(),
                 &channel,
                 MembershipAction::Leave,
-                None,
             )
             .await?;
             hub.stop_channel(&channel);
@@ -988,25 +956,5 @@ impl MobileClient {
         }
         .await;
         result.map_err(Into::into)
-    }
-    pub async fn rotate_psk(&self, channel: String) -> MobileResult<String> {
-        let result = async {
-            let hub = self.connected()?;
-            let psk = Zeroizing::new(make_psk());
-            let verifier = hash_psk(&psk)?;
-            management::append(
-                &self.app,
-                &hub.connection(),
-                &channel,
-                MembershipAction::ChangePsk {
-                    verifier_commitment: hibiki_lib::digest(verifier.as_bytes()),
-                },
-                Some(verifier),
-            )
-            .await?;
-            Ok(psk.to_string())
-        }
-        .await;
-        result.map_err(|e: anyhow::Error| e.into())
     }
 }

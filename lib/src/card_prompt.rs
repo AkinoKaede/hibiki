@@ -30,6 +30,41 @@ pub fn description(serial: &str, label: &str) -> String {
         label
     )
 }
+/// Match the complete GnuPG insertion prompt, not arbitrary mentions of a key.
+/// SETDESC is already Assuan-unescaped by pinentry. Unknown/localized formats
+/// remain ordinary confirmations rather than unexpectedly opening a reader.
+pub fn insertion_number(description: &str) -> Option<String> {
+    let body = description.strip_prefix("Please insert the card with serial number:")?;
+    let mut lines = body.trim().lines();
+    let number = lines.next()?.trim();
+    let groups: Vec<_> = number.split_ascii_whitespace().collect();
+    let valid = match groups.as_slice() {
+        [manufacturer, serial] => {
+            manufacturer.len() == 4
+                && serial.len() == 8
+                && manufacturer
+                    .bytes()
+                    .chain(serial.bytes())
+                    .all(|b| b.is_ascii_hexdigit())
+        }
+        [a, b, c] => {
+            (1..=2).contains(&a.len())
+                && b.len() == 3
+                && c.len() == 3
+                && a.bytes()
+                    .chain(b.bytes())
+                    .chain(c.bytes())
+                    .all(|b| b.is_ascii_digit())
+        }
+        [serial] => {
+            matches!(serial.len(), 19 | 20 | 32) && serial.bytes().all(|b| b.is_ascii_hexdigit())
+        }
+        _ => false,
+    };
+    // GnuPG optionally includes one card/key label after the number.
+    (valid && lines.count() <= 1).then(|| groups.join(" ").to_ascii_uppercase())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

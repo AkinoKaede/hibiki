@@ -53,7 +53,7 @@ native Pinentry. Relay-only hosts do not need GnuPG.
 5. [Configure the requesting machine's GPG adapters](USAGE.md#4-connect-the-requesting-devices-agent)
    and [sign or decrypt](USAGE.md#sign-and-decrypt).
 
-Relay and clients use the Protobuf `hibiki/2` baseline; application release
+Relay and clients use the Protobuf `hibiki/3` baseline; application release
 versions may differ within its [compatibility contract](PROTOCOL.md). The desktop
 daemon starts local providers immediately, including while the relay is offline;
 remote providers join the race independently. Card access
@@ -73,6 +73,7 @@ cargo build --locked --workspace
 python3 tests/server.py
 python3 tests/integration.py
 python3 tests/mobile.py
+python3 tests/pairing.py
 python3 tests/tui.py
 python3 tests/performance.py
 ```

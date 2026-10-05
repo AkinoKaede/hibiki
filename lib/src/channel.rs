@@ -1,9 +1,8 @@
 use crate::{
-    Error, Result, decode, digest, encode,
+    Error, Result, digest, encode,
     identity::{Device, Identity, verify},
     now, random_id,
 };
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,6 +21,21 @@ pub struct ChannelGenesis {
 }
 
 impl ChannelGenesis {
+    pub fn without_psk(identity: &Identity, id: String, name: String) -> Result<Self> {
+        let body = GenesisBody {
+            version: 2,
+            id,
+            name,
+            founder: identity.device.clone(),
+            psk_commitment: [0; 32],
+        };
+        let value = Self {
+            signature: identity.sign("genesis/v2", &body)?,
+            body,
+        };
+        value.verify()?;
+        Ok(value)
+    }
     pub fn create(identity: &Identity, name: String, verifier: &str) -> Result<Self> {
         Self::for_reserved(identity, random_id(), name, digest(verifier.as_bytes()))
     }
@@ -47,11 +61,25 @@ impl ChannelGenesis {
     }
     pub fn verify(&self) -> Result<()> {
         let b = &self.body;
-        if b.version != 1 || !valid_id(&b.id) || b.name.trim().is_empty() || b.name.len() > 128 {
+        if !matches!(b.version, 1 | 2)
+            || (b.version == 2 && b.psk_commitment != [0; 32])
+            || !valid_id(&b.id)
+            || b.name.trim().is_empty()
+            || b.name.len() > 128
+        {
             return Err(Error::Invalid("channel identity/name".into()));
         }
         b.founder.verify()?;
-        verify(&b.founder.signing_key, "genesis/v1", b, &self.signature)
+        verify(
+            &b.founder.signing_key,
+            if b.version == 1 {
+                "genesis/v1"
+            } else {
+                "genesis/v2"
+            },
+            b,
+            &self.signature,
+        )
     }
     pub fn hash(&self) -> Result<[u8; 32]> {
         Ok(digest(&encode(self)?))
@@ -130,6 +158,9 @@ pub enum MembershipAction {
     RevokeSubtree {
         device_id: String,
     },
+    // Append only: these discriminants preserve every historical signing preimage.
+    EnableInvitations,
+    Accept(crate::invitation::AdmissionRequest),
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventBody {
@@ -161,7 +192,16 @@ impl MembershipEvent {
             issued_at: now(),
         };
         Ok(Self {
-            signature: identity.sign("membership/v1", &body)?,
+            signature: identity.sign(
+                if state.invitations_enabled
+                    || matches!(body.action, MembershipAction::EnableInvitations)
+                {
+                    "membership/v3"
+                } else {
+                    "membership/v1"
+                },
+                &body,
+            )?,
             body,
         })
     }
@@ -188,6 +228,7 @@ pub struct VerifiedChannelState {
     pub genesis_hash: [u8; 32],
     pub sequence: u64,
     pub head: [u8; 32],
+    pub invitations_enabled: bool,
     pub psk_epoch: u64,
     pub psk_commitment: [u8; 32],
     members: BTreeMap<String, Device>,
@@ -197,6 +238,11 @@ pub struct VerifiedChannelState {
     // Keep departed intermediaries so ancestor authority does not disappear.
     approved_by: BTreeMap<String, String>,
     admitted_at: BTreeMap<String, u64>,
+    current_admission: BTreeMap<String, String>,
+    round_parents: BTreeMap<String, String>,
+    removed_at: BTreeMap<String, u64>,
+    checkpoints: Vec<[u8; 32]>,
+    used_invitations: BTreeSet<String>,
 }
 impl VerifiedChannelState {
     pub fn members(&self) -> &BTreeMap<String, Device> {
@@ -210,7 +256,63 @@ impl VerifiedChannelState {
             .get(id)
             .and_then(|parent| self.known.get(parent))
     }
+    pub fn admission_id(&self, device: &str) -> Option<&str> {
+        self.current_admission.get(device).map(String::as_str)
+    }
+    fn seed_admissions(&mut self) {
+        for id in self.known.keys() {
+            self.current_admission.insert(
+                id.clone(),
+                hex::encode(digest(
+                    format!("admission/v3:{}:{id}", hex::encode(self.head)).as_bytes(),
+                )),
+            );
+        }
+        for (child, parent) in &self.approved_by {
+            self.round_parents.insert(
+                self.current_admission[child].clone(),
+                self.current_admission[parent].clone(),
+            );
+        }
+    }
+    pub fn validate_admission(&self, request: &crate::invitation::AdmissionRequest) -> Result<()> {
+        request.verify()?;
+        let r = &request.body;
+        let id = r.device.id();
+        if !self.invitations_enabled
+            || r.channel_id != self.id
+            || r.genesis_hash != self.genesis_hash
+            || self.checkpoints.get(r.checkpoint.sequence as usize) != Some(&r.checkpoint.hash)
+            || r.checkpoint.sequence < *self.removed_at.get(&id).unwrap_or(&0)
+            || r.previous_admission.as_deref() != self.admission_id(&id)
+            || self.admissions.contains(&request.id()?)
+            || self.used_invitations.contains(&r.invitation_id)
+            || self.known.get(&id).is_some_and(|old| {
+                old.signing_key != r.device.signing_key || old.noise_key != r.device.noise_key
+            })
+        {
+            return Err(Error::Invalid("stale, reused or invalid admission".into()));
+        }
+        Ok(())
+    }
     fn descends_from(&self, target: &str, ancestor: &str) -> bool {
+        if self.invitations_enabled {
+            let (Some(mut current), Some(ancestor)) =
+                (self.admission_id(target), self.admission_id(ancestor))
+            else {
+                return false;
+            };
+            for _ in 0..self.round_parents.len() {
+                let Some(parent) = self.round_parents.get(current) else {
+                    return false;
+                };
+                if parent == ancestor {
+                    return true;
+                }
+                current = parent;
+            }
+            return false;
+        }
         let mut current = target;
         for _ in 0..self.approved_by.len() {
             let Some(parent) = self.approved_by.get(current) else {
@@ -287,6 +389,7 @@ impl MembershipProof {
             genesis_hash: gh,
             sequence: 0,
             head: gh,
+            invitations_enabled: g.version == 2,
             psk_epoch: 0,
             psk_commitment: g.psk_commitment,
             members: BTreeMap::from([(g.founder.id(), g.founder.clone())]),
@@ -295,7 +398,15 @@ impl MembershipProof {
             admissions: BTreeSet::new(),
             approved_by: BTreeMap::new(),
             admitted_at: BTreeMap::new(),
+            current_admission: BTreeMap::new(),
+            round_parents: BTreeMap::new(),
+            removed_at: BTreeMap::new(),
+            checkpoints: vec![gh],
+            used_invitations: BTreeSet::new(),
         };
+        if state.invitations_enabled {
+            state.seed_admissions();
+        }
         for event in &self.events {
             let b = &event.body;
             if b.channel_id != state.id
@@ -305,9 +416,55 @@ impl MembershipProof {
                 return Err(Error::Fork);
             }
             let issuer = state.member(&b.issuer_device_id)?;
-            verify(&issuer.signing_key, "membership/v1", b, &event.signature)?;
+            verify(
+                &issuer.signing_key,
+                if state.invitations_enabled
+                    || matches!(b.action, MembershipAction::EnableInvitations)
+                {
+                    "membership/v3"
+                } else {
+                    "membership/v1"
+                },
+                b,
+                &event.signature,
+            )?;
             match &b.action {
+                MembershipAction::EnableInvitations => {
+                    if state.invitations_enabled {
+                        return Err(Error::Invalid("channel already upgraded".into()));
+                    }
+                    state.seed_admissions();
+                    state.invitations_enabled = true;
+                }
+                MembershipAction::Accept(request) => {
+                    state.validate_admission(request)?;
+                    let r = &request.body;
+                    let id = r.device.id();
+                    if id == b.issuer_device_id || b.issued_at < r.created_at {
+                        return Err(Error::Invalid("invalid admission approver or time".into()));
+                    }
+                    let admission = request.id()?;
+                    state.round_parents.insert(
+                        admission.clone(),
+                        state.current_admission[&b.issuer_device_id].clone(),
+                    );
+                    state
+                        .current_admission
+                        .insert(id.clone(), admission.clone());
+                    state.admissions.insert(admission);
+                    state.used_invitations.insert(r.invitation_id.clone());
+                    state
+                        .approved_by
+                        .insert(id.clone(), b.issuer_device_id.clone());
+                    state.admitted_at.insert(id.clone(), b.issued_at);
+                    state.known.insert(id.clone(), r.device.clone());
+                    state.seen.insert(id.clone());
+                    state.members.insert(id, r.device.clone());
+                }
                 MembershipAction::Admit(request) => {
+                    if state.invitations_enabled {
+                        return Err(Error::Unsupported("legacy admission after upgrade".into()));
+                    }
                     request.verify()?;
                     let r = &request.body;
                     if r.device.id() == g.founder.id()
@@ -356,11 +513,15 @@ impl MembershipProof {
                         .remove(&b.issuer_device_id)
                         .ok_or(Error::NotMember)?;
                     state.seen.remove(&b.issuer_device_id);
+                    state
+                        .removed_at
+                        .insert(b.issuer_device_id.clone(), b.sequence);
                 }
                 MembershipAction::Revoke { device_id } => {
                     if !state.can_revoke_at(&b.issuer_device_id, device_id, b.issued_at) {
                         return Err(Error::Invalid("revocation requires a descendant target, or an ancestor target after 30 days of current membership; use Leave to remove yourself".into()));
                     }
+                    state.removed_at.insert(device_id.clone(), b.sequence);
                     if state.members.remove(device_id).is_none() {
                         return Err(Error::NotMember);
                     }
@@ -371,7 +532,8 @@ impl MembershipProof {
                             "subtree revocation requires a descendant target".into(),
                         ));
                     }
-                    // Also permanently bar departed intermediaries from rejoining the removed branch.
+                    // Mark departed intermediaries as removed too. After the upgrade,
+                    // returning devices need a request pinned after this removal.
                     let removed: Vec<_> = state
                         .known
                         .keys()
@@ -380,18 +542,23 @@ impl MembershipProof {
                         .collect();
                     for id in removed {
                         state.members.remove(&id);
+                        state.removed_at.insert(id.clone(), b.sequence);
                         state.seen.insert(id);
                     }
                 }
                 MembershipAction::ChangePsk {
                     verifier_commitment,
                 } => {
+                    if state.invitations_enabled {
+                        return Err(Error::Unsupported("PSK rotation after upgrade".into()));
+                    }
                     state.psk_epoch += 1;
                     state.psk_commitment = *verifier_commitment;
                 }
             }
             state.sequence = b.sequence;
             state.head = event.hash()?;
+            state.checkpoints.push(state.head);
         }
         Ok(state)
     }
@@ -425,224 +592,4 @@ pub struct Invite {
     pub server: String,
     pub genesis: ChannelGenesis,
     pub checkpoint: TrustCheckpoint,
-}
-impl Invite {
-    pub fn export(&self) -> Result<String> {
-        Ok(format!(
-            "hibiki-v1:{}",
-            URL_SAFE_NO_PAD.encode(encode(self)?)
-        ))
-    }
-    pub fn import(text: &str) -> Result<Self> {
-        let raw = text
-            .strip_prefix("hibiki-v1:")
-            .ok_or_else(|| Error::Invalid("invite prefix".into()))?;
-        if raw.len() > 32768 {
-            return Err(Error::Invalid("invite too large".into()));
-        }
-        let bytes = URL_SAFE_NO_PAD
-            .decode(raw)
-            .map_err(|_| Error::Invalid("invite encoding".into()))?;
-        let invite: Self = decode(&bytes)?;
-        if invite.version != 1 {
-            return Err(Error::Unsupported("invite version".into()));
-        }
-        invite.genesis.verify()?;
-        Ok(invite)
-    }
-}
-
-pub fn make_psk() -> String {
-    let mut b = [0; 32];
-    getrandom::fill(&mut b).expect("operating-system random source unavailable");
-    URL_SAFE_NO_PAD.encode(b)
-}
-pub fn hash_psk(psk: &str) -> Result<String> {
-    use argon2::{Argon2, PasswordHasher};
-    if psk.len() < 8 || psk.len() > 1024 {
-        return Err(Error::Invalid("PSK must have 8..1024 bytes".into()));
-    }
-    Argon2::default()
-        .hash_password(psk.as_bytes())
-        .map(|h| h.to_string())
-        .map_err(|e| Error::Crypto(e.to_string()))
-}
-pub fn check_psk(psk: &str, verifier: &str) -> bool {
-    use argon2::{Argon2, PasswordHash, PasswordVerifier};
-    if psk.len() > 1024 {
-        return false;
-    }
-    PasswordHash::new(verifier).is_ok_and(|h| {
-        Argon2::default()
-            .verify_password(psk.as_bytes(), &h)
-            .is_ok()
-    })
-}
-
-/// Public, single-use initialization invitation. No device trust root exists yet.
-/// Only its recipient who creates the exact founder genesis may bootstrap from it.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct EmptyChannelInvite {
-    pub version: u16,
-    pub server: String,
-    pub id: String,
-    pub name: String,
-    pub psk_commitment: [u8; 32],
-}
-impl EmptyChannelInvite {
-    pub fn validate(&self) -> Result<()> {
-        if self.version != 1
-            || !valid_id(&self.id)
-            || self.name.trim().is_empty()
-            || self.name.len() > 128
-        {
-            return Err(Error::Invalid("empty channel invitation".into()));
-        }
-        Ok(())
-    }
-    pub fn export(&self) -> Result<String> {
-        self.validate()?;
-        Ok(format!(
-            "hibiki-init-v1:{}",
-            URL_SAFE_NO_PAD.encode(encode(self)?)
-        ))
-    }
-    pub fn import(text: &str) -> Result<Self> {
-        let raw = text
-            .strip_prefix("hibiki-init-v1:")
-            .ok_or_else(|| Error::Invalid("initialization invitation prefix".into()))?;
-        if raw.len() > 32768 {
-            return Err(Error::Invalid("initialization invitation length".into()));
-        }
-        let bytes = URL_SAFE_NO_PAD
-            .decode(raw)
-            .map_err(|_| Error::Invalid("initialization invitation encoding".into()))?;
-        let invite: Self = decode(&bytes)?;
-        invite.validate()?;
-        Ok(invite)
-    }
-    pub fn founder_genesis(&self, identity: &Identity) -> Result<ChannelGenesis> {
-        self.validate()?;
-        ChannelGenesis::for_reserved(
-            identity,
-            self.id.clone(),
-            self.name.clone(),
-            self.psk_commitment,
-        )
-    }
-}
-
-/// Invitation kind is public; credentials are kept in the separate secret envelope.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub enum InvitationKind {
-    Member(Invite),
-    Initialization(EmptyChannelInvite),
-}
-impl InvitationKind {
-    pub fn import(text: &str) -> Result<Self> {
-        if text.starts_with("hibiki-init-v1:") {
-            Ok(Self::Initialization(EmptyChannelInvite::import(text)?))
-        } else {
-            Ok(Self::Member(Invite::import(text)?))
-        }
-    }
-    pub fn export(&self) -> Result<String> {
-        match self {
-            Self::Member(value) => value.export(),
-            Self::Initialization(value) => value.export(),
-        }
-    }
-    pub fn server(&self) -> &str {
-        match self {
-            Self::Member(v) => &v.server,
-            Self::Initialization(v) => &v.server,
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
-struct CredentialInvitation {
-    version: u16,
-    #[zeroize(skip)]
-    invitation: InvitationKind,
-    psk: String,
-}
-impl std::fmt::Debug for CredentialInvitation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[credential invitation redacted]")
-    }
-}
-
-pub struct ParsedInvitation {
-    pub invitation: InvitationKind,
-    pub psk: Option<zeroize::Zeroizing<String>>,
-}
-impl std::fmt::Debug for ParsedInvitation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("[invitation redacted]")
-    }
-}
-impl ParsedInvitation {
-    pub fn import(text: &str) -> Result<Self> {
-        let text = text.trim();
-        let Some(raw) = text.strip_prefix("hibiki-psk-v1:") else {
-            return Ok(Self {
-                invitation: InvitationKind::import(text)?,
-                psk: None,
-            });
-        };
-        if raw.len() > 32768 {
-            return Err(Error::Invalid("invite too large".into()));
-        }
-        let bytes = zeroize::Zeroizing::new(
-            URL_SAFE_NO_PAD
-                .decode(raw)
-                .map_err(|_| Error::Invalid("invite encoding".into()))?,
-        );
-        let mut value: CredentialInvitation =
-            decode(&bytes).map_err(|_| Error::Invalid("credential invitation encoding".into()))?;
-        if value.version != 1 {
-            return Err(Error::Unsupported("credential invitation version".into()));
-        }
-        validate_invitation_psk(&value.psk)?;
-        // Reuse the original signature/version validation without accepting nesting.
-        InvitationKind::import(&value.invitation.export()?)?;
-        Ok(Self {
-            invitation: value.invitation.clone(),
-            psk: Some(zeroize::Zeroizing::new(std::mem::take(&mut value.psk))),
-        })
-    }
-    pub fn secret(
-        self,
-        external: Option<String>,
-    ) -> Result<(InvitationKind, Option<zeroize::Zeroizing<String>>)> {
-        let external = external.map(zeroize::Zeroizing::new);
-        if self.psk.is_some() && external.is_some() {
-            return Err(Error::Invalid(
-                "invitation already contains a PSK; do not supply another PSK".into(),
-            ));
-        }
-        Ok((self.invitation, self.psk.or(external)))
-    }
-}
-fn validate_invitation_psk(psk: &str) -> Result<()> {
-    if !(8..=1024).contains(&psk.len()) {
-        return Err(Error::Invalid("PSK must have 8..1024 bytes".into()));
-    }
-    Ok(())
-}
-pub fn invitation_with_psk(invitation: InvitationKind, psk: String) -> Result<String> {
-    let value = CredentialInvitation {
-        version: 1,
-        invitation,
-        psk,
-    };
-    validate_invitation_psk(&value.psk)?;
-    InvitationKind::import(&value.invitation.export()?)?;
-    let bytes = crate::encode_secret(&value)?;
-    let raw = URL_SAFE_NO_PAD.encode(&*bytes);
-    if raw.len() > 32768 {
-        return Err(Error::Invalid("invite too large".into()));
-    }
-    Ok(format!("hibiki-psk-v1:{raw}"))
 }
