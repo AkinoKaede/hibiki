@@ -28,11 +28,10 @@ struct RootView: View {
             }
         }
         .tint(.indigo)
-        .sheet(item: Binding(get: { model.currentPrompt }, set: { _ in }), onDismiss: {
-            model.pinSheetDidDismiss()
-        }) { prompt in
+        .sheet(item: Binding(get: { model.currentPrompt }, set: { value in
+            if value == nil, let prompt = model.currentPrompt { model.cancelPrompt(prompt) }
+        })) { prompt in
             PinView(prompt: prompt, model: model).id(prompt.token).interactiveDismissDisabled()
-                .onAppear { model.pinSheetDidAppear() }
         }
         .alert("Unable to Complete", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("OK", role: .cancel) { model.error = nil }
@@ -160,7 +159,6 @@ struct JoinView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var submitting = false
-    @State private var insertionError: String?
     @State private var invite = ""
     @State private var scanning = false
     @State private var preview: InvitationPreview?
@@ -588,7 +586,7 @@ struct SettingsView: View {
             Button("Disconnect", role: .destructive) { Task { await model.disconnectRelay() } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This disconnects from the server and resets local pairing. Registered security keys are kept, but you will need to pair again to reconnect.")
+            Text("This disconnects from the server, resets local pairing, and forgets the current NFC key. You will need to pair again to reconnect.")
         }
     }
 }
@@ -598,11 +596,10 @@ struct PinView: View {
     @Bindable var model: AppModel
     @State private var pin = ""
     @State private var submitting = false
-    @State private var insertionError: String?
     @FocusState private var focused: Bool
     private var cardRequest: Bool { switch prompt.kind { case .cardUsb, .cardNfc: true; default: false } }
     private var insertionConfirmation: Bool {
-        prompt.kind == .confirm && cardInsertionNumber(description: prompt.description) != nil
+        model.nfcAvailable && prompt.kind == .confirm && cardInsertionNumber(description: prompt.description) != nil
     }
     private var asksPin: Bool { if case .pin = prompt.kind { true } else { false } }
     var body: some View {
@@ -643,7 +640,6 @@ struct PinView: View {
                             .font(.caption).foregroundStyle(.secondary)
                             .accessibilityIdentifier("insertionNFCHint")
                     }
-                    if let insertionError { Text(verbatim: insertionError).foregroundStyle(.red) }
                     Button(prompt.ok.isEmpty ? String(localized: "Continue") : PinentryLabel.display(prompt.ok)) { submit() }
                         .disabled(submitting || (insertionConfirmation && model.busy) || (prompt.kind == .cardUsb && !model.usbPresent))
                         .accessibilityIdentifier("submitPIN")
@@ -672,15 +668,13 @@ struct PinView: View {
         submitting = true
         let value = pin
         pin = ""
-        insertionError = nil
         Task {
             defer { submitting = false }
             if insertionConfirmation {
                 do { try await model.continueCardInsertion(prompt) }
                 catch is CancellationError { }
                 catch MobileError.Cancelled { }
-                catch MobileError.Failed(let message) { insertionError = message }
-                catch { insertionError = error.localizedDescription }
+                catch { model.show(error) }
             } else {
                 if cardRequest || asksPin { await model.refreshUSBAvailability() }
                 model.answer(prompt, text: value, accepted: true)

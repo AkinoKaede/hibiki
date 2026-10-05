@@ -1,7 +1,7 @@
 import Foundation
 import Observation
 
-/// Read-only presentation state; never changes registered cards.
+/// Read-only presentation state; never changes the NFC usage record.
 @MainActor @Observable
 final class CardInspection {
     private(set) var transport: CardTransport = .usb

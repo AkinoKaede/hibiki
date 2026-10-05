@@ -81,7 +81,14 @@ async fn prepare(
         .unwrap();
     let preparation = client
         .provider
-        .prepare(client.app.clone(), CardTarget::default(), context)
+        .prepare(
+            client.app.clone(),
+            CardTarget {
+                serial: Some("D2760001240103040000000000010000".into()),
+                key: None,
+            },
+            context,
+        )
         .unwrap();
     (preparation, ep)
 }

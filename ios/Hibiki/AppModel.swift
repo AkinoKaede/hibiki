@@ -11,17 +11,12 @@ final class AppModel {
     @ObservationIgnored private let readNFCCapability: () -> Bool
     var recordedNFCCard: CardInfo?
     @ObservationIgnored private var nfcReadCancellation: CardReadCancellation?
-    @ObservationIgnored private var nfcReadPromptToken: String?
     var connection = "offline"
     var error: String?
     var busy = false
     var prompts: [PinPrompt] = []
     var usbPresent = false
     let cardInspection = CardInspection()
-    private(set) var nfcScannerActive = false
-    @ObservationIgnored private var pinSheetPresented = false
-    @ObservationIgnored private var pinSheetDismissal: CheckedContinuation<Void, Never>?
-    @ObservationIgnored private var nfcConnection: String?
     var foreground = true
     var server: String
     var name: String
@@ -98,24 +93,7 @@ final class AppModel {
         throw NSError(domain: "Hibiki.ServerConnection", code: 1, userInfo: [NSLocalizedDescriptionKey: failures.joined(separator: "\n\n")])
     }
 
-    var currentPrompt: PinPrompt? { nfcScannerActive ? nil : prompts.first }
-    func pinSheetDidAppear() { pinSheetPresented = true }
-    func pinSheetDidDismiss() {
-        pinSheetPresented = false
-        pinSheetDismissal?.resume()
-        pinSheetDismissal = nil
-    }
-    private func presentNFCScanner(connection: String) async {
-        nfcConnection = connection
-        nfcScannerActive = true
-        if pinSheetPresented {
-            await withCheckedContinuation { pinSheetDismissal = $0 }
-        }
-    }
-    private func finishNFCFlow() {
-        // A queued CardClose may still be finishing the native sheet dismissal.
-        if nfcConnection == nil { nfcScannerActive = false }
-    }
+    var currentPrompt: PinPrompt? { prompts.first }
     func refreshHardwareCapabilities() {
         nfcAvailable = readNFCCapability()
         cardInspection.setNFCAvailable(nfcAvailable)
@@ -246,6 +224,33 @@ final class AppModel {
             }
         }
     }
+    #if DEBUG
+    /// Physical-device UI test: a real public NFC read plus a synthetic queued
+    /// confirmation. No relay, saved account, PIN or custom presentation policy.
+    func configureNFCOrderFixture() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("nfc-order-\(UUID().uuidString)")
+        let core = try MobileClient(directory: directory.path, server: "ws://127.0.0.1:1/hibiki", identity: createIdentity(name: "NFC UI Test"), skipTlsCertificateValidation: false)
+        client = core
+        device = try core.device()
+        initialized = true
+        refreshHardwareCapabilities()
+        eventTask = Task { [weak self] in
+            var queued = false
+            while !Task.isCancelled, let event = await core.nextEvent() {
+                guard let self, self.client === core else { return }
+                self.handle(event, core: core)
+                if case .cardOpen(_, _, .nfc) = event, !queued {
+                    queued = true
+                    Task { [weak self] in
+                        try? await Task.sleep(for: .seconds(1))
+                        self?.prompts.append(PinPrompt(token: "nfc-order-confirm", session: "ui-test", request: 1, channel: "UI Test", deviceName: "Test Requester", deviceId: "ui-test", kind: .confirm, title: "NFC Presentation Test", description: "NFC order test confirmation", label: "", error: "", repeat: "", repeatError: "", ok: "Continue", cancel: "Cancel", notOk: "", timeoutSeconds: 120))
+                    }
+                }
+            }
+        }
+    }
+    #endif
+
     func sceneChanged(_ phase: ScenePhase) {
         // NFC and system sheets can make the scene inactive without backgrounding it.
         guard phase != .inactive else { return }
@@ -343,9 +348,9 @@ final class AppModel {
         busy = true
         let cancellation = CardReadCancellation()
         nfcReadCancellation = cancellation
-        defer { busy = false; nfcReadCancellation = nil; finishNFCFlow() }
+        defer { busy = false; nfcReadCancellation = nil }
         do {
-            _ = try await client.recordNfcCard(cancellation: cancellation)
+            _ = try await client.recordNfcCard(expectedNumber: nil, cancellation: cancellation)
             guard foreground, self.client === client else { return }
             recordedNFCCard = client.nfcCard()
         } catch {
@@ -363,8 +368,11 @@ final class AppModel {
         busy = true
         let cancellation = CardReadCancellation()
         nfcReadCancellation = cancellation
-        nfcReadPromptToken = prompt.token
-        defer { busy = false; nfcReadCancellation = nil; nfcReadPromptToken = nil; finishNFCFlow() }
+        defer {
+            busy = false
+            nfcReadCancellation = nil
+            if !client.requestIsPending(token: prompt.token) { prompts.removeAll { $0.token == prompt.token } }
+        }
         await refreshUSBAvailability()
         guard foreground, self.client === client, client.requestIsPending(token: prompt.token) else { throw CancellationError() }
         try await client.continueCardInsertion(prompt: prompt, cancellation: cancellation)
@@ -389,7 +397,6 @@ final class AppModel {
         catch { if client.requestIsPending(token: prompt.token) { show(error) } }
     }
     func cancelPrompt(_ prompt: PinPrompt) {
-        if nfcReadPromptToken == prompt.token { nfcReadCancellation?.cancel() }
         defer { prompts.removeAll { $0.token == prompt.token } }
         guard let client else { return }
         do { try client.cancelRequest(token: prompt.token) }
@@ -404,26 +411,13 @@ final class AppModel {
             guard foreground, core.requestIsPending(token: prompt.token) else { return }
             prompts.append(prompt)
         case .cancelled(let token):
-            if nfcReadPromptToken == token { nfcReadCancellation?.cancel() }
             prompts.removeAll { $0.token == token }
             nativeTasks.removeValue(forKey: token)?.cancel()
             Task { await hardware.cancel(token: token) }
         case .cardChanged: recordedNFCCard = core.nfcCard()
-        case .cardClose(let id):
-            Task {
-                await hardware.close(id: id)
-                if nfcConnection == id {
-                    nfcConnection = nil
-                    if nfcReadCancellation == nil { nfcScannerActive = false }
-                }
-            }
+        case .cardClose(let id): Task { await hardware.close(id: id) }
         case .cardOpen(let token, let id, let transport):
-            native(token: token, core: core) {
-                if transport == .nfc { await self.presentNFCScanner(connection: id) }
-                guard !Task.isCancelled, self.foreground, core.requestIsPending(token: token) else { throw CancellationError() }
-                try await self.hardware.open(id: id, token: token, transport: transport)
-                return Data()
-            }
+            native(token: token, core: core) { try await self.hardware.open(id: id, token: token, transport: transport); return Data() }
         case .cardTransmit(let token, let id, let command):
             native(token: token, core: core) { try await self.hardware.transmit(id: id, token: token, command: command) }
         }

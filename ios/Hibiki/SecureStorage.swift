@@ -29,9 +29,9 @@ struct SecureStorage {
         try removeRelayFiles(in: directory())
     }
     static func removeRelayFiles(in directory: URL) throws {
-        // Card registrations contain local public data and are independent of the relay.
+        // Retired card registries are removed; current NFC information is memory-only.
         // Trust histories and replay records must be reset together with the identity.
-        for path in ["config", "state", "cache", "runtime", "data/channels", "data/operations"] {
+        for path in ["config", "state", "cache", "runtime", "data/channels", "data/operations", "data/cards.bin", "data/nfc-cards.bin"] {
             let url = directory.appendingPathComponent(path)
             if FileManager.default.fileExists(atPath: url.path) {
                 try FileManager.default.removeItem(at: url)

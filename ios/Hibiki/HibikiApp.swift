@@ -9,15 +9,25 @@ struct HibikiApp: App {
             RootView(model: model)
                 .task {
                     #if DEBUG
-                    if CommandLine.arguments.contains("--ui-members-fixture") || CommandLine.arguments.contains("--ui-pin-fixture") { return }
+                    if CommandLine.arguments.contains("--ui-nfc-order-fixture") || CommandLine.arguments.contains("--ui-members-fixture") || CommandLine.arguments.contains("--ui-pin-fixture") { return }
                     #endif
                     await model.restore()
                 }
-                .onChange(of: scenePhase) { _, phase in model.sceneChanged(phase) }
+                .onChange(of: scenePhase) { _, phase in
+                    #if DEBUG
+                    if CommandLine.arguments.contains("--ui-nfc-order-fixture") { return }
+                    #endif
+                    model.sceneChanged(phase)
+                }
         }
     }
     @MainActor private static func initialModel() -> AppModel {
         #if DEBUG
+        if CommandLine.arguments.contains("--ui-nfc-order-fixture") {
+            let model = AppModel(defaults: UserDefaults(suiteName: "hibiki-ui-nfc-order-fixture")!)
+            do { try model.configureNFCOrderFixture() } catch { model.show(error) }
+            return model
+        }
         // UI-only fixture: no client, saved identity, network or service execution.
         if CommandLine.arguments.contains("--ui-pin-fixture") {
             let model = AppModel(defaults: UserDefaults(suiteName: "hibiki-ui-pin-fixture")!, nfcCapability: { CommandLine.arguments.contains("--ui-nfc") })

@@ -149,7 +149,7 @@ class Mobile:
         self.thread.start()
 
     def send(self, **message):
-        if message['action'] in ('usb_presence', 'register'):
+        if message['action'] in ('usb_presence', 'record_nfc'):
             self.usb_present = message.get('present', False)
         with self.lock:
             if self.p.poll() is None:
@@ -182,7 +182,7 @@ class Mobile:
                         threading.Timer(self.card_delay, answer_card).start()
                         continue
                     self.prompts.add(token)
-                    def reply(token=token, prompt_kind=event.get('prompt_kind'), action=self.pin_action):
+                    def reply(token=token, prompt_kind=event.get('prompt_kind'), action=self.pin_action, prompt=event):
                         if action:
                             self.prompts.discard(token)
                             self.send(action=action, token=token)
@@ -196,7 +196,10 @@ class Mobile:
                                 self.send(action='reply', token=token, data='', accepted=False)
                                 return
                         self.prompts.discard(token)
-                        self.send(action='reply', token=token, data=self.password.encode().hex(), accepted=not self.cancel)
+                        if prompt.get('insertion') and not self.cancel:
+                            self.send(action='continue_insertion', prompt=prompt)
+                        else:
+                            self.send(action='reply', token=token, data=self.password.encode().hex(), accepted=not self.cancel)
                     threading.Timer(self.delay, reply).start()
                 elif kind == 'cancelled':
                     self.card_prompts.discard(event['token'])
@@ -272,10 +275,9 @@ def main():
             assert all(v is not None for v in reply['ping']['round_trips_micros'])
             assert not mobile.operation_events
             print('PASS: mobile/desktop Ping in both directions with services disabled', flush=True)
-            mobile.send(action='register', name='', present=True)
-            registered = mobile.wait('registered')
-            assert registered['name'] == 'JANE DOE'
-            assert registered['serial'] == card['serial'] and registered['keys'] == 2
+            mobile.send(action='record_nfc', name='', present=True)
+            recorded = mobile.wait('recorded')
+            assert recorded['serial'] == card['serial'] and recorded['keys'] == 2
             time.sleep(1)
             mobile.card_delay = 10
             previous = mobile.card_confirmations
@@ -310,117 +312,34 @@ def main():
 
             a.kill_agent()
             mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+            # The current NFC snapshot is immediately discoverable and survives reconnects.
+            demand = ('SERIALNO --demand=' + card['serial']).encode()
             with Assuan(a, 'scdaemon') as scd:
                 previous = mobile.card_confirmations
-                for command in (b'SERIALNO', b'SERIALNO --all', b'SERIALNO --demand=ABCD'):
-                    assert scd.command(command)[-1].startswith(b'ERR 112 ')
+                for command in (b'SERIALNO', b'SERIALNO --all', demand):
+                    assert scd.command(command)[-1] == b'OK'
+                assert scd.command(b'SERIALNO --demand=ABCD')[-1].startswith(b'ERR 112 ')
+                assert scd.command(b'RESET')[-1] == b'OK'
+                assert scd.command(b'SERIALNO')[-1] == b'OK'
                 assert mobile.card_confirmations == previous
                 assert scd.command(b'READKEY OPENPGP.1')[-1] == b'OK'
-                demand = ('SERIALNO --demand=' + card['serial']).encode()
-                assert scd.command(demand)[-1] == b'OK'
-                assert mobile.card_confirmations == previous + 1
-                mobile.decline_card = True
-                assert scd.command(demand)[-1].startswith(b'ERR 99 ')
-                previous = mobile.card_confirmations
-                for command in (b'SERIALNO', demand, b'READKEY OPENPGP.1', b'PKSIGN --hash=sha256 OPENPGP.1'):
-                    assert scd.command(command)[-1].startswith(b'ERR 99 ')
-                assert mobile.card_confirmations == previous, 'canceled discovery was resurrected'
-                mobile.decline_card = False
-                for reset in (b'RESET', b'RESTART'):
-                    assert scd.command(reset)[-1] == b'OK'
-                    assert scd.command(demand)[-1] == b'OK'
-            # A real but unrelated USB card cannot satisfy a demand. NFC fallback
-            # must follow the USB probe, while plain discovery reports the USB card.
-            second_serial = 'D2760001240103040005000088880000'
-            mobile.send(action='stop'); mobile.wait('stopped')
-            mobile.send(action='start'); mobile.wait('started')
-            mobile.card.info = dict(card, serial=second_serial)
-            mobile.send(action='register', present=True); mobile.wait('registered')
-            with Assuan(a, 'scdaemon') as scd:
-                previous = mobile.card_confirmations
-                mobile.send(action='select_nfc', serial=card['serial']); mobile.wait('nfc-selected')
-                assert b'S SERIALNO ' + second_serial.encode() in scd.command(b'SERIALNO')
-                assert mobile.card_confirmations == previous
-                mobile.send(action='select_nfc', serial=None); mobile.wait('nfc-selected')
-                first_event = len(mobile.operation_events)
-                assert scd.command(demand)[-1] == b'OK'
-                events = mobile.operation_events[first_event:]
-                assert events.index(('open', 'Usb')) < events.index(('prompt', 'CardNfc')), events
-                assert mobile.card_confirmations == previous + 1
-            mobile.send(action='stop'); mobile.wait('stopped')
-            mobile.send(action='remove_card', serial=second_serial); mobile.wait('card-removed')
-            mobile.send(action='start'); mobile.wait('started')
-            mobile.card.info = card
-            mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
-            with Assuan(a, 'scdaemon') as scd:
-                for selected in (card['serial'], None, card['serial'], None):
-                    mobile.send(action='select_nfc', serial=selected); assert mobile.wait('nfc-selected')['serial'] == selected
-                    previous = mobile.card_confirmations
-                    result = scd.command(b'SERIALNO')
-                    assert result[-1] == b'OK' if selected else result[-1].startswith(b'ERR 112 '), result
-                    assert mobile.card_confirmations == previous, 'selection query prompted'
-            print('PASS: plain SERIALNO reports only USB; demand probes USB before registered NFC consent; cancellation stays terminal until RESET/RESTART', flush=True)
-
-            # Targeted discovery may prompt on the phone. A ready desktop wins
-            # and closes that prompt; an earlier phone cancellation wins globally.
-            a.card(dict(card, present=True, delay=.5))
-            a.services(scdaemon=True); a.restart()
-            for decline in (False, True):
-                mobile.decline_card = decline
-                mobile.card_delay = .05 if decline else 3
-                previous = mobile.card_confirmations
-                with Assuan(a, 'scdaemon') as scd:
-                    result = scd.command(demand)
-                    assert result[-1].startswith(b'ERR 99 ') if decline else result[-1] == b'OK', result
-                    assert mobile.card_confirmations > previous
-                    wait_for(lambda: not mobile.card_prompts)
-                    if decline:
-                        assert scd.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR 99 ')
-            mobile.decline_card = False
-            mobile.card_delay = .05
-            a.services(); a.restart()
-            print('PASS: another device closes pending NFC discovery; phone cancellation prevents other devices from executing', flush=True)
-
-            # With USB absent, public key data remains readable, while private
-            # operations still require NFC consent. Plain SERIALNO reports no card.
-            mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
-            a.kill_agent()
-            mobile.decline_card = False
-            before = len(mobile.card.commands)
-            with Assuan(a, 'scdaemon') as scd:
-                assert scd.command(b'SERIALNO')[-1].startswith(b'ERR 112 ')
-                scd.command(b'SETDATA '+b'01'*32)
-                mobile.decline_card = True
-                started = time.monotonic()
-                result = scd.command(b'PKSIGN --hash=sha256 OPENPGP.1', lambda _: (_ for _ in ()).throw(AssertionError('PIN requested before consent')))
-                assert result[-1].startswith(b'ERR 99 '), result
-                assert time.monotonic() - started < 3, 'rejection waited for the operation timeout'
-                refused_prompts = mobile.card_confirmations
-                assert scd.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR')
-                assert mobile.card_confirmations == refused_prompts, 'a refused operation prompted again'
-                mobile.decline_card = False
-                assert scd.command(b'RESET')[-1] == b'OK'
-                assert scd.command(b'SERIALNO')[-1].startswith(b'ERR 112 ')
-                assert scd.command(b'SETDATA '+b'01'*32)[-1] == b'OK'
-                mobile.decline_card = True
-                assert scd.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR 99 ')
-                assert mobile.card_confirmations > refused_prompts, 'explicit reset could not start new consent'
-            assert len(mobile.card.commands) == before
-            mobile.decline_card = False
-            with Assuan(a, 'scdaemon') as scd:
-                assert scd.command(b'SERIALNO')[-1].startswith(b'ERR 112 ')
                 assert scd.command(b'GENKEY 1')[-1].startswith(b'ERR')
                 assert scd.command(b'APDU 00A40000')[-1].startswith(b'ERR')
                 scd.command(b'SETDATA '+b'01'*32)
                 result = scd.command(b'PKSIGN --hash=sha256 OPENPGP.1', lambda _: [b'D wrong', b'END'])
                 assert result[-1].startswith(b'ERR 87'), result
-            print('PASS: per-operation card consent, prohibited commands, incorrect PIN mapping without retry', flush=True)
+            assert not (root/'mobile'/'data'/'nfc-cards.bin').exists()
+            mobile.send(action='clear_nfc'); mobile.wait('nfc-cleared')
+            with Assuan(a, 'scdaemon') as scd:
+                for command in (b'SERIALNO', demand, b'READKEY OPENPGP.1'):
+                    assert scd.command(command)[-1].startswith(b'ERR'), command
+            print('PASS: volatile NFC is immediately discoverable; clearing removes discovery; no registry file is written', flush=True)
 
             # Connected USB bypasses consent; a disconnected USB-only key asks for insertion.
             a.kill_agent()
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
-            mobile.send(action='register', present=True); mobile.wait('registered')
+            mobile.send(action='record_nfc', present=True); mobile.wait('recorded')
             mobile.decline_card = True
             previous = mobile.card_confirmations
             a.gpg('--local-user', fpr, '--detach-sign', data=b'USB auto response')
@@ -436,26 +355,21 @@ def main():
             mobile.pin_action = None
             a.services(); a.restart()
 
-            # Selected NFC skips consent and checks USB after PIN before scanning NFC.
+            # Recorded NFC skips consent and checks USB after PIN before scanning NFC.
             # Both signing and decryption must collect the PIN before opening NFC.
             a.kill_agent()
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
-            mobile.send(action='register', present=False); mobile.wait('registered')
+            mobile.send(action='clear_nfc'); mobile.wait('nfc-cleared')
+            mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
             mobile.decline_card = False
-            def select_nfc_from_confirmation():
-                mobile.send(action='select_nfc', serial=card['serial'])
-                assert mobile.wait('nfc-selected')['serial'] == card['serial']
-            mobile.before_confirm_reply = select_nfc_from_confirmation
             first_event = len(mobile.operation_events)
-            try:
-                selected = a.gpg('--local-user', fpr, '--detach-sign', data=b'mobile signing').stdout
-                signature.write_bytes(selected)
-                a.gpg('--verify', signature, message)
-            finally:
-                mobile.before_confirm_reply = None
-            assert ('prompt', 'Confirm') in mobile.operation_events[first_event:]
-            print('PASS: selecting NFC in native GnuPG CONFIRM makes the next SERIALNO succeed and completes signing', flush=True)
+            selected = a.gpg('--local-user', fpr, '--detach-sign', data=b'mobile signing').stdout
+            signature.write_bytes(selected)
+            a.gpg('--verify', signature, message)
+            events = mobile.operation_events[first_event:]
+            assert events.index(('prompt', 'Confirm')) < events.index(('open', 'Nfc')) < events.index(('prompt', 'Pin')), events
+            print('PASS: matching native GnuPG CONFIRM acknowledges then reads NFC and completes signing', flush=True)
             for operation in ('sign', 'decrypt'):
                 a.kill_agent()
                 first_event = len(mobile.operation_events)
@@ -525,7 +439,7 @@ def main():
             # No registration is needed for a USB-discovered target, even if
             # the user removes it during PIN entry and then uses NFC.
             mobile.send(action='stop'); mobile.wait('stopped')
-            mobile.send(action='remove_card', serial=card['serial']); mobile.wait('card-removed')
+            mobile.send(action='clear_nfc'); mobile.wait('nfc-cleared')
             mobile.send(action='start'); mobile.wait('started')
             def remove_usb_before_pin_reply():
                 mobile.send(action='usb_presence', present=False)
@@ -550,10 +464,10 @@ def main():
             print('PASS: unregistered USB card removed during PIN entry falls back to NFC for sign/decrypt; remote PIN also works', flush=True)
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
-            mobile.send(action='register'); mobile.wait('registered')
+            mobile.send(action='record_nfc'); mobile.wait('recorded')
             previous = mobile.card_confirmations
             mobile.decline_card = True
-            print('PASS: selected NFC skips consent; PIN precedes USB probe and NFC scan for signing and decryption', flush=True)
+            print('PASS: recorded NFC skips consent; PIN precedes USB probe and NFC scan for signing and decryption', flush=True)
 
             a.kill_agent()
             mobile.send(action='stop'); mobile.wait('stopped')
@@ -607,17 +521,16 @@ def main():
             mobile.card.info = card
             print('PASS: changed physical card rejected before PIN verification', flush=True)
 
-            # Two registrations may contain the same key. Enumerating their
-            # public data must not bind execution to the first card in the list.
+            # Reading a second NFC key replaces the one process-local snapshot.
             a.kill_agent()
             mobile.send(action='stop'); mobile.wait('stopped')
             mobile.send(action='start'); mobile.wait('started')
             second_card = dict(card, serial='D2760001240103040005000088880000')
             mobile.card = Card(second_card)
-            mobile.send(action='register', present=True); mobile.wait('registered')
+            mobile.send(action='record_nfc', present=True); mobile.wait('recorded')
             with Assuan(a, 'scdaemon') as scd:
                 inventory = scd.command(b'GETINFO card_list')
-                assert b'S SERIALNO ' + card['serial'].encode() in inventory, inventory
+                assert b'S SERIALNO ' + card['serial'].encode() not in inventory, inventory
                 assert b'S SERIALNO ' + second_card['serial'].encode() in inventory, inventory
                 assert scd.command(b'SWITCHCARD ' + second_card['serial'].encode())[-1] == b'OK'
                 assert scd.command(b'SETDATA ' + b'01' * 32)[-1] == b'OK'
@@ -635,11 +548,11 @@ def main():
             assert ('open', 'Nfc') not in mobile.operation_events[first_event:]
             a.kill_agent()
             mobile.send(action='stop'); mobile.wait('stopped')
-            mobile.send(action='remove_card', serial=second_card['serial']); mobile.wait('card-removed')
+            mobile.send(action='clear_nfc'); mobile.wait('nfc-cleared')
             mobile.send(action='nfc_capability', available=True); mobile.wait('nfc-capability')
             mobile.card = Card(card)
             mobile.send(action='start'); mobile.wait('started')
-            print('PASS: multiple mobile registrations route by serial; unavailable NFC cards are excluded', flush=True)
+            print('PASS: NFC reread replaces the previous snapshot; unavailable NFC is excluded', flush=True)
 
             for signing, decryption in [('rsa3072', 'rsa3072'), ('rsa4096', 'rsa4096'), ('ed25519', 'cv25519'), ('nistp256', 'nistp256'), ('nistp384', 'nistp384'), ('nistp521', 'nistp521')]:
                 generator = Device(root, signing, url); devices.append(generator)

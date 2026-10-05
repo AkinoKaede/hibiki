@@ -2,6 +2,40 @@ import XCTest
 
 @MainActor
 final class HibikiUITests: XCTestCase {
+    func testPhysicalNFCAndPinentryPresentationOrder() throws {
+        #if targetEnvironment(simulator)
+        throw XCTSkip("System NFC presentation requires an iPhone and a physical key")
+        #else
+        guard ProcessInfo.processInfo.environment["HIBIKI_PHYSICAL_NFC_TEST"] == "1" else {
+            throw XCTSkip("Opt in with TEST_RUNNER_HIBIKI_PHYSICAL_NFC_TEST=1 and a physical key")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-nfc-order-fixture"]
+        app.launch()
+        let record = app.buttons["recordNFCKey"]
+        XCTAssertTrue(record.waitForExistence(timeout: 10))
+        record.tap()
+        // Leave the key away initially so the system scanner is still open.
+        Thread.sleep(forTimeInterval: 4)
+        let during = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        during.name = "System NFC active with queued Pinentry confirmation"
+        during.lifetime = .keepAlways
+        add(during)
+        print("NFC_ORDER_SCREEN: " + app.debugDescription)
+        XCTAssertFalse(app.buttons["submitPIN"].isHittable, "Pinentry is covering the active system NFC scanner")
+        // The operator can now tap a key or cancel the native scan.
+        let visible = NSPredicate(format: "isHittable == true")
+        expectation(for: visible, evaluatedWith: app.buttons["submitPIN"])
+        waitForExpectations(timeout: 60)
+        let after = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+        after.name = "Pinentry confirmation after NFC closes"
+        after.lifetime = .keepAlways
+        add(after)
+        app.buttons["submitPIN"].tap()
+        XCTAssertTrue(app.buttons["submitPIN"].waitForNonExistence(timeout: 5))
+        #endif
+    }
+
     func testJoinToolbarAndAlignedMemberStatuses() {
         let app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online"]
@@ -77,13 +111,13 @@ final class HibikiUITests: XCTestCase {
     }
 
     func testOnlyInsertionConfirmOffersNFCFallback() {
-        for arguments in [["--ui-confirm"], ["--ui-ordinary-confirm"], ["--ui-confirm", "--ui-message"]] {
+        for arguments in [["--ui-nfc", "--ui-confirm"], ["--ui-nfc", "--ui-ordinary-confirm"], ["--ui-nfc", "--ui-confirm", "--ui-message"], ["--ui-confirm"]] {
             let app = XCUIApplication()
-            app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture", "--ui-nfc"] + arguments
+            app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture"] + arguments
             app.launch()
             XCTAssertTrue(app.buttons["submitPIN"].waitForExistence(timeout: 10))
             XCTAssertTrue(app.buttons["submitPIN"].isEnabled)
-            let insertion = arguments == ["--ui-confirm"]
+            let insertion = arguments == ["--ui-nfc", "--ui-confirm"]
             XCTAssertEqual(app.staticTexts["insertionNFCHint"].exists, insertion)
             XCTAssertFalse(app.buttons["recordNFCKey"].isHittable)
             if !insertion {

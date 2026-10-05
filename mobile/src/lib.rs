@@ -177,7 +177,8 @@ impl MobileClient {
     }
     async fn read_recorded_card(
         &self,
-        insertion: Option<(&str, &str)>,
+        expected: Option<String>,
+        confirm_token: Option<&str>,
         cancellation: Arc<CardReadCancellation>,
     ) -> Result<CardInfo> {
         let permit = self
@@ -189,18 +190,19 @@ impl MobileClient {
         let _guard = provider::CancelOnDrop(stop.clone());
         let lifecycle_stop = self.stop.lock().unwrap().clone();
         let record_stop = self.nfc_record_stop.lock().unwrap().child_token();
-        let request_stop = if let Some((token, _)) = insertion {
-            self.broker.request_stop(token)?
-        } else {
-            CancellationToken::new()
-        };
+        if stop.is_cancelled() || lifecycle_stop.is_cancelled() || record_stop.is_cancelled() {
+            return Err(broker::RequestCancelled.into());
+        }
+        // Acquire the reader before acknowledging; following card queries wait for it.
+        // Native prompt completion must not cancel this independent public read.
+        if let Some(token) = confirm_token {
+            self.broker.respond(token, vec![], true)?;
+        }
         let broker = self.broker.clone();
         let read_stop = stop.clone();
-        let usb = insertion.is_some() && self.provider.usb_present.load(Ordering::Acquire);
+        let usb = confirm_token.is_some() && self.provider.usb_present.load(Ordering::Acquire);
         let nfc = self.provider.nfc_available.load(Ordering::Acquire);
-        let expected = insertion.map(|(_, number)| number.to_owned());
         let mut read = tokio::task::spawn_blocking(move || {
-            let _permit = permit;
             let info = if usb {
                 match card::inspect(broker.clone(), read_stop.clone(), CardTransport::Usb) {
                     Ok(info) => Some(info),
@@ -226,21 +228,16 @@ impl MobileClient {
             {
                 bail!("The security key does not match the requested card.");
             }
-            Ok(info)
+            Ok((info, permit))
         });
-        let info = tokio::select! {
+        let (info, _permit) = tokio::select! {
             biased;
             _ = lifecycle_stop.cancelled() => { stop.cancel(); let _ = read.await; return Err(broker::RequestCancelled.into()); },
             _ = record_stop.cancelled() => { stop.cancel(); let _ = read.await; return Err(broker::RequestCancelled.into()); },
-            _ = request_stop.cancelled() => { stop.cancel(); let _ = read.await; return Err(broker::RequestCancelled.into()); },
             result = &mut read => result??,
         };
         let _record_guard = self.nfc_record_stop.lock().unwrap();
-        if stop.is_cancelled()
-            || lifecycle_stop.is_cancelled()
-            || request_stop.is_cancelled()
-            || record_stop.is_cancelled()
-        {
+        if stop.is_cancelled() || lifecycle_stop.is_cancelled() || record_stop.is_cancelled() {
             return Err(broker::RequestCancelled.into());
         }
         if matches!(info.transport, CardTransport::Nfc) {
@@ -485,7 +482,7 @@ impl MobileClient {
     pub fn usb_present(&self, present: bool) {
         self.provider.usb_present.store(present, Ordering::Release);
     }
-    /// Host capability, separate from each key's saved transport configuration.
+    /// Host capability, separate from the process-local NFC snapshot.
     pub fn set_nfc_available(&self, available: bool) {
         let was_available = self
             .provider
@@ -501,7 +498,7 @@ impl MobileClient {
             hub.stop_all();
         }
     }
-    /// Read public information without changing registrations.
+    /// Read public information without changing the process-local NFC record.
     pub async fn inspect_card(
         &self,
         transport: CardTransport,
@@ -550,9 +547,10 @@ impl MobileClient {
     /// Read and remember one public NFC snapshot for this process only.
     pub async fn record_nfc_card(
         &self,
+        expected_number: Option<String>,
         cancellation: Arc<CardReadCancellation>,
     ) -> MobileResult<CardInfo> {
-        self.read_recorded_card(None, cancellation)
+        self.read_recorded_card(expected_number, None, cancellation)
             .await
             .map_err(Into::into)
     }
@@ -579,9 +577,12 @@ impl MobileClient {
             }
             let expected = hibiki_lib::card_prompt::insertion_number(&prompt.description)
                 .context("not a card insertion confirmation")?;
-            self.read_recorded_card(Some((&prompt.token, &expected)), cancellation)
+            if !self.provider.nfc_available.load(Ordering::Acquire) {
+                return self.broker.respond(&prompt.token, vec![], true);
+            }
+            self.read_recorded_card(Some(expected), Some(&prompt.token), cancellation)
                 .await?;
-            self.broker.respond(&prompt.token, vec![], true)
+            Ok(())
         }
         .await;
         result.map_err(Into::into)

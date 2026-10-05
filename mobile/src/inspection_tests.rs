@@ -32,15 +32,15 @@ async fn unavailable_nfc_cannot_open_native_reader_or_register_a_card() {
     let root = tempfile::tempdir().unwrap();
     let core = client(root.path());
     seed(&core);
-    let before = encode(&core.nfc_card()).unwrap();
     core.set_nfc_available(false);
+    let before = encode(&core.nfc_card()).unwrap();
     assert!(
         core.inspect_card(CardTransport::Nfc, CardReadCancellation::new())
             .await
             .is_err()
     );
     assert!(
-        core.record_nfc_card(CardReadCancellation::new())
+        core.record_nfc_card(None, CardReadCancellation::new())
             .await
             .is_err()
     );
@@ -93,8 +93,11 @@ async fn recording_reads_public_data_and_is_not_persisted() {
     let root = tempfile::tempdir().unwrap();
     let core = client(root.path());
     let reader = core.clone();
-    let task =
-        tokio::spawn(async move { reader.record_nfc_card(CardReadCancellation::new()).await });
+    let task = tokio::spawn(async move {
+        reader
+            .record_nfc_card(None, CardReadCancellation::new())
+            .await
+    });
     loop {
         match next(&core).await {
             NativeEvent::CardOpen {
@@ -196,7 +199,7 @@ async fn inspection_cancellation_releases_hardware_and_rejects_late_responses() 
             .is_err()
     );
     assert!(
-        core.record_nfc_card(CardReadCancellation::new())
+        core.record_nfc_card(None, CardReadCancellation::new())
             .await
             .is_err()
     );
@@ -278,5 +281,345 @@ async fn cancellation_during_transmit_and_background_stop_release_the_reader() {
         assert!(matches!(read.await.unwrap(), Err(MobileError::Cancelled)));
         assert_eq!(core.slots.available_permits(), 1);
         assert!(!core.request_is_pending(token));
+    }
+}
+
+fn insertion_prompt(kind: PromptKind, description: &str) -> PinPrompt {
+    PinPrompt {
+        token: String::new(),
+        session: "insertion-test".into(),
+        request: 1,
+        channel: String::new(),
+        device_name: String::new(),
+        device_id: String::new(),
+        kind,
+        title: String::new(),
+        description: description.into(),
+        label: String::new(),
+        error: String::new(),
+        repeat: String::new(),
+        repeat_error: String::new(),
+        ok: String::new(),
+        cancel: String::new(),
+        not_ok: String::new(),
+        timeout_seconds: 30,
+    }
+}
+
+async fn pending_insertion(
+    core: &MobileClient,
+) -> (
+    PinPrompt,
+    tokio::task::JoinHandle<anyhow::Result<zeroize::Zeroizing<Vec<u8>>>>,
+) {
+    let broker = core.broker.clone();
+    let reply = tokio::spawn(async move {
+        broker
+            .request(
+                |token| {
+                    let mut prompt = insertion_prompt(
+                        PromptKind::Confirm,
+                        "Please insert the card with serial number:\n\n  0005 00001234\n  ",
+                    );
+                    prompt.token = token;
+                    NativeEvent::Prompt { prompt }
+                },
+                &CancellationToken::new(),
+                Duration::from_secs(30),
+            )
+            .await
+    });
+    let NativeEvent::Prompt { prompt } = next(core).await else {
+        panic!()
+    };
+    (prompt, reply)
+}
+
+async fn finish_public_read(core: &MobileClient, transport: CardTransport) {
+    loop {
+        match next(core).await {
+            NativeEvent::CardOpen {
+                token,
+                transport: actual,
+                ..
+            } => {
+                assert_eq!(actual, transport);
+                core.respond(token, vec![], true).unwrap();
+            }
+            NativeEvent::CardTransmit { token, command, .. } => {
+                let response = match command[1] {
+                    0xA4 => vec![0x90, 0],
+                    0xCA => application_data(),
+                    _ => panic!("public read must not verify a PIN"),
+                };
+                core.respond(token, response, true).unwrap();
+            }
+            NativeEvent::CardClose { .. } => return,
+            NativeEvent::Cancelled { .. } | NativeEvent::CardChanged { .. } => {}
+            _ => panic!("unexpected prompt while reading"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn insertion_acknowledges_before_scanning_and_uses_usb_first() {
+    for usb in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let core = client(root.path());
+        core.usb_present(usb);
+        let (prompt, reply) = pending_insertion(&core).await;
+        let token = prompt.token.clone();
+        let reader = core.clone();
+        let task = tokio::spawn(async move {
+            reader
+                .continue_card_insertion(prompt, CardReadCancellation::new())
+                .await
+        });
+        // The original CONFIRM is already answered while no native reader has replied.
+        tokio::time::timeout(Duration::from_secs(2), reply)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(!core.request_is_pending(token));
+        finish_public_read(
+            &core,
+            if usb {
+                CardTransport::Usb
+            } else {
+                CardTransport::Nfc
+            },
+        )
+        .await;
+        task.await.unwrap().unwrap();
+        assert_eq!(core.nfc_card().is_some(), !usb);
+        assert_eq!(core.slots.available_permits(), 1);
+    }
+}
+
+#[tokio::test]
+async fn only_insertion_confirmations_can_start_the_insertion_reader() {
+    let root = tempfile::tempdir().unwrap();
+    let core = client(root.path());
+    let description = "Please insert the card with serial number: 0005 00001234";
+    for prompt in [
+        insertion_prompt(PromptKind::Message, description),
+        insertion_prompt(PromptKind::Pin, description),
+        insertion_prompt(PromptKind::Confirm, "Allow access to this key?"),
+    ] {
+        assert!(
+            core.continue_card_insertion(prompt, CardReadCancellation::new())
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), core.next_event())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn rerecord_replaces_only_on_success_and_can_be_canceled_or_cleared() {
+    for outcome in [
+        "success",
+        "wrong-card",
+        "cancel",
+        "clear",
+        "background",
+        "error",
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let core = client(root.path());
+        seed(&core);
+        let cancellation = CardReadCancellation::new();
+        let handle = cancellation.clone();
+        let reader = core.clone();
+        let expected = (outcome == "wrong-card").then(|| "0005 99999999".into());
+        let task = tokio::spawn(async move { reader.record_nfc_card(expected, handle).await });
+        if matches!(outcome, "success" | "wrong-card") {
+            finish_public_read(&core, CardTransport::Nfc).await;
+        } else {
+            let NativeEvent::CardOpen { token, .. } = next(&core).await else {
+                panic!()
+            };
+            match outcome {
+                "cancel" => cancellation.cancel(),
+                "clear" => core.clear_nfc_card(),
+                "background" => core.stop().await,
+                _ => core
+                    .fail_native_request(token, "reader error".into(), false)
+                    .unwrap(),
+            }
+        }
+        assert_eq!(task.await.unwrap().is_ok(), outcome == "success");
+        assert_eq!(
+            core.nfc_card().map(|c| c.serial),
+            match outcome {
+                "clear" => None,
+                "success" => Some("D2760001240103040005000012340000".into()),
+                _ => Some("previous".into()),
+            }
+        );
+        assert_eq!(core.slots.available_permits(), 1);
+    }
+}
+
+#[tokio::test]
+async fn insertion_usb_errors_do_not_fall_back_but_absence_does() {
+    for absent in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let core = client(root.path());
+        seed(&core);
+        core.usb_present(true);
+        let (prompt, reply) = pending_insertion(&core).await;
+        let reader = core.clone();
+        let task = tokio::spawn(async move {
+            reader
+                .continue_card_insertion(prompt, CardReadCancellation::new())
+                .await
+        });
+        reply.await.unwrap().unwrap();
+        let token = loop {
+            if let NativeEvent::CardOpen {
+                token, transport, ..
+            } = next(&core).await
+            {
+                assert_eq!(transport, CardTransport::Usb);
+                break token;
+            }
+        };
+        if absent {
+            core.card_not_present(token).unwrap();
+            // Consume the closed USB probe before servicing NFC.
+            loop {
+                if matches!(next(&core).await, NativeEvent::CardClose { .. }) {
+                    break;
+                }
+            }
+            finish_public_read(&core, CardTransport::Nfc).await;
+            task.await.unwrap().unwrap();
+        } else {
+            core.fail_native_request(token, "USB failed".into(), false)
+                .unwrap();
+            assert!(task.await.unwrap().is_err());
+            assert_eq!(core.nfc_card().unwrap().serial, "previous");
+            while let Ok(Some(event)) =
+                tokio::time::timeout(Duration::from_millis(20), core.next_event()).await
+            {
+                assert!(!matches!(event, NativeEvent::CardOpen { .. }));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn new_pinentry_requests_remain_pending_during_an_independent_nfc_read() {
+    for canceled in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let core = client(root.path());
+        let (prompt, first_reply) = pending_insertion(&core).await;
+        let old_token = prompt.token.clone();
+        let cancellation = CardReadCancellation::new();
+        let handle = cancellation.clone();
+        let reader = core.clone();
+        let read =
+            tokio::spawn(async move { reader.continue_card_insertion(prompt, handle).await });
+        first_reply.await.unwrap().unwrap();
+        let reader_token = loop {
+            if let NativeEvent::CardOpen {
+                token, transport, ..
+            } = next(&core).await
+            {
+                assert_eq!(transport, CardTransport::Nfc);
+                break token;
+            }
+        };
+        let broker = core.broker.clone();
+        let second_reply = tokio::spawn(async move {
+            broker
+                .request(
+                    |token| {
+                        let mut prompt = insertion_prompt(PromptKind::Pin, "Please enter the PIN");
+                        prompt.token = token;
+                        NativeEvent::Prompt { prompt }
+                    },
+                    &CancellationToken::new(),
+                    Duration::from_secs(30),
+                )
+                .await
+        });
+        let second_token = loop {
+            if let NativeEvent::Prompt { prompt } = next(&core).await {
+                break prompt.token;
+            }
+        };
+        assert!(!core.request_is_pending(old_token.clone()));
+        assert!(core.request_is_pending(reader_token.clone()));
+        assert!(core.request_is_pending(second_token.clone()));
+        assert!(!second_reply.is_finished());
+        assert!(core.cancel_request(old_token).is_err());
+        if canceled {
+            cancellation.cancel();
+        } else {
+            core.respond(reader_token, vec![], true).unwrap();
+            finish_public_read(&core, CardTransport::Nfc).await;
+        }
+        assert_eq!(read.await.unwrap().is_ok(), !canceled);
+        assert!(core.request_is_pending(second_token.clone()));
+        assert!(
+            !second_reply.is_finished(),
+            "scanner must not answer queued prompts"
+        );
+        core.respond(second_token, b"123456".to_vec(), true)
+            .unwrap();
+        assert_eq!(&*second_reply.await.unwrap().unwrap(), b"123456");
+    }
+}
+
+#[tokio::test]
+async fn a_wrong_usb_card_does_not_open_nfc_or_replace_the_record() {
+    let root = tempfile::tempdir().unwrap();
+    let core = client(root.path());
+    seed(&core);
+    core.usb_present(true);
+    let (mut prompt, reply) = pending_insertion(&core).await;
+    prompt.description = "Please insert the card with serial number: 0005 99999999".into();
+    let reader = core.clone();
+    let task = tokio::spawn(async move {
+        reader
+            .continue_card_insertion(prompt, CardReadCancellation::new())
+            .await
+    });
+    reply.await.unwrap().unwrap();
+    finish_public_read(&core, CardTransport::Usb).await;
+    assert!(task.await.unwrap().is_err());
+    assert_eq!(core.nfc_card().unwrap().serial, "previous");
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(20), core.next_event()).await
+    {
+        assert!(!matches!(event, NativeEvent::CardOpen { .. }));
+    }
+}
+
+#[tokio::test]
+async fn insertion_on_a_device_without_nfc_is_an_ordinary_confirmation() {
+    let root = tempfile::tempdir().unwrap();
+    let core = client(root.path());
+    core.set_nfc_available(false);
+    core.usb_present(true);
+    let (prompt, reply) = pending_insertion(&core).await;
+    core.continue_card_insertion(prompt, CardReadCancellation::new())
+        .await
+        .unwrap();
+    reply.await.unwrap().unwrap();
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_millis(20), core.next_event()).await
+    {
+        assert!(
+            matches!(event, NativeEvent::Cancelled { .. }),
+            "ordinary confirmation must not open a reader"
+        );
     }
 }

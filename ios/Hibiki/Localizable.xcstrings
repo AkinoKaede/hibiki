@@ -2627,6 +2627,16 @@
           }
         }
       }
+    },
+    "This disconnects from the server, resets local pairing, and forgets the current NFC key. You will need to pair again to reconnect.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "断开服务器连接、重置本地配对并清除当前 NFC 密钥记录。重新连接前需要再次配对。"
+          }
+        }
+      }
     }
   },
   "version": "1.1"

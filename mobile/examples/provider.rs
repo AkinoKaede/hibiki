@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
             let value = match event {
                 NativeEvent::Connection { state } => json!({"kind":"state","state":state}),
                 NativeEvent::Prompt { prompt } => {
-                    json!({"kind":"prompt","token":prompt.token,"request":prompt.request,"device":prompt.device_id,"prompt_kind":format!("{:?}",prompt.kind)})
+                    json!({"kind":"prompt","token":prompt.token,"request":prompt.request,"device":prompt.device_id,"prompt_kind":format!("{:?}",prompt.kind),"description":prompt.description,"insertion":matches!(prompt.kind, PromptKind::Confirm) && hibiki_mobile::card_insertion_number(prompt.description.clone()).is_some()})
                 }
                 NativeEvent::Cancelled { token } => json!({"kind":"cancelled","token":token}),
                 NativeEvent::CardOpen {
@@ -160,7 +160,9 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
             );
         }
         "record_nfc" => {
-            let card = client.record_nfc_card(CardReadCancellation::new()).await?;
+            let card = client
+                .record_nfc_card(None, CardReadCancellation::new())
+                .await?;
             client.usb_present(v["present"].as_bool().unwrap_or(false));
             client.set_services(true, true);
             emit(json!({"kind":"recorded","serial":card.serial,"keys":card.keys.len()}));
@@ -170,7 +172,7 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
             emit(json!({"kind":"nfc-cleared"}));
         }
         "continue_insertion" => {
-            let prompt = serde_json::from_value::<serde_json::Value>(v["prompt"].clone())?;
+            let prompt = &v["prompt"];
             let p = PinPrompt {
                 token: prompt["token"].as_str().unwrap_or_default().into(),
                 session: String::new(),

@@ -23,7 +23,7 @@ use std::{
     },
     time::Duration,
 };
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
@@ -172,12 +172,25 @@ impl Provider for MobileProvider {
                 // A ready card must not overtake an already submitted cancellation.
                 prompt_started |= !usb_present.load(Ordering::Acquire);
                 let probe = async {
+                    if nfc_available.load(Ordering::Acquire)
+                        && let Some(info) = cards
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .filter(|c| matches_target(c, &target))
+                    {
+                        let serial = info.serial.clone();
+                        let mut state = prepared.lock().unwrap();
+                        state.prepared = Some(info);
+                        state.nfc_used = true;
+                        return Ok(Some(serial));
+                    }
                     if usb_present.load(Ordering::Acquire) {
                         let Ok(_permit) = slots.clone().try_acquire_owned() else {
                             tokio::time::sleep(Duration::from_millis(300)).await;
                             return Ok(None);
                         };
-                        match inspect_usb(&broker, &stop).await {
+                        match inspect_usb(&broker, &stop, Some(Arc::new(_permit))).await {
                             Ok(Some(info)) if matches_target(&info, &target) => {
                                 let serial = info.serial.clone();
                                 let mut state = prepared.lock().unwrap();
@@ -264,12 +277,13 @@ impl Provider for MobileProvider {
                         let command_stop = cancel.child_token();
                         let _guard = CancelOnDrop(command_stop.clone());
                         let _permit = if kind == ServiceKind::Scdaemon {
-                            Some(
+                            Some(Arc::new(
                                 slots
                                     .clone()
-                                    .try_acquire_owned()
+                                    .acquire_owned()
+                                    .await
                                     .context("card is in use")?,
-                            )
+                            ))
                         } else {
                             None
                         };
@@ -313,7 +327,9 @@ impl Provider for MobileProvider {
                                             .unwrap_or("sha1")
                                             .to_owned();
                                         let nfc = nfc_available.load(Ordering::Acquire);
+                                        let hardware_permit = _permit.clone();
                                         tokio::task::spawn_blocking(move || {
+                                            let _hardware_permit = hardware_permit;
                                             card::private_operation(
                                                 broker, stop, info, key, signing, hash, data, pin,
                                                 nfc,
@@ -321,9 +337,16 @@ impl Provider for MobileProvider {
                                         })
                                         .await?
                                     } else if cmd == "SERIALNO" {
-                                        let card = nfc_card.lock().unwrap().clone();
+                                        let card = {
+                                            let card = nfc_card.lock().unwrap();
+                                            if card.is_some() {
+                                                prepared.lock().unwrap().nfc_used = true;
+                                            }
+                                            card.clone()
+                                        };
                                         let query = SerialQuery {
                                             card: card.as_ref(),
+                                            permit: _permit.clone(),
                                             broker: &broker,
                                             usb_present: usb_present.load(Ordering::Acquire),
                                             nfc_available: nfc_available.load(Ordering::Acquire),
@@ -355,13 +378,16 @@ impl Provider for MobileProvider {
                                         }
                                         let mut cards: Vec<CardInfo> =
                                             if nfc_available.load(Ordering::Acquire) {
-                                                nfc_card.lock().unwrap().iter().cloned().collect()
+                                                {
+                                                    let card = nfc_card.lock().unwrap();
+                                                    if card.is_some() {
+                                                        prepared.lock().unwrap().nfc_used = true;
+                                                    }
+                                                    card.iter().cloned().collect()
+                                                }
                                             } else {
                                                 vec![]
                                             };
-                                        if !cards.is_empty() {
-                                            prepared.lock().unwrap().nfc_used = true;
-                                        }
                                         let public_card_query = matches!(
                                             cmd,
                                             "LEARN"
@@ -380,7 +406,8 @@ impl Provider for MobileProvider {
                                             let info = if cached.is_some() {
                                                 cached
                                             } else {
-                                                inspect_usb(&broker, &command_stop).await?
+                                                inspect_usb(&broker, &command_stop, _permit.clone())
+                                                    .await?
                                             };
                                             if let Some(info) = info {
                                                 prepared.lock().unwrap().usb = Some(info.clone());
@@ -447,6 +474,7 @@ impl Provider for MobileProvider {
 // NFC discovery uses only this process's explicitly recorded snapshot.
 struct SerialQuery<'a> {
     card: Option<&'a CardInfo>,
+    permit: Option<Arc<OwnedSemaphorePermit>>,
     broker: &'a Arc<Broker>,
     usb_present: bool,
     nfc_available: bool,
@@ -463,7 +491,7 @@ impl SerialQuery<'_> {
             .split_ascii_whitespace()
             .find_map(|a| a.strip_prefix("--demand="));
         if self.usb_present
-            && let Some(info) = inspect_usb(self.broker, stop).await?
+            && let Some(info) = inspect_usb(self.broker, stop, self.permit.clone()).await?
             && serial.is_none_or(|s| s.eq_ignore_ascii_case(&info.serial))
         {
             return Ok(Some(info));
@@ -477,12 +505,20 @@ impl SerialQuery<'_> {
     }
 }
 
-async fn inspect_usb(broker: &Arc<Broker>, stop: &CancellationToken) -> Result<Option<CardInfo>> {
+async fn inspect_usb(
+    broker: &Arc<Broker>,
+    stop: &CancellationToken,
+    permit: Option<Arc<OwnedSemaphorePermit>>,
+) -> Result<Option<CardInfo>> {
     let broker = broker.clone();
     let probe_stop = stop.child_token();
     let _guard = CancelOnDrop(probe_stop.clone());
-    match tokio::task::spawn_blocking(move || card::inspect(broker, probe_stop, CardTransport::Usb))
-        .await?
+    match tokio::task::spawn_blocking(move || {
+        // Cancellation can drop the async future before the blocking APDU reader unwinds.
+        let _permit = permit;
+        card::inspect(broker, probe_stop, CardTransport::Usb)
+    })
+    .await?
     {
         Ok(info) => Ok(Some(info)),
         Err(error) if error.is::<crate::broker::CardNotPresent>() => Ok(None),

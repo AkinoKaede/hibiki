@@ -181,8 +181,8 @@ actionlint .github/workflows/build.yml
 
 To switch servers, open **Settings → Connection → Disconnect from server** and
 confirm. This works offline, stops current requests, clears local pairing and the
-device identity, and returns to setup with an empty address field. Security key registrations and the device
-name are kept; password/card services reset to enabled and the TLS bypass resets to off. Connect
+device identity, forgets the current NFC record, and returns to setup with an empty
+address field. The device name is kept; password/card services reset to enabled and the TLS bypass resets to off. Connect
 to the new server and pair again. Returning to the old server also requires pairing
 with a new device identity. This local disconnect does not delete server-side
 channels or revoke the old membership; remaining members can remove the old device.
@@ -194,40 +194,38 @@ The OpenPGP application must already contain your keys. Import its public OpenPG
 certificate on the requesting computer. The app does not create or import private
 keys, change PINs, reset the key, or expose remote raw APDU commands.
 
-USB cards work without registration. NFC registration stores one named public
-snapshot per card serial; it does not expose connection capability switches.
-Devices without Core NFC hide NFC reading and registration, while preserving
-existing NFC snapshots for later use on capable hardware.
+USB cards work without registration. NFC has one process-local public snapshot:
+use **Record NFC Key** in Status to read and immediately use a key, **Read NFC Key
+Again** to replace it, or **Forget NFC Key** to clear it. Reading never asks for a
+PIN. Failed or canceled reads preserve the previous record. Backgrounding and
+network reconnects retain completed records; a cold launch starts empty. No card
+information or names are persisted. Upgrading deletes the obsolete `cards.bin`
+and `nfc-cards.bin` files without importing them. Device identity and pairing
+storage are independent of these files.
 
-Details show public keys, fingerprints, keygrips, creation dates and OpenPGP
-identity details. Re-registering a serial updates its record. The pencil button
-edits the name only: X discards changes, and the checkmark saves a nonempty name.
-Registrations cannot change during a card session. A one-time migration retains
-old NFC-enabled snapshots in `nfc-cards.bin`, removes USB-only registrations and
-discards the obsolete saved selection. USB identities are only held in memory.
+Security Keys is a read-only information viewer. USB reads on entry/insertion;
+NFC reads only after tapping **Read NFC Information**. Viewing another card does
+not record it for use or change the Status record. Results show public keys,
+fingerprints, keygrips and creation dates; NFC results are snapshots, not proof
+of a continuous connection. Leaving, switching transport or backgrounding cancels
+unfinished inspection. USB removal clears its displayed information.
 
-The reader at the top of Security Keys defaults to **USB**. Entering the page,
-inserting a USB key, or switching back to USB reads its public information once;
-**Refresh USB information** retries on demand. In **NFC** mode, tap **Read NFC
-information** to open the system scanner. NFC results are labeled as snapshots,
-not a persistent connection. Switch back to USB at any time. Leaving the page,
-switching modes or backgrounding cancels an unfinished read. USB removal clears
-its displayed information. Reads never request a PIN or change registrations; a busy card reports contention instead of interrupting
-an operation.
+Ordinary `SERIALNO` checks USB first, then the current NFC snapshot. A targeted
+`SERIALNO --demand=<serial>` requires a matching serial. Neither starts a scanner.
+Public reads use the same hardware lock as card operations; idle card sessions
+do not hold the reader indefinitely.
 
-**USB (including Lightning):** connect one smart card recognized by the system.
-Its public information is read directly, without registration. A matching card
-can prepare an operation without an availability prompt.
-
-**NFC:** use **+** in Security Keys and tap once to register public information.
-No PIN is needed. In Status, optionally select one NFC key to make it discoverable.
-No key is selected by default, and the choice is not saved across app launches.
-The same selection control appears inside Pinentry confirmation sheets; changing
-either control updates the other. Ordinary `SERIALNO` checks USB first, then
-returns the selected NFC card, or no card. A targeted `SERIALNO --demand=<serial>`
-checks USB first and may ask about that registered NFC card when not selected.
-That confirmation is reused for the next matching preparation. Selected NFC cards
-proceed directly to PIN entry without a second card-use confirmation.
+Only a two-button Pinentry `CONFIRM` matching GnuPG's English insertion description
+(`Please insert the card with serial number:` followed by a valid card number
+and optional label) enables insertion scanning. Unknown or translated formats,
+ordinary confirmations, `MESSAGE` and `CONFIRM --one-button` retain ordinary
+Pinentry behavior. Devices without NFC always use ordinary confirmation behavior,
+hide all NFC controls, and show only USB information without a transport picker. Continue refreshes USB presence and acknowledges CONFIRM
+before reading. A matching USB card completes the check; no USB card opens NFC.
+Wrong USB cards and reader errors do not fall back. A matching NFC read updates
+the in-memory record; cancellation, errors and mismatches preserve the old record.
+The read has its own cancellation handle, so completing the old CONFIRM does not
+cancel it. Existing Pinentry queuing and system sheet presentation are unchanged.
 
 For signing or decryption, the chosen iOS provider requests the PIN. After the PIN
 reply arrives (from any input device), it probes USB again regardless of the last
@@ -238,9 +236,9 @@ serial, key slot, keygrip and fingerprint must match before sending the PIN. Kee
 the NFC card near the phone until the operation ends. A wrong NFC card fails.
 Reader errors and cancellation stop the operation; they do not trigger fallback.
 Once PIN verification starts, no interface switching or private-operation retry
-occurs. After changing keys on a registered NFC card, register it again.
+occurs. After changing keys on an NFC card, read it again in Status.
 
-The selected NFC card describes its registered public snapshot, not proof that a physical
+The current NFC record describes a public snapshot, not proof that a physical
 key is currently in range. Live mutable fields such as retry counters are not
 invented from cached data. PIN failures report the card's actual returned status.
 Hibiki does not automatically retry PIN verification or replay private operations.
@@ -322,8 +320,8 @@ Hardware release checklist (must run on an actual iPhone and YubiKey):
 
 - NFC entitlement and permission handling; USB detection and reader contention.
 - Inspect USB information on entry/insertion, cancel an NFC read and switch back
-  to USB, unplug during inspection, and confirm registrations are unchanged.
-- Edit NFC registration names, relaunch to verify persistence, and confirm private
+  to USB, unplug during inspection, and confirm the Status record is unchanged.
+- Record, replace and forget NFC keys; relaunch to verify records are empty, and confirm private
   operations only use enabled connections; reject saving with both switches off.
 - Register, learn public keys, sign/verify, encrypt/decrypt using the installed key
   algorithms over both USB and NFC.
@@ -363,18 +361,12 @@ Verification words share a selectable six-word grouping across device, joining,
 approval and Settings screens. Channels has a top-right + to open Join Channel;
 X returns without withdrawing an existing request, and the checkmark submits.
 
-Leave a security-key registration name blank to use its public OpenPGP cardholder
-name (when present), with a serial-based fallback. This is cardholder data, not a
-PGP user ID fetched from a key server. Card number is `manufacturer serial`, such
-as `0006 20473185`; the complete AID remains visible and is used for matching.
-GnuPG insertion dialogs may format a YubiKey serial as `20 473 185` instead.
-
-Ordinary `SERIALNO` reports actual USB or the selected NFC snapshot without
-prompting. Targeted discovery may ask about an unselected NFC registration.
-Selected or already-confirmed NFC cards skip repeated card-use consent. After PIN
-entry, USB is checked first, then NFC if the target is absent from USB. Physical
-identity is checked before VERIFY, and the verified connection is kept through
-the operation. PIN descriptions show the target card number, not cached counters.
+NFC key names and public information are not saved. Card numbers follow GnuPG's
+format, including YubiKey numbers such as `20 473 185`; the full AID is shown in
+Security Keys. Only matching insertion CONFIRM descriptions trigger a public
+read. After PIN entry, USB is checked first, then NFC if the target is absent
+from USB. Full physical identity is checked before VERIFY and the verified
+connection is retained for the operation.
 
 Pinentry and Scdaemon services default to enabled. Previously saved off settings
 remain off; USB access does not require registering a security key.
@@ -435,3 +427,13 @@ server revocation cannot erase another machine’s offline keys or cached histor
 ## QR verification and approval
 
 The joining device displays a `hibiki-verify-v1:` QR binding its public identity to the exact pending request. In that request on iOS, choose **Scan and Approve**, then use the camera or a Photos image. A matching code approves immediately; another request, device, channel, or invitation QR cannot approve it. The manual 24-word/request-ID path remains available. Camera access is requested only when opening the scanner; Photos uses the system picker and needs no full-library permission. Backgrounding or leaving the scanner stops capture and cancels unsubmitted work. Physical-camera readability still needs device acceptance testing.
+
+### Physical NFC presentation check
+
+The opt-in UI test `testPhysicalNFCAndPinentryPresentationOrder` opens a real NFC
+public-information read and injects a synthetic Pinentry confirmation one second
+later. It uses a temporary client without a relay or saved account. There is no
+custom sheet-priority logic. Run with `TEST_RUNNER_HIBIKI_PHYSICAL_NFC_TEST=1` on
+an NFC-capable iPhone; keep the key away for the first five seconds, then tap it
+or cancel the scanner. Screenshots capture the native scanner and the subsequent
+confirmation. Simulator runs skip this test.

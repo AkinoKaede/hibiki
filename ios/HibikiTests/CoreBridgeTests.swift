@@ -165,11 +165,11 @@ final class CoreBridgeTests: XCTestCase {
         XCTAssertFalse(reopened.initialized)
         XCTAssertNil(reopened.client)
     }
-    func testRelayResetPreservesCardRegistrationsAndRemovesTrustAndReplayState() throws {
+    func testRelayResetRemovesRetiredCardsAndTrustAndReplayState() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let removed = ["config/client.toml", "state/session", "cache/item", "runtime/lock", "data/channels/example/FORKED", "data/channels/example/trust.bin", "data/operations/request"]
-        let retained = ["data/cards.bin"]
+        let removed = ["config/client.toml", "state/session", "cache/item", "runtime/lock", "data/channels/example/FORKED", "data/channels/example/trust.bin", "data/operations/request", "data/cards.bin", "data/nfc-cards.bin"]
+        let retained = ["data/unrelated.bin"]
         for path in removed + retained {
             let url = root.appendingPathComponent(path)
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

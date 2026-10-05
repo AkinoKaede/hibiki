@@ -69,6 +69,33 @@ pub fn insertion_number(description: &str) -> Option<String> {
 mod tests {
     use super::*;
     #[test]
+    fn insertion_prompts_require_the_exact_header_and_a_card_number() {
+        for serial in [
+            "D2760001240103040005000012340000",
+            "D2760001240100000006120808620000",
+            "12345678901234567890",
+        ] {
+            assert_eq!(
+                insertion_number(&description(serial, "Signing key")),
+                Some(card_number(serial))
+            );
+        }
+        assert_eq!(
+            insertion_number("Please insert the card with serial number: 0005 00001234"),
+            Some("0005 00001234".into())
+        );
+        for text in [
+            "Confirm use of this key?",
+            "Please insert the card with serial number:",
+            "Please insert the card with serial number: nope",
+            "Please insert the card with serial number: 0005 00001234 please",
+            "Prefix Please insert the card with serial number: 0005 00001234",
+            "Please insert the card with serial number:\n0005 00001234\nlabel\nother",
+        ] {
+            assert_eq!(insertion_number(text), None, "{text}");
+        }
+    }
+    #[test]
     fn native_card_number_formats() {
         assert_eq!(
             card_number("D2760001240100000006120808620000"),
