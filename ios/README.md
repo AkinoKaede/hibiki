@@ -47,6 +47,11 @@ xcodebuild -project ios/Hibiki.xcodeproj -scheme Hibiki \
   -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
+For simulator tests that exercise Keychain storage, keep code signing enabled
+(ad hoc signing with `CODE_SIGN_IDENTITY=-` is sufficient). An unsigned test host
+cannot access Keychain and reports `errSecMissingEntitlement`. The rename tests
+use unique temporary Keychain accounts and remove only their own test records.
+
 ### App icon
 
 Open `Hibiki/AppIcon.icon` in Icon Composer to edit the purple background and
@@ -188,6 +193,15 @@ with a new device identity. This local disconnect does not delete server-side
 channels or revoke the old membership; remaining members can remove the old device.
 An interrupted reset is completed before setup or restore can reuse any state.
 
+When the server allows client channel creation, **+** in **Channels** offers
+**Create Channel** and **Join Channel**. Otherwise, including while permission is
+unknown, **+** opens Join directly. After creation, the invitation page has a
+checkmark to finish and a share button in the upper-right corner.
+Pending channels open the waiting-for-approval page, including the verification
+QR code, words, request ID and withdrawal action, even after leaving Join.
+Approval switches the page to the member list; inactive membership without a
+pending request shows a prompt to use a new invitation.
+
 ## Security Keys
 
 The OpenPGP application must already contain your keys. Import its public OpenPGP
@@ -195,9 +209,8 @@ certificate on the requesting computer. The app does not create or import privat
 keys, change PINs, reset the key, or expose remote raw APDU commands.
 
 USB cards work without registration. NFC has one process-local public snapshot:
-use **Record NFC Key** in Status to read and immediately use a key, **Read NFC Key
-Again** to replace it, or **Forget NFC Key** to clear it. Reading never asks for a
-PIN. Failed or canceled reads preserve the previous record. Backgrounding and
+use **Use NFC Key** in Status to read and immediately use a key, **Rescan NFC Key**
+to replace it, or **Forget NFC Key** to clear it. Reading never asks for a PIN. Failed or canceled reads preserve the previous record. Backgrounding and
 network reconnects retain completed records; a cold launch starts empty. No card
 information or names are persisted. Upgrading deletes the obsolete `cards.bin`
 and `nfc-cards.bin` files without importing them. Device identity and pairing
@@ -208,7 +221,9 @@ NFC reads only after tapping **Read NFC Information**. Viewing another card does
 not record it for use or change the Status record. Results show public keys,
 fingerprints, keygrips and creation dates; NFC results are snapshots, not proof
 of a continuous connection. Leaving, switching transport or backgrounding cancels
-unfinished inspection. USB removal clears its displayed information.
+unfinished inspection. The last successful USB result stays visible after removal,
+failed or canceled refreshes, and returning to the viewer, until a new read succeeds. Switching back
+from NFC restores the USB snapshot. These results are only cached in memory.
 
 Ordinary `SERIALNO` checks USB first, then the current NFC snapshot. A targeted
 `SERIALNO --demand=<serial>` requires a matching serial. Neither starts a scanner.

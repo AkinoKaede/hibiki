@@ -21,12 +21,12 @@
         }
       }
     },
-    "Approve Device": {
+    "Approve": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "批准设备"
+            "value": "批准"
           }
         }
       }
@@ -617,12 +617,12 @@
         }
       }
     },
-    "Reject Request": {
+    "Reject": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "拒绝申请"
+            "value": "拒绝"
           }
         }
       }
@@ -705,11 +705,18 @@
       "extractionState": "manual"
     },
     "Revoke": {
+      "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "撤销"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "撤銷"
           }
         }
       }
@@ -1804,23 +1811,6 @@
         }
       }
     },
-    "Revoke Device": {
-      "extractionState": "manual",
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "撤销设备"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "撤銷裝置"
-          }
-        }
-      }
-    },
     "Device No Longer Available": {
       "extractionState": "manual",
       "localizations": {
@@ -2518,22 +2508,22 @@
         }
       }
     },
-    "Record NFC Key": {
+    "Use NFC Key": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "记录NFC密钥"
+            "value": "使用NFC密钥"
           }
         }
       }
     },
-    "Read NFC Key Again": {
+    "Rescan NFC Key": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "重新记录NFC密钥"
+            "value": "重新扫描NFC密钥"
           }
         }
       }
@@ -2634,6 +2624,66 @@
           "stringUnit": {
             "state": "translated",
             "value": "断开服务器连接、重置本地配对并清除当前NFC密钥记录。重新连接前需要再次配对。"
+          }
+        }
+      }
+    },
+    "Add Channel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加频道"
+          }
+        }
+      }
+    },
+    "Create a channel or join one using an invitation.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建频道或通过邀请加入频道。"
+          }
+        }
+      }
+    },
+    "Connect to the server to create a channel.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接服务器后即可创建频道。"
+          }
+        }
+      }
+    },
+    "This server does not allow channel creation. Ask an administrator for an invitation.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此服务器不允许创建频道，请向管理员索取邀请。"
+          }
+        }
+      }
+    },
+    "Information from the last successful USB read. Kept until new information is read.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示上次成功读取的USB信息，直到成功读取新信息后更新。"
+          }
+        }
+      }
+    },
+    "Join this channel with a new invitation.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请使用新邀请加入此频道。"
           }
         }
       }

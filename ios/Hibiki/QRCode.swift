@@ -39,7 +39,8 @@ struct PairingQRCode: View {
     var body: some View {
         if let image = PairingQR.image(text) {
             Image(uiImage: image).interpolation(.none).resizable().scaledToFit()
-                .frame(maxWidth: 360).accessibilityLabel("Pairing QR Code")
+                .frame(maxWidth: 360)
+                .frame(maxWidth: .infinity, alignment: .center).accessibilityLabel("Pairing QR Code")
                 .accessibilityIdentifier("pairingQRCode")
         } else { Text("Unable to generate QR code.") }
     }

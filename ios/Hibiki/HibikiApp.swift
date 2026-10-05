@@ -15,7 +15,7 @@ struct HibikiApp: App {
                 }
                 .onChange(of: scenePhase) { _, phase in
                     #if DEBUG
-                    if CommandLine.arguments.contains("--ui-nfc-order-fixture") { return }
+                    if CommandLine.arguments.contains("--ui-nfc-order-fixture") || CommandLine.arguments.contains("--ui-invitations-fixture") { return }
                     #endif
                     model.sceneChanged(phase)
                 }
@@ -62,6 +62,18 @@ struct HibikiApp: App {
             if CommandLine.arguments.contains("--ui-members-online") { model.connection = "online" }
             model.device = local
             model.channels = [ChannelInfo(id: String(repeating: "c", count: 64), name: "UI Test Channel", active: true, revision: 1, members: [local, remote, child, grandchild])]
+            if CommandLine.arguments.contains("--ui-pending-fixture") {
+                model.channels[0].active = false
+                model.pairing = JoinInfo(verification: "hibiki-verify-v1:pending-fixture", channel: model.channels[0].id, request: "pending-request-id")
+            }
+            if CommandLine.arguments.contains("--ui-invitations-fixture") {
+                let client = InvitationFixtureClient(noHandle: .init())
+                client.fixtureChannels = model.channels
+                client.creationAllowed = !CommandLine.arguments.contains("--ui-creation-denied")
+                client.approveOnRefresh = CommandLine.arguments.contains("--ui-approve-pending")
+                model.client = client
+                model.allowChannelCreation = client.creationAllowed
+            }
             model.initialized = true
             return model
         }
@@ -69,3 +81,43 @@ struct HibikiApp: App {
         return AppModel()
     }
 }
+
+#if DEBUG
+/// In-memory relay responses for exercising the real creation and invitation views.
+private final class InvitationFixtureClient: MobileClient, @unchecked Sendable {
+    private let lock = NSLock()
+    var creationAllowed = true
+    var approveOnRefresh = false
+    var fixtureChannels: [ChannelInfo] = []
+    private var refreshCount = 0
+    private var withdrawn = false
+    override func allowsChannelCreation() async throws -> Bool { creationAllowed }
+    override func channels() async throws -> [ChannelInfo] {
+        lock.withLock {
+            refreshCount += 1
+            if approveOnRefresh, refreshCount >= 2 { fixtureChannels[0].active = true }
+            return fixtureChannels
+        }
+    }
+    override func pairingStatus(channel: String, requestId: String) async throws -> PairingState {
+        lock.withLock {
+            if withdrawn { return .absent }
+            return fixtureChannels.first(where: { $0.id == channel })?.active == true ? .member : .pending
+        }
+    }
+    override func withdrawJoin(channel: String, requestId: String) async throws {
+        lock.withLock { withdrawn = true }
+    }
+    override func pending(channel: String) async throws -> [PendingInfo] { [] }
+    override func nfcCard() -> CardInfo? { nil }
+    override func createChannel(name: String) async throws -> Invitation {
+        guard creationAllowed else { throw MobileError.Failed(message: "Channel creation disabled") }
+        let channel = ChannelInfo(id: "created-channel", name: name, active: true, revision: 1, members: [])
+        lock.withLock { fixtureChannels.append(channel) }
+        return try await invitation(channel: channel.id)
+    }
+    override func invitation(channel: String) async throws -> Invitation {
+        Invitation(channel: channel, invite: "hibiki-invite-v2:ui-test-invitation", expiresAt: UInt64(Date().timeIntervalSince1970) + 86400)
+    }
+}
+#endif

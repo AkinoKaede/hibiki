@@ -37,6 +37,8 @@ struct CardInspectionView: View {
             } header: { Text("Security Key Information") } footer: {
                 if inspection.transport == .nfc {
                     Text("NFC snapshot from the last read. The key is not continuously connected.")
+                } else {
+                    Text("Information from the last successful USB read. Kept until new information is read.")
                 }
             }
             Section("OpenPGP Keys") { CardPublicKeyRows(keys: info.keys) }

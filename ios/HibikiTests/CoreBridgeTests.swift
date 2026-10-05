@@ -1,7 +1,49 @@
 import XCTest
+import Security
 @testable import Hibiki
 
 final class CoreBridgeTests: XCTestCase {
+    func testRenamedIdentityUpdatesExistingKeychainItemAndPreservesProtection() throws {
+        let account = "rename-test-\(UUID().uuidString)"
+        let otherAccount = "rename-test-\(UUID().uuidString)"
+        defer {
+            for value in [account, otherAccount] { SecItemDelete(identityQuery(account: value) as CFDictionary) }
+        }
+        let original = Data("original identity".utf8)
+        let renamed = Data("renamed identity".utf8)
+        try SecureStorage.saveIdentity(original, account: account)
+        try SecureStorage.saveIdentity(original, account: otherAccount)
+        // Initial enrollment remains insert-only; rename must use the update operation.
+        XCTAssertThrowsError(try SecureStorage.saveIdentity(renamed, account: account)) {
+            XCTAssertEqual(($0 as NSError).code, Int(errSecDuplicateItem))
+        }
+        try SecureStorage.updateIdentity(renamed, account: account)
+        try SecureStorage.updateIdentity(renamed, account: account) // Retrying a rename is safe.
+        XCTAssertEqual(try SecureStorage.identity(account: account), renamed)
+        XCTAssertEqual(try SecureStorage.identity(account: otherAccount), original)
+        var query = identityQuery(account: account)
+        query[kSecReturnAttributes as String] = true
+        var result: CFTypeRef?
+        XCTAssertEqual(SecItemCopyMatching(query as CFDictionary, &result), errSecSuccess)
+        let attributes = try XCTUnwrap(result as? [String: Any])
+        XCTAssertEqual(attributes[kSecAttrAccessible as String] as? String, kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String)
+        XCTAssertEqual(attributes[kSecAttrSynchronizable as String] as? Bool, false)
+    }
+
+    func testUpdatingMissingIdentityDoesNotCreateANewKeychainItem() throws {
+        let account = "rename-test-\(UUID().uuidString)"
+        defer { SecItemDelete(identityQuery(account: account) as CFDictionary) }
+        XCTAssertThrowsError(try SecureStorage.updateIdentity(Data("renamed identity".utf8), account: account)) {
+            XCTAssertEqual(($0 as NSError).code, Int(errSecItemNotFound))
+        }
+        XCTAssertNil(try SecureStorage.identity(account: account))
+    }
+
+    private func identityQuery(account: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: "com.akinokaede.hibiki.identity", kSecAttrAccount as String: account]
+    }
+
     @MainActor
     func testPendingPairingSurvivesRestartAndCanBeCleared() throws {
         let suite = "hibiki-tests-\(UUID().uuidString)"
@@ -9,9 +51,11 @@ final class CoreBridgeTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let model = AppModel(defaults: defaults)
         XCTAssertNil(model.allowChannelCreation)
-        model.rememberPairing(JoinInfo(verification: "", channel: "channel", request: "request"))
+        model.rememberPairing(JoinInfo(verification: "hibiki-verify-v1:saved", channel: "channel", request: "request"))
         let restored = AppModel(defaults: defaults)
         XCTAssertEqual(restored.pairing?.request, "request")
+        XCTAssertEqual(restored.pairing?.channel, "channel")
+        XCTAssertEqual(restored.pairing?.verification, "hibiki-verify-v1:saved")
         restored.rememberPairing(nil)
         XCTAssertNil(AppModel(defaults: defaults).pairing)
         restored.rememberPairing(JoinInfo(verification: "", channel: "claimed", request: ""))

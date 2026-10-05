@@ -8,6 +8,7 @@ final class CardInspection {
     private(set) var info: CardInfo?
     private(set) var isReading = false
     private(set) var error: String?
+    private var usbInfo: CardInfo?
     private var nfcAvailable = false
     private var visible = false
     private var active = true
@@ -41,7 +42,6 @@ final class CardInspection {
         usbPresent = present
         guard transport == .usb else { return }
         cancel()
-        info = nil
         if present { refresh() }
     }
 
@@ -54,8 +54,8 @@ final class CardInspection {
         guard transport != .nfc || nfcAvailable else { return }
         guard self.transport != transport else { return }
         cancel()
-        info = nil
         self.transport = transport
+        info = transport == .usb ? usbInfo : nil
         if transport == .usb { refresh() }
     }
 
@@ -63,7 +63,7 @@ final class CardInspection {
         guard visible, active, (transport == .nfc ? nfcAvailable : usbPresent), let read else { return }
         let previous = task
         cancel()
-        info = nil
+        if transport == .nfc { info = nil }
         isReading = true
         let id = generation
         let mode = transport
@@ -74,6 +74,7 @@ final class CardInspection {
             do {
                 let result = try await read(mode)
                 guard generation == id, !Task.isCancelled else { return }
+                if mode == .usb { usbInfo = result }
                 info = result
             } catch {
                 guard generation == id, !Task.isCancelled else { return }
@@ -85,6 +86,12 @@ final class CardInspection {
             }
             isReading = false
         }
+    }
+
+    func reset() {
+        cancel()
+        info = nil
+        usbInfo = nil
     }
 
     private func cancel() {

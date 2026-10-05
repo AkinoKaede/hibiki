@@ -159,10 +159,11 @@ final class AppModel {
         }
     }
     func renameDevice(_ newName: String) async {
+        guard !busy else { return }
         await perform {
             guard let core = self.client else { return }
             let identity = try await core.renameDevice(name: newName)
-            try SecureStorage.saveIdentity(identity)
+            try SecureStorage.updateIdentity(identity)
             await core.stop()
             self.eventTask?.cancel()
             try self.configure(identity: identity)
@@ -195,6 +196,7 @@ final class AppModel {
         allowChannelCreation = nil
         recordedNFCCard = nil
         usbPresent = false
+        cardInspection.reset()
         pinEnabled = true
         cardEnabled = true
         skipTLSCertificateValidation = false

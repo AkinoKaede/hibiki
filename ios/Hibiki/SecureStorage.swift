@@ -3,9 +3,9 @@ import Security
 
 struct SecureStorage {
     private static let service = "com.akinokaede.hibiki.identity"
-    static func identity() throws -> Data? {
+    static func identity(account: String = "device") throws -> Data? {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service, kSecAttrAccount as String: "device",
+            kSecAttrService as String: service, kSecAttrAccount as String: account,
             kSecReturnData as String: true, kSecMatchLimit as String: kSecMatchLimitOne]
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
@@ -13,12 +13,19 @@ struct SecureStorage {
         guard status == errSecSuccess else { throw keychainError(status) }
         return result as? Data
     }
-    static func saveIdentity(_ data: Data) throws {
+    static func saveIdentity(_ data: Data, account: String = "device") throws {
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service, kSecAttrAccount as String: "device",
+            kSecAttrService as String: service, kSecAttrAccount as String: account,
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             kSecAttrSynchronizable as String: false, kSecValueData as String: data]
         let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess else { throw keychainError(status) }
+    }
+    static func updateIdentity(_ data: Data, account: String = "device") throws {
+        // Renaming keeps the identity's existing Keychain item and protection attributes.
+        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service, kSecAttrAccount as String: account]
+        let status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         guard status == errSecSuccess else { throw keychainError(status) }
     }
     static func resetRelay() throws {

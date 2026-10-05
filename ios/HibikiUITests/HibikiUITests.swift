@@ -2,6 +2,116 @@ import XCTest
 
 @MainActor
 final class HibikiUITests: XCTestCase {
+    func testPendingChannelRemainsAccessibleAfterLeavingJoin() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online", "--ui-invitations-fixture", "--ui-pending-fixture"]
+        app.launch()
+        XCTAssertTrue(app.tabBars.buttons["Channels"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Channels"].tap()
+        XCTAssertTrue(app.staticTexts["Waiting for Approval"].exists)
+        app.buttons["addChannel"].tap()
+        app.buttons["joinChannel"].tap()
+        XCTAssertTrue(app.images["pairingQRCode"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["scanInvitation"].exists)
+        XCTAssertFalse(app.buttons["requestToJoin"].exists)
+        app.buttons["cancelJoinChannel"].tap()
+        app.staticTexts["UI Test Channel"].tap()
+        let qr = app.images["pairingQRCode"]
+        XCTAssertTrue(qr.waitForExistence(timeout: 5))
+        XCTAssertEqual(qr.frame.midX, app.frame.midX, accuracy: 2)
+        XCTAssertFalse(app.buttons["channelActions"].exists)
+        XCTAssertFalse(app.staticTexts["Work Mac"].exists)
+        for _ in 0..<3 where !app.buttons["Withdraw Request"].isHittable { app.swipeUp() }
+        XCTAssertTrue(app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "pending-request-id")).firstMatch.exists)
+        XCTAssertTrue(app.staticTexts["word19 word20 word21 word22 word23 word24"].exists)
+        app.buttons["Withdraw Request"].tap()
+        XCTAssertTrue(app.staticTexts["Withdraw this join request?"].waitForExistence(timeout: 5))
+        app.buttons.matching(identifier: "Withdraw Request").allElementsBoundByIndex.first(where: { $0.isHittable })!.tap()
+        XCTAssertTrue(app.staticTexts["Join this channel with a new invitation."].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.images["pairingQRCode"].exists)
+        XCTAssertFalse(app.buttons["channelActions"].exists)
+    }
+
+    func testApprovedPendingChannelTransitionsToMembers() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online", "--ui-invitations-fixture", "--ui-pending-fixture", "--ui-approve-pending"]
+        app.launch()
+        XCTAssertTrue(app.tabBars.buttons["Channels"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Channels"].tap()
+        app.staticTexts["UI Test Channel"].tap()
+        XCTAssertTrue(app.images["pairingQRCode"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["channelActions"].exists)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.staticTexts["UI Test Channel"].tap()
+        XCTAssertTrue(app.staticTexts["Work Mac"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["channelActions"].exists)
+        XCTAssertFalse(app.images["pairingQRCode"].exists)
+    }
+
+    func testCreateChannelAndShareInvitationRemainPresented() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online", "--ui-invitations-fixture"]
+        app.launch()
+        XCTAssertTrue(app.tabBars.buttons["Channels"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Channels"].tap()
+        app.buttons["addChannel"].tap()
+        app.buttons["createChannel"].tap()
+        let create = app.buttons["submitCreateChannel"]
+        XCTAssertTrue(create.waitForExistence(timeout: 5))
+        XCTAssertFalse(create.isEnabled)
+        let name = app.textFields["channelName"]
+        name.tap()
+        name.typeText("   ")
+        XCTAssertFalse(create.isEnabled)
+        name.typeText("New Channel")
+        XCTAssertTrue(create.isEnabled)
+        create.tap()
+        assertInvitationCanShareTwice(app)
+        app.buttons["cancelInviteDevice"].tap()
+        XCTAssertTrue(app.staticTexts["New Channel"].waitForExistence(timeout: 5))
+        app.staticTexts["UI Test Channel"].tap()
+        app.buttons["channelActions"].tap()
+        app.buttons["inviteDevice"].tap()
+        assertInvitationCanShareTwice(app)
+        app.buttons["cancelInviteDevice"].tap()
+        XCTAssertTrue(app.staticTexts["Work Mac"].waitForExistence(timeout: 5))
+    }
+
+    private func assertInvitationCanShareTwice(_ app: XCUIApplication) {
+        let share = app.buttons["shareInvitation"]
+        XCTAssertTrue(share.waitForExistence(timeout: 5))
+        XCTAssertTrue(share.isEnabled)
+        for _ in 0..<2 {
+            share.tap()
+            let close = app.buttons["header.closeButton"]
+            XCTAssertTrue(close.waitForExistence(timeout: 5))
+            // Cover the presentation transition that previously cleared the invitation.
+            Thread.sleep(forTimeInterval: 2)
+            XCTAssertTrue(close.isHittable)
+            let screenshot = XCTAttachment(screenshot: app.screenshot())
+            screenshot.name = "Invitation activity sheet remains open"
+            screenshot.lifetime = .keepAlways
+            add(screenshot)
+            close.tap()
+            XCTAssertTrue(app.buttons["shareInvitation"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["Copy Invitation"].exists)
+        }
+    }
+
+    func testChannelPlusJoinsDirectlyWhenCreationIsDenied() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online", "--ui-invitations-fixture", "--ui-creation-denied"]
+        app.launch()
+        XCTAssertTrue(app.tabBars.buttons["Channels"].waitForExistence(timeout: 10))
+        app.tabBars.buttons["Channels"].tap()
+        XCTAssertFalse(app.buttons["addChannel"].exists)
+        app.buttons["joinChannel"].tap()
+        XCTAssertTrue(app.navigationBars["Join Channel"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["createChannel"].exists)
+        app.buttons["cancelJoinChannel"].tap()
+        XCTAssertTrue(app.buttons["joinChannel"].waitForExistence(timeout: 5))
+    }
+
     func testPhysicalNFCAndPinentryPresentationOrder() throws {
         #if targetEnvironment(simulator)
         throw XCTSkip("System NFC presentation requires an iPhone and a physical key")
@@ -42,6 +152,7 @@ final class HibikiUITests: XCTestCase {
         app.launch()
         XCTAssertTrue(app.tabBars.buttons["Channels"].waitForExistence(timeout: 10))
         app.tabBars.buttons["Channels"].tap()
+        XCTAssertFalse(app.buttons["addChannel"].exists)
         app.buttons["joinChannel"].tap()
         XCTAssertTrue(app.navigationBars["Join Channel"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.buttons["requestToJoin"].isEnabled)
@@ -94,7 +205,7 @@ final class HibikiUITests: XCTestCase {
                 XCTAssertTrue(app.buttons["forgetNFCKey"].exists)
                 app.buttons["forgetNFCKey"].tap()
                 XCTAssertFalse(app.buttons["forgetNFCKey"].exists)
-                XCTAssertEqual(app.buttons["recordNFCKey"].label, "Record NFC Key")
+                XCTAssertEqual(app.buttons["recordNFCKey"].label, "Use NFC Key")
             }
             app.tabBars.buttons["Security Keys"].tap()
             XCTAssertEqual(app.segmentedControls["inspectionTransport"].exists, nfc)
@@ -167,7 +278,7 @@ final class HibikiUITests: XCTestCase {
         app.swipeUp()
         if !app.staticTexts["word19 word20 word21 word22 word23 word24"].exists { app.swipeUp() }
         XCTAssertTrue(app.staticTexts["word19 word20 word21 word22 word23 word24"].exists)
-        XCTAssertFalse(app.buttons["Revoke Device"].exists)
+        XCTAssertFalse(app.buttons["Revoke"].exists)
         XCTAssertTrue(app.staticTexts["Outside Your Approval Branch"].exists)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Member details with complete identity"
@@ -187,8 +298,8 @@ final class HibikiUITests: XCTestCase {
         let member = app.buttons["member-\(childID)"]
         XCTAssertTrue(member.waitForExistence(timeout: 5))
         member.tap()
-        for _ in 0..<3 where !app.buttons["Revoke Device"].isHittable { app.swipeUp() }
-        app.buttons["Revoke Device"].tap()
+        for _ in 0..<3 where !app.buttons["Revoke"].isHittable { app.swipeUp() }
+        app.buttons["Revoke"].tap()
         XCTAssertTrue(app.navigationBars["Review Revocation"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts[childID].exists)
         XCTAssertFalse(app.staticTexts[grandchildID].exists)
@@ -198,7 +309,7 @@ final class HibikiUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts[childID].exists)
         XCTAssertTrue(app.staticTexts[grandchildID].exists)
         app.buttons["Cancel"].tap()
-        XCTAssertTrue(app.buttons["Revoke Device"].exists)
+        XCTAssertTrue(app.buttons["Revoke"].exists)
     }
     func testUnreachableRelayStaysOnSetupAfterRestart() {
         let app = XCUIApplication()

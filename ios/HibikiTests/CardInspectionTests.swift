@@ -48,24 +48,68 @@ final class CardInspectionTests: XCTestCase {
         XCTFail("State did not settle", file: file, line: line)
     }
 
-    func testUSBReadsOncePerInsertionAndClearsOnRemoval() async throws {
+    func testUSBReadsOncePerInsertionAndKeepsLastSuccessfulResult() async throws {
         let state = CardInspection()
         state.setNFCAvailable(true)
         var reads = 0
         state.appear(usbPresent: true, active: true) { mode in
             reads += 1
-            return self.card("USB", mode)
+            return self.card("USB-\(reads)", mode)
         }
         try await eventually { state.info != nil }
         XCTAssertEqual(reads, 1)
         for _ in 0..<5 { state.usbChanged(true) }
         XCTAssertEqual(reads, 1)
         state.usbChanged(false)
-        XCTAssertNil(state.info)
+        XCTAssertEqual(state.info?.serial, "USB-1")
         state.usbChanged(true)
+        XCTAssertEqual(state.info?.serial, "USB-1")
         try await eventually { reads == 2 && !state.isReading }
+        XCTAssertEqual(state.info?.serial, "USB-2")
         state.refresh()
+        XCTAssertEqual(state.info?.serial, "USB-2")
         try await eventually { reads == 3 && !state.isReading }
+        XCTAssertEqual(state.info?.serial, "USB-3")
+        state.disappear()
+    }
+
+    func testUSBCacheSurvivesFailureCancellationAndTransportChanges() async throws {
+        let state = CardInspection()
+        state.setNFCAvailable(true)
+        var reads = 0
+        var pending: CheckedContinuation<CardInfo, Error>?
+        state.appear(usbPresent: true, active: true) { mode in
+            reads += 1
+            if reads == 2 { throw MobileError.Failed(message: "Reader unavailable") }
+            if reads == 3 { return try await withCheckedThrowingContinuation { pending = $0 } }
+            return self.card("USB-\(reads)", mode)
+        }
+        try await eventually { !state.isReading }
+        state.refresh()
+        try await eventually { !state.isReading }
+        XCTAssertEqual(state.error, "Reader unavailable")
+        XCTAssertEqual(state.info?.serial, "USB-1")
+        state.refresh()
+        try await eventually { pending != nil }
+        state.usbChanged(false)
+        pending?.resume(returning: card("Removed key", .usb))
+        state.disappear()
+        state.setActive(false)
+        state.setActive(true)
+        state.select(.nfc)
+        XCTAssertNil(state.info)
+        state.select(.usb)
+        XCTAssertEqual(state.info?.serial, "USB-1")
+        state.appear(usbPresent: true, active: true) { mode in self.card("New key", mode) }
+        XCTAssertEqual(state.info?.serial, "USB-1")
+        try await eventually { !state.isReading }
+        XCTAssertEqual(state.info?.serial, "New key")
+        state.reset()
+        XCTAssertNil(state.info)
+        state.select(.nfc)
+        state.usbChanged(false)
+        state.select(.usb)
+        XCTAssertNil(state.info)
         state.disappear()
     }
 
@@ -89,7 +133,7 @@ final class CardInspectionTests: XCTestCase {
         try await eventually { nfc != nil }
         state.select(.usb)
         XCTAssertTrue(state.isReading)
-        XCTAssertNil(state.info)
+        XCTAssertEqual(state.info?.serial, "USB")
         XCTAssertEqual(reads, [.usb, .nfc])
         nfc?.resume(returning: card("Stale NFC", .nfc))
         try await eventually { !state.isReading }

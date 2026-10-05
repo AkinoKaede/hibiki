@@ -85,8 +85,8 @@ struct StatusView: View {
                 }
             }
             Section("Provider Services") {
-                Toggle("Pinentry", isOn: $model.pinEnabled).onChange(of: model.pinEnabled) { _, _ in model.updateServices() }
                 Toggle("Scdaemon", isOn: $model.cardEnabled).onChange(of: model.cardEnabled) { _, _ in model.updateServices() }
+                Toggle("Pinentry", isOn: $model.pinEnabled).onChange(of: model.pinEnabled) { _, _ in model.updateServices() }
             }
             if model.nfcAvailable {
                 Section { NFCRecordRows(model: model) } header: { Text("NFC Key") } footer: {
@@ -94,14 +94,7 @@ struct StatusView: View {
                 }
             }
             if let pairing = model.pairing {
-                Section("Waiting for Approval") {
-                    Text("Compare these verification words on a member device before approving.")
-                    if !pairing.verification.isEmpty { PairingQRCode(text: pairing.verification) }
-                    VerificationWords(words: model.device?.words ?? "")
-                    LabeledContent("Request") { Text(verbatim: pairing.request).font(.caption).textSelection(.enabled) }
-                    Text("This request stays pending until approved, rejected, or withdrawn.")
-                    WithdrawRequestButton(model: model)
-                }
+                PendingJoinSection(pairing: pairing, model: model)
             }
         }.navigationTitle("Hibiki").refreshable { await model.refresh() }
     }
@@ -113,7 +106,7 @@ struct NFCRecordRows: View {
         if let card = model.recordedNFCCard {
             LabeledContent("Current NFC Key", value: formatCardNumber(serial: card.serial))
         }
-        Button(model.recordedNFCCard == nil ? "Record NFC Key" : "Read NFC Key Again") {
+        Button(model.recordedNFCCard == nil ? "Use NFC Key" : "Rescan NFC Key") {
             Task { await model.recordNFCCard() }
         }
         .disabled(model.busy || model.cardInspection.isReading)
@@ -130,26 +123,41 @@ struct ChannelsView: View {
     @Bindable var model: AppModel
     var body: some View {
         List {
-            if model.channels.isEmpty {
-                ContentUnavailableView("No Channels Yet", systemImage: "person.2", description: Text("Join a channel using an invitation from its administrator or a trusted member."))
+            if model.channels.isEmpty, model.pairing == nil {
+                ContentUnavailableView("No Channels Yet", systemImage: "person.2", description: Text(model.allowChannelCreation == true ? "Create a channel or join one using an invitation." : "Join a channel using an invitation from its administrator or a trusted member."))
             }
             ForEach(model.channels) { channel in
                 NavigationLink { ChannelView(channelID: channel.id, model: model) } label: {
                     VStack(alignment: .leading) {
                         Text(verbatim: channel.name).font(.headline)
-                        Text(channel.active ? "Member" : "Not an Active Member").font(.caption).foregroundStyle(.secondary)
+                        Text(channel.active ? "Member" : (model.pairing?.channel == channel.id ? "Waiting for Approval" : "Not an Active Member")).font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }
-            if model.allowChannelCreation == true {
-                Section { NavigationLink("Create a Channel") { CreateChannelView(model: model) } }
+            if let pairing = model.pairing, !model.channels.contains(where: { $0.id == pairing.channel }) {
+                NavigationLink { ChannelView(channelID: pairing.channel, model: model) } label: {
+                    Label("Waiting for Approval", systemImage: "hourglass")
+                }
             }
         }.navigationTitle("Channels").refreshable { await model.refresh() }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    NavigationLink { JoinView(model: model) } label: {
-                        Label("Join Channel", systemImage: "plus").labelStyle(.iconOnly)
-                    }.accessibilityIdentifier("joinChannel")
+                    if model.allowChannelCreation == true {
+                        Menu {
+                            NavigationLink { CreateChannelView(model: model) } label: {
+                                Label("Create Channel", systemImage: "plus.circle")
+                            }.accessibilityIdentifier("createChannel")
+                            NavigationLink { JoinView(model: model) } label: {
+                                Label("Join Channel", systemImage: "arrow.right.circle")
+                            }.accessibilityIdentifier("joinChannel")
+                        } label: {
+                            Label("Add Channel", systemImage: "plus").labelStyle(.iconOnly)
+                        }.accessibilityIdentifier("addChannel")
+                    } else {
+                        NavigationLink { JoinView(model: model) } label: {
+                            Label("Join Channel", systemImage: "plus").labelStyle(.iconOnly)
+                        }.accessibilityIdentifier("joinChannel")
+                    }
                 }
             }
     }
@@ -165,25 +173,20 @@ struct JoinView: View {
     @State private var invitationError: String?
     var body: some View {
         Form {
-            Section("Invitation") { TextField("hibiki-invite-v2:…", text: $invite, axis: .vertical).textInputAutocapitalization(.never).autocorrectionDisabled() }
-            Section { Button { scanning = true } label: { Label("Scan Invitation", systemImage: "qrcode.viewfinder") }.accessibilityIdentifier("scanInvitation") }
-            if let invitationError { Text(verbatim: invitationError).foregroundStyle(.red) }
-            if let preview {
-                Section("Invitation Details") {
-                    Text(verbatim: preview.name)
-                    Text(verbatim: preview.server).font(.caption)
-                    Text(Date(timeIntervalSince1970: TimeInterval(preview.expiresAt)), style: .relative)
-                }
-            }
-            Section {} footer: { Text("Get a one-use invitation from a trusted member. It expires after 24 hours. The invitation server must match yours.") }
             if let pairing = model.pairing {
-                Section("Waiting for Approval") {
-                    if !pairing.verification.isEmpty { PairingQRCode(text: pairing.verification) }
-                    VerificationWords(words: model.device?.words ?? "")
-                    Text(verbatim: pairing.request).font(.caption).textSelection(.enabled)
-                    Text("Compare the 24 verification words and request ID on the approving device.")
-                    WithdrawRequestButton(model: model)
+                PendingJoinSection(pairing: pairing, model: model)
+            } else {
+                Section("Invitation") { TextField("hibiki-invite-v2:…", text: $invite, axis: .vertical).textInputAutocapitalization(.never).autocorrectionDisabled() }
+                Section { Button { scanning = true } label: { Label("Scan Invitation", systemImage: "qrcode.viewfinder") }.accessibilityIdentifier("scanInvitation") }
+                if let invitationError { Text(verbatim: invitationError).foregroundStyle(.red) }
+                if let preview {
+                    Section("Invitation Details") {
+                        Text(verbatim: preview.name)
+                        Text(verbatim: preview.server).font(.caption)
+                        Text(Date(timeIntervalSince1970: TimeInterval(preview.expiresAt)), style: .relative)
+                    }
                 }
+                Section {} footer: { Text("Get a one-use invitation from a trusted member. It expires after 24 hours. The invitation server must match yours.") }
             }
         }
         .disabled(submitting)
@@ -192,13 +195,17 @@ struct JoinView: View {
         .navigationBarBackButtonHidden()
         .toolbar {
             ToolbarItem(placement: .topBarLeading) {
-                Button { dismiss() } label: { Label("Cancel", systemImage: "xmark").labelStyle(.iconOnly) }
+                Button { dismiss() } label: {
+                    Label(model.pairing == nil ? "Cancel" : "Done", systemImage: model.pairing == nil ? "xmark" : "checkmark").labelStyle(.iconOnly)
+                }
                     .disabled(submitting).accessibilityIdentifier("cancelJoinChannel")
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { requestToJoin() } label: { Label("Request to Join", systemImage: "checkmark").labelStyle(.iconOnly) }
-                    .disabled(invite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || preview == nil || submitting || model.busy || model.connection != "online" || model.pairing != nil)
-                    .accessibilityIdentifier("requestToJoin")
+            if model.pairing == nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { requestToJoin() } label: { Label("Request to Join", systemImage: "checkmark").labelStyle(.iconOnly) }
+                        .disabled(invite.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || preview == nil || submitting || model.busy || model.connection != "online")
+                        .accessibilityIdentifier("requestToJoin")
+                }
             }
         }
         .onChange(of: invite) { _, value in
@@ -234,6 +241,21 @@ struct JoinView: View {
     }
 }
 
+struct PendingJoinSection: View {
+    let pairing: JoinInfo
+    @Bindable var model: AppModel
+    var body: some View {
+        Section("Waiting for Approval") {
+            Text("Compare the 24 verification words and request ID on the approving device.")
+            if !pairing.verification.isEmpty { PairingQRCode(text: pairing.verification) }
+            VerificationWords(words: model.device?.words ?? "")
+            LabeledContent("Request ID") { Text(verbatim: pairing.request).font(.caption.monospaced()).textSelection(.enabled) }
+            Text("This request stays pending until approved, rejected, or withdrawn.")
+            WithdrawRequestButton(model: model)
+        }
+    }
+}
+
 struct WithdrawRequestButton: View {
     @Bindable var model: AppModel
     @State private var confirming = false
@@ -248,36 +270,100 @@ struct WithdrawRequestButton: View {
 
 struct CreateChannelView: View {
     @Bindable var model: AppModel
+    @Environment(\.dismiss) private var dismiss
     @State private var name = ""
     @State private var result: Invitation?
+    @State private var submitting = false
+    private var channelName: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
     var body: some View {
-        Form {
-            if let result { InvitationSections(invite: result.invite, expiresAt: result.expiresAt) }
-            else {
-                Section { TextField("Channel Name", text: $name) }
-                Button("Create Channel") { Task { await model.perform {
-                    result = try await model.client?.createChannel(name: name)
-                    await model.refresh()
-                } } }.disabled(name.isEmpty || model.busy || model.connection != "online" || model.allowChannelCreation != true)
+        Group {
+            if let result {
+                InvitationView(invitation: result)
+            } else {
+                Form {
+                    Section { TextField("Channel Name", text: $name).accessibilityIdentifier("channelName") }
+                    if model.connection != "online" {
+                        Section {} footer: { Text("Connect to the server to create a channel.") }
+                    } else if model.allowChannelCreation == false {
+                        Section {} footer: { Text("This server does not allow channel creation. Ask an administrator for an invitation.") }
+                    } else if model.allowChannelCreation == nil {
+                        ProgressView()
+                    }
+                }
+                .disabled(submitting)
+                .navigationTitle("Create Channel")
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { dismiss() } label: { Label("Cancel", systemImage: "xmark").labelStyle(.iconOnly) }
+                            .disabled(submitting).accessibilityIdentifier("cancelCreateChannel")
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { create() } label: { Label("Create Channel", systemImage: "checkmark").labelStyle(.iconOnly) }
+                            .disabled(channelName.isEmpty || submitting || model.busy || model.connection != "online" || model.allowChannelCreation != true)
+                            .accessibilityIdentifier("submitCreateChannel")
+                    }
+                }
             }
         }
-        .navigationTitle("Create Channel")
-        .onDisappear { result = nil }
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden()
+    }
+    private func create() {
+        guard !submitting, !model.busy, model.connection == "online", model.allowChannelCreation == true,
+              !channelName.isEmpty, let client = model.client else { return }
+        let name = channelName
+        submitting = true
+        Task {
+            defer { submitting = false }
+            await model.perform {
+                let invitation = try await client.createChannel(name: name)
+                guard model.client === client else { return }
+                result = invitation
+                await model.refresh()
+            }
+        }
     }
 }
+
+/// Own the activity sheet above the form so presentation cannot remove its source row.
+struct InvitationView: View {
+    let invitation: Invitation?
+    @Environment(\.dismiss) private var dismiss
+    @State private var sharing = false
+    var body: some View {
+        Form {
+            if let invitation {
+                InvitationSections(invite: invitation.invite, expiresAt: invitation.expiresAt)
+            } else { ProgressView() }
+        }
+        .navigationTitle("Invite Device")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button { dismiss() } label: { Label("Done", systemImage: "checkmark").labelStyle(.iconOnly) }
+                    .accessibilityIdentifier("cancelInviteDevice")
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { sharing = true } label: { Label("Share Invitation", systemImage: "square.and.arrow.up").labelStyle(.iconOnly) }
+                    .disabled(invitation == nil).accessibilityIdentifier("shareInvitation")
+            }
+        }
+        .sheet(isPresented: $sharing) {
+            if let invitation { QRShareSheet(text: invitation.invite) }
+        }
+    }
+}
+
 struct InvitationSections: View {
     let invite: String
     let expiresAt: UInt64
-    @State private var sharing = false
     var body: some View {
         Section {
             PairingQRCode(text: invite).privacySensitive()
             Text(verbatim: invite).font(.caption.monospaced()).lineLimit(3).textSelection(.enabled).privacySensitive()
             LabeledContent("Expires") { Text(Date(timeIntervalSince1970: TimeInterval(expiresAt)), style: .relative) }
             Button("Copy Invitation") { UIPasteboard.general.setItems([[UIPasteboard.typeAutomatic: invite]], options: [.localOnly: true, .expirationDate: Date().addingTimeInterval(120)]) }
-            Button("Share Invitation") { sharing = true }.accessibilityIdentifier("shareInvitation")
         } header: { Text("Invitation") } footer: { Text("This invitation can be used once. A submitted request still needs approval.") }
-        .sheet(isPresented: $sharing) { QRShareSheet(text: invite) }
     }
 }
 
@@ -290,33 +376,43 @@ struct ChannelView: View {
     @State private var sharing = false
     @State private var leaving = false
     private var channel: ChannelInfo? { model.channels.first { $0.id == channelID } }
+    private var pairing: JoinInfo? {
+        guard channel?.active != true, model.pairing?.channel == channelID else { return nil }
+        return model.pairing
+    }
     var body: some View {
         let iconWidth = deviceIconWidth
         List {
-            Section("Members") {
-                ForEach(channel?.members ?? []) { device in
-                    NavigationLink {
-                        MemberDetailView(channelID: channelID, deviceID: device.id, model: model)
-                    } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: device.id == model.device?.id ? "iphone" : "desktopcomputer")
-                                .foregroundStyle(.secondary).frame(width: deviceIconWidth)
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(verbatim: device.name)
-                                DeviceStatus(online: device.online, available: model.connection == "online").font(.caption)
+            if let pairing {
+                PendingJoinSection(pairing: pairing, model: model)
+            } else if channel?.active != true {
+                ContentUnavailableView("Not an Active Member", systemImage: "person.crop.circle.badge.exclamationmark", description: Text("Join this channel with a new invitation."))
+            } else {
+                Section("Members") {
+                    ForEach(channel?.members ?? []) { device in
+                        NavigationLink {
+                            MemberDetailView(channelID: channelID, deviceID: device.id, model: model)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: device.id == model.device?.id ? "iphone" : "desktopcomputer")
+                                    .foregroundStyle(.secondary).frame(width: deviceIconWidth)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(verbatim: device.name)
+                                    DeviceStatus(online: device.online, available: model.connection == "online").font(.caption)
+                                }
+                                Spacer()
+                                if device.id == model.device?.id { Text("This Device").font(.caption).foregroundStyle(.secondary) }
                             }
-                            Spacer()
-                            if device.id == model.device?.id { Text("This Device").font(.caption).foregroundStyle(.secondary) }
-                        }
-                        .alignmentGuide(.listRowSeparatorLeading) { _ in iconWidth + 12 }
-                    }.accessibilityIdentifier("member-\(device.id)")
+                            .alignmentGuide(.listRowSeparatorLeading) { _ in iconWidth + 12 }
+                        }.accessibilityIdentifier("member-\(device.id)")
+                    }
                 }
-            }
-            if channel?.active == true {
-                Section("Pending Requests") {
-                    if pending.isEmpty { Text("No Pending Requests").foregroundStyle(.secondary) }
-                    ForEach(pending) { request in
-                        NavigationLink { ApprovalView(request: request, model: model) } label: { Text(verbatim: request.device.name) }
+                if channel?.active == true {
+                    Section("Pending Requests") {
+                        if pending.isEmpty { Text("No Pending Requests").foregroundStyle(.secondary) }
+                        ForEach(pending) { request in
+                            NavigationLink { ApprovalView(request: request, model: model) } label: { Text(verbatim: request.device.name) }
+                        }
                     }
                 }
             }
@@ -354,17 +450,13 @@ struct ChannelView: View {
         }
         .sheet(isPresented: $sharing, onDismiss: { invitation = nil }) {
             NavigationStack {
-                Form { if let invitation { InvitationSections(invite: invitation.invite, expiresAt: invitation.expiresAt) } }
-                    .navigationTitle("Invite Device")
-                    .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Done") { sharing = false }.accessibilityIdentifier("cancelInviteDevice") } }
+                InvitationView(invitation: invitation)
             }
         }
         .task { await load() }.refreshable { await load() }
         .confirmationDialog("Leave this channel?", isPresented: $leaving, titleVisibility: .visible) {
             Button("Leave Channel", role: .destructive) { Task { await model.perform { try await model.client?.leave(channel: channelID); await load() } } }
         }
-        .onDisappear { invitation = nil }
-
     }
     private func load() async {
         await model.refresh()
@@ -423,7 +515,7 @@ struct MemberDetailView: View {
                 if !isSelf {
                     Section {
                         if device.canRevoke {
-                            Button("Revoke Device", role: .destructive) { prepareRevocation(subtree: false) }.disabled(!canManage)
+                            Button("Revoke", role: .destructive) { prepareRevocation(subtree: false) }.disabled(!canManage)
                             if !device.revocationSubtree.isEmpty {
                                 Button("Revoke Entire Approval Subtree", role: .destructive) { prepareRevocation(subtree: true) }.disabled(!canManage)
                             }
@@ -448,7 +540,7 @@ struct MemberDetailView: View {
             NavigationStack {
                 List {
                     Section {
-                        Text(revokeSubtree ? "Revoke Entire Approval Subtree" : "Revoke Device")
+                        Text(revokeSubtree ? "Revoke Entire Approval Subtree" : "Revoke")
                         Text("Affected devices: \(revokeDevices.count)")
                         Text("These identities will lose access and cannot rejoin this channel.")
                     }
@@ -512,14 +604,14 @@ struct ApprovalView: View {
                     .disabled(approved || rejected || model.busy || model.connection != "online")
                     .accessibilityIdentifier("scanAndApprove")
                 Toggle("I verified the 24 words and request ID", isOn: $verified)
-                Button(approved ? "Approved" : "Approve Device") { Task { await model.perform {
+                Button(approved ? "Approved" : "Approve") { Task { await model.perform {
                     try await model.client?.approve(channel: request.channel, requestId: request.id)
                     approved = true; await model.refresh()
                 } } }.disabled(!verified || approved || rejected || model.busy || model.connection != "online")
-                Button(rejected ? "Rejected" : "Reject Request", role: .destructive) { rejecting = true }
+                Button(rejected ? "Rejected" : "Reject", role: .destructive) { rejecting = true }
                     .disabled(approved || rejected || model.busy || model.connection != "online")
             } footer: { Text("These words verify this device’s public key. They are not a recovery phrase.") }
-        }.navigationTitle("Approve Device")
+        }.navigationTitle("Approve")
         .sheet(isPresented: $scanning) {
             QRScannerSheet(purpose: .verification, describeError: pairingError) { code in
                 guard !approved, !rejected, !model.busy, model.foreground, let client = model.client else { throw CancellationError() }
@@ -535,7 +627,7 @@ struct ApprovalView: View {
         }
         .onDisappear { scanning = false }
         .confirmationDialog("Reject this join request?", isPresented: $rejecting, titleVisibility: .visible) {
-            Button("Reject Request", role: .destructive) { Task { await model.perform {
+            Button("Reject", role: .destructive) { Task { await model.perform {
                 try await model.client?.rejectJoin(channel: request.channel, requestId: request.id)
                 rejected = true
                 await model.refresh()
