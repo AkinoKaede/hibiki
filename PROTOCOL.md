@@ -13,7 +13,7 @@ The `hibiki.v3` package is split by function in `lib/proto`:
 
 | File | Responsibility |
 | --- | --- |
-| `membership.proto` | Device certificates, genesis, joins and signed membership history |
+| `membership.proto` | Device certificates, genesis and signed membership history |
 | `operation.proto` | Service kinds, queued operations and target states |
 | `control.proto` | Management requests, replies and errors |
 | `relay.proto` | WebSocket greeting, authentication, routing and notifications |
@@ -27,7 +27,7 @@ The desktop, server and iOS Rust framework share this codec.
 `hibiki_lib::{encode, encode_secret, decode}` remains the separate Postcard codec
 for local IPC, identities, trust files, database blobs, invitations, signing inputs
 and hashes. Never sign or hash re-encoded Protobuf as a replacement for a historical
-preimage: Protobuf is not a canonical serialization. Network conversions preserve legacy certificates, signatures, history hashes and trust checkpoints. V3 admission requests use bounded canonical Postcard blobs inside Protobuf messages, signed under `join/v3`. New genesis records use `genesis/v2`; new membership events use `membership/v3` after an explicit signed upgrade (or immediately for a new channel).
+preimage: Protobuf is not a canonical serialization. Network conversions preserve certificates, signatures, history hashes and trust checkpoints. Admission requests use bounded canonical Postcard blobs inside Protobuf messages, signed under `join/v3`. Genesis records are signed under `genesis/v2` and membership events under `membership/v3`.
 
 ## Compatibility contract
 
@@ -35,7 +35,7 @@ The schema, message behavior and limits at the first publication are the
 `hibiki/3` baseline. Application release numbers need not match. A newer server,
 desktop client or iOS client must continue supporting this baseline for as long
 as it advertises `hibiki/3`. A same-major upgrade requires no simultaneous rollout.
-Older protocol majors, including v2, are unsupported at runtime. Upgrading from v2 requires upgrading every component; historical signed channel data remains readable.
+Older protocol majors are unsupported at runtime. Upgrading requires upgrading every component, and channels from earlier releases are not migrated.
 
 Within this major version:
 
@@ -113,12 +113,10 @@ secret-bearing message bodies are never logged.
 
 ## Baseline tests
 
-The old v2 fixture files remain unchanged as historical evidence; the v3 fixtures freeze the new live protocol.
-
 `lib/tests/fixtures/wire-v3.descriptor` freezes field numbers, types, oneof
 membership and enum values across all five schemas. `wire-v3.hex` freezes bytes for
 all network variants. `wire-identity.postcard` contains only a synthetic test
-identity; it also anchors legacy storage and signed preimages. Do not regenerate
+identity; it also anchors the identity storage format and signed preimages. Do not regenerate
 published fixtures to silence a compatibility failure.
 
 Tests verify both directions with an independent baseline decoder and a future

@@ -212,9 +212,7 @@ USB cards work without registration. NFC has one process-local public snapshot:
 use **Use NFC Key** in Status to read and immediately use a key, **Rescan NFC Key**
 to replace it, or **Forget NFC Key** to clear it. Reading never asks for a PIN. Failed or canceled reads preserve the previous record. Backgrounding and
 network reconnects retain completed records; a cold launch starts empty. No card
-information or names are persisted. Upgrading deletes the obsolete `cards.bin`
-and `nfc-cards.bin` files without importing them. Device identity and pairing
-storage are independent of these files.
+information or names are persisted.
 
 Security Keys is a read-only information viewer. USB reads on entry/insertion;
 NFC reads only after tapping **Read NFC Information**. Viewing another card does
@@ -406,8 +404,7 @@ removes only that request and permits a later new application.
 ## Members, Ping and card prompts
 
 Tap a row in a channel's Members list to view the device's full ID, online status,
-channel and all 24 verification words. Details follow the grouped peer-information
-layout of sing-box-for-apple's Tailscale views. Ping lives in this detail page and
+channel and all 24 verification words. Ping lives in this detail page and
 shows a live line chart of the most recent 30 encrypted round trips, current and
 average RTT, connection setup time and measurement time. Start/Stop is in the
 section header. Each round uses a separate diagnostic session, followed by a

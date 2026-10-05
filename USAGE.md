@@ -179,7 +179,7 @@ hibiki init --server wss://hibiki.example.com/hibiki --name desktop
 hibiki channel join 'hibiki-invite-v2:...'
 ```
 
-`join` consumes the invitation and waits for approval. Invitations expire after 24 hours, but submitted requests remain pending. Old PSK invitations are no longer accepted. In another terminal on an existing member device, run:
+`join` consumes the invitation and waits for approval. Invitations expire after 24 hours, but submitted requests remain pending. In another terminal on an existing member device, run:
 
 ```sh
 hibiki channel approve personal
