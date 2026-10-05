@@ -43,7 +43,9 @@ pub async fn daemon_status(app: &App) -> Result<DaemonStatus> {
 pub fn setup(app: &App) {
     eprintln!("\n{HEADING}Next steps (show again with hibiki setup):{HEADING:#}");
     eprintln!("1. Join an administrator/member invitation: hibiki channel join 'INVITATION'");
-    eprintln!("   Obtain the PSK separately; compare verification words for member approval.");
+    eprintln!(
+        "   New invitations include the PSK; older invitations ask for it. Compare all verification words before approval."
+    );
     eprintln!("2. On requesting devices, select the joined channel: hibiki use NAME");
     eprintln!(
         "3. Edit {:?}: enable scdaemon and/or pinentry only on providers.",
@@ -206,4 +208,132 @@ pub async fn inspect(app: &App, doctor: bool) -> Result<()> {
         bail!("{failures} check(s) need attention");
     }
     Ok(())
+}
+
+pub async fn inspect_format(app: &App, doctor: bool, json: bool) -> Result<()> {
+    if !json {
+        return inspect(app, doctor).await;
+    }
+    let snapshot = crate::management::local_snapshot(app).await?;
+    let mut issues = Vec::new();
+    if !snapshot.daemon_running {
+        issues.push("daemon is not running".to_owned());
+    }
+    if !snapshot.daemon_relay_connected {
+        issues.push("daemon relay is not connected".to_owned());
+    }
+    if let Some(mut active) = snapshot.running_config.clone() {
+        active.default_channel = app.config.default_channel.clone();
+        if active != app.config {
+            issues.push("daemon configuration differs from disk; restart hibiki daemon".into());
+        }
+    }
+    let mut checks = Vec::new();
+    let mut relay_policy = None;
+    if doctor {
+        for service in [ServiceKind::Scdaemon, ServiceKind::Pinentry] {
+            if app.config.service(service).enabled {
+                match crate::provider::program(app, service).await {
+                    Ok(path) => checks.push(
+                        serde_json::json!({"service":service,"program":path,"available":true}),
+                    ),
+                    Err(error) => {
+                        issues.push(format!("{service:?}: {error:#}"));
+                        checks.push(serde_json::json!({"service":service,"available":false}));
+                    }
+                }
+            }
+        }
+        match tokio::time::timeout(Duration::from_secs(15), async {
+            let manager = crate::management::Manager::connect(app.clone()).await?;
+            match manager.connection.request(Control::Policy).await? {
+                Reply::Policy {
+                    allow_client_channel_creation,
+                } => Ok(allow_client_channel_creation),
+                _ => bail!("invalid policy response"),
+            }
+        })
+        .await
+        {
+            Ok(Ok(allowed)) => relay_policy = Some(allowed),
+            Ok(Err(error)) => issues.push(format!("relay authentication: {error:#}")),
+            Err(_) => issues.push("relay authentication timed out".into()),
+        }
+    }
+    println!(
+        "{}",
+        serde_json::to_string_pretty(
+            &serde_json::json!({"schema_version":1,"status":snapshot,"native_checks":checks,"allow_client_channel_creation":relay_policy,"issues":issues})
+        )?
+    );
+    if !issues.is_empty() {
+        bail!("some components need attention");
+    }
+    Ok(())
+}
+
+/// Uses the running daemon's executor connection; management never announces.
+pub async fn ping(
+    app: &App,
+    channel: String,
+    peer: String,
+    count: u16,
+) -> Result<hibiki_lib::protocol::PingReport> {
+    if !(1..=20).contains(&count) {
+        bail!("ping count must be 1..20");
+    }
+    tokio::time::timeout(Duration::from_secs(20 + 5 * u64::from(count)), async {
+        let mut stream = UnixStream::connect(app.paths.ipc_socket())
+            .await
+            .context("start hibiki daemon to ping devices")?;
+        let bytes = encode(&LocalRequest::Ping {
+            channel,
+            peer,
+            count,
+        })?;
+        stream.write_u32(bytes.len() as u32).await?;
+        stream.write_all(&bytes).await?;
+        let length = stream.read_u32().await?;
+        if length > 65536 {
+            bail!("invalid ping response");
+        }
+        let mut bytes = vec![0; length as usize];
+        stream.read_exact(&mut bytes).await?;
+        let result: std::result::Result<hibiki_lib::protocol::PingReport, String> = decode(&bytes)?;
+        result.map_err(anyhow::Error::msg)
+    })
+    .await
+    .context("ping timed out")?
+}
+pub fn ping_text(report: &hibiki_lib::protocol::PingReport) -> String {
+    let mut text = format!(
+        "Device: {}\nConnection setup: {:.2} ms\n",
+        report.peer,
+        report.setup_micros as f64 / 1000.0
+    );
+    for (i, rtt) in report.round_trips_micros.iter().enumerate() {
+        text.push_str(&format!(
+            "Ping {}: {}\n",
+            i + 1,
+            rtt.map(|v| format!("{:.2} ms", v as f64 / 1000.0))
+                .unwrap_or_else(|| "Timed out".into())
+        ));
+    }
+    let received: Vec<_> = report
+        .round_trips_micros
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    if !received.is_empty() {
+        text.push_str(&format!(
+            "Received: {}/{} · min/avg/max: {:.2}/{:.2}/{:.2} ms\n",
+            received.len(),
+            report.round_trips_micros.len(),
+            *received.iter().min().unwrap() as f64 / 1000.0,
+            received.iter().sum::<u64>() as f64 / received.len() as f64 / 1000.0,
+            *received.iter().max().unwrap() as f64 / 1000.0
+        ));
+    }
+    text
 }

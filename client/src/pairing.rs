@@ -8,7 +8,6 @@ use anyhow::{Context, Result, bail};
 use hibiki_lib::{
     channel::{JoinRequest, VerifiedChannelState},
     identity::Device,
-    now,
 };
 use std::io::{BufRead, Read, Write};
 
@@ -21,7 +20,11 @@ fn write_device(output: &mut impl Write, device: &Device) -> Result<()> {
     // Debug formatting escapes terminal control sequences in untrusted display names.
     writeln!(output, "{HEADING}Device name:{HEADING:#} {:?}", device.name)?;
     writeln!(output, "{HEADING}Device ID:{HEADING:#} {}", device.id())?;
-    writeln!(output, "{HEADING}Verification words: {words}{HEADING:#}")?;
+    writeln!(
+        output,
+        "{HEADING}Verification words:{HEADING:#}\n{}",
+        crate::presentation::words(&words)
+    )?;
     writeln!(
         output,
         "These 24 words verify this device’s public key. They are not a recovery phrase."
@@ -51,19 +54,16 @@ pub fn choose_approval(
     let output = &mut output;
     let mut candidates = Vec::new();
     for request in requests {
-        request.verify()?;
-        let body = &request.body;
-        if body.channel_id != state.id
-            || body.genesis_hash != state.genesis_hash
-            || body.psk_epoch != state.psk_epoch
-            || body.created_at > now() + 30
-        {
-            bail!("pending request does not match the current channel");
-        }
+        hibiki_core::management::validate_pending(&request, state)?;
         let id = request.id()?;
-        if request_id.is_none_or(|wanted| wanted == id) {
-            candidates.push((id, request));
-        }
+        candidates.push((id, request));
+    }
+    if let Some(prefix) = request_id {
+        let id = hibiki_lib::selection::resolve_id(
+            prefix,
+            candidates.iter().map(|(id, _)| id.as_str()),
+        )?;
+        candidates.retain(|(candidate, _)| candidate == &id);
     }
     candidates.sort_by(|a, b| a.0.cmp(&b.0));
     if candidates.is_empty() {
@@ -151,7 +151,9 @@ mod tests {
                 .is_none()
             );
             let text = String::from_utf8(output).unwrap();
-            assert!(text.contains(&request.body.device.public_key_words().unwrap()));
+            assert!(text.contains(&crate::presentation::words(
+                &request.body.device.public_key_words().unwrap()
+            )));
             assert!(text.contains("[y/N]"));
         }
         for response in ["y\n", "Y\n"] {
@@ -188,7 +190,9 @@ mod tests {
         assert!(
             String::from_utf8(output)
                 .unwrap()
-                .contains(&expected[1].body.device.public_key_words().unwrap())
+                .contains(&crate::presentation::words(
+                    &expected[1].body.device.public_key_words().unwrap()
+                ))
         );
         assert!(
             choose_approval(

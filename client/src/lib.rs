@@ -11,4 +11,7 @@ pub mod stdio;
 pub mod storage;
 pub mod terminal;
 
+pub mod management;
+pub mod presentation;
+
 mod card_pool;

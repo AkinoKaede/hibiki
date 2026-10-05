@@ -9,7 +9,6 @@ use hibiki::{
 };
 use hibiki_lib::{
     channel::*,
-    digest,
     protocol::{Control, JoinState, Reply},
 };
 use std::{io::Write, path::PathBuf, time::Duration};
@@ -45,16 +44,48 @@ enum Commands {
         name: String,
     },
     Daemon,
+    /// Measure encrypted round trips to another device through the relay.
+    Ping {
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = 4)]
+        count: u16,
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Show live daemon, relay and selected-channel status.
-    Status,
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
     /// Diagnose daemon, relay authentication and enabled native providers.
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
     /// Show setup steps and GPG adapter paths without modifying configuration.
     Setup,
 }
 #[derive(Subcommand)]
 enum DeviceCommand {
-    List,
+    /// Measure encrypted round trips to another device through the relay.
+    Ping {
+        device_id: String,
+        #[arg(long)]
+        channel: Option<String>,
+        #[arg(long, default_value_t = 4)]
+        count: u16,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Rename this device without changing its keys, ID or verification words.
+    Rename { name: String },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 #[derive(Subcommand)]
 enum ChannelCommand {
@@ -67,6 +98,8 @@ enum ChannelCommand {
     },
     Invite {
         name: String,
+        #[arg(long)]
+        psk_file: Option<PathBuf>,
     },
     Join {
         invite: String,
@@ -77,6 +110,8 @@ enum ChannelCommand {
     },
     Pending {
         name: String,
+        #[arg(long)]
+        json: bool,
     },
     Approve {
         name: String,
@@ -84,10 +119,7 @@ enum ChannelCommand {
         request_id: Option<String>,
     },
     /// Reject one pending request; the device may submit a new request.
-    Reject {
-        name: String,
-        request_id: String,
-    },
+    Reject { name: String, request_id: String },
     RotatePsk {
         name: String,
         #[arg(long)]
@@ -96,14 +128,18 @@ enum ChannelCommand {
         prompt_psk: bool,
     },
     /// Leave a channel or withdraw this device's pending join requests.
-    Leave {
-        name: String,
-    },
+    Leave { name: String },
     Revoke {
         name: String,
         device_id: String,
+        /// Also revoke all descendants in this approval branch.
+        #[arg(long)]
+        subtree: bool,
     },
-    List,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 fn psk(file: Option<PathBuf>, generate: bool) -> Result<(String, bool)> {
     if let Some(path) = file {
@@ -116,7 +152,7 @@ fn psk(file: Option<PathBuf>, generate: bool) -> Result<(String, bool)> {
         Ok((rpassword::prompt_password("Channel PSK: ")?, false))
     }
 }
-use hibiki_core::management::{append, leave, refresh};
+use hibiki_core::management::refresh;
 
 fn hostname() -> Result<String> {
     let mut info = std::mem::MaybeUninit::<libc::utsname>::uninit();
@@ -144,12 +180,12 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run() -> Result<()> {
+    let args = Args::parse();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_ansi(anstream::AutoStream::choice(&std::io::stderr()) != anstream::ColorChoice::Never)
         .with_writer(std::io::stderr)
         .init();
-    let args = Args::parse();
     if let Commands::Init {
         server,
         name,
@@ -172,8 +208,12 @@ async fn run() -> Result<()> {
     }
     let mut app = App::load(args.config.as_deref())?;
     match args.command {
-        Commands::Status => return hibiki::diagnostics::inspect(&app, false).await,
-        Commands::Doctor => return hibiki::diagnostics::inspect(&app, true).await,
+        Commands::Status { json } => {
+            return hibiki::diagnostics::inspect_format(&app, false, json).await;
+        }
+        Commands::Doctor { json } => {
+            return hibiki::diagnostics::inspect_format(&app, true, json).await;
+        }
         Commands::Setup => {
             hibiki::diagnostics::setup(&app);
             return Ok(());
@@ -197,19 +237,75 @@ async fn run() -> Result<()> {
         return Ok(());
     }
     if let Commands::Device {
-        command: DeviceCommand::List,
+        command:
+            DeviceCommand::Ping {
+                ref device_id,
+                ref channel,
+                count,
+                json,
+            },
+    }
+    | Commands::Ping {
+        ref device_id,
+        ref channel,
+        count,
+        json,
     } = args.command
     {
+        let channel = channel
+            .clone()
+            .or_else(|| app.config.default_channel.clone())
+            .context("select a channel or pass --channel NAME")?;
+        let report = hibiki::diagnostics::ping(
+            &app,
+            app.resolve_channel(&channel)?,
+            device_id.clone(),
+            count,
+        )
+        .await?;
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &serde_json::json!({"schema_version":1,"ping":report})
+                )?
+            );
+        } else {
+            print!("{}", hibiki::diagnostics::ping_text(&report));
+        }
+        return Ok(());
+    }
+    if let Commands::Device {
+        command: DeviceCommand::Rename { ref name },
+    } = args.command
+    {
+        let mut manager = hibiki::management::Manager::connect(app.clone()).await?;
+        manager.rename(name.clone()).await?;
         println!(
-            "local {} {}",
-            app.identity.device.id(),
-            app.identity.device.name
+            "Renamed this device to {}\nDevice ID: {}",
+            hibiki::presentation::safe(name),
+            app.identity.device.id()
         );
-        for proof in app.proofs()? {
-            let state = proof.verify()?;
-            for (id, device) in state.members() {
-                println!("{} {} {}", state.name, id, device.name);
-            }
+        eprintln!(
+            "Keys and verification words are unchanged. Restart the daemon to refresh its local name."
+        );
+        return Ok(());
+    }
+    if let Commands::Device {
+        command: DeviceCommand::List { json },
+    } = args.command
+    {
+        let snapshot = match hibiki::management::Manager::connect(app.clone()).await {
+            Ok(manager) => manager.snapshot().await?,
+            Err(_) => hibiki::management::local_snapshot(&app).await?,
+        };
+        if json {
+            println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        } else {
+            print!(
+                "{}",
+                hibiki::presentation::devices(&snapshot.local_device, &snapshot.channels)
+            );
         }
         return Ok(());
     }
@@ -218,42 +314,31 @@ async fn run() -> Result<()> {
     };
     let (conn, _events) =
         Connection::open(&app.config.server, app.config.allow_insecure, &app.identity).await?;
+    let mut manager = hibiki::management::Manager {
+        app: app.clone(),
+        connection: conn.clone(),
+    };
     match command {
         ChannelCommand::Create {
             name,
             psk_file,
             prompt_psk,
         } => {
-            let (secret, generated) = psk(psk_file, !prompt_psk)?;
-            let verifier = hash_psk(&secret)?;
-            let genesis = ChannelGenesis::create(&app.identity, name, &verifier)?;
-            let expected = genesis.clone();
-            let Reply::Proof(proof) = conn.request(Control::Create { genesis, verifier }).await?
-            else {
-                bail!("invalid creation response");
+            let (secret, _) = psk(psk_file, !prompt_psk)?;
+            let secret = zeroize::Zeroizing::new(secret);
+            let invite = manager.create(name, secret.to_string()).await?;
+            let parsed = ParsedInvitation::import(&invite)?;
+            let InvitationKind::Member(value) = parsed.invitation else {
+                unreachable!()
             };
-            if proof.genesis != expected || !proof.events.is_empty() {
-                bail!("server altered channel genesis");
-            }
-            let proof = app.bootstrap(proof, None)?;
-            println!("{HEADING}channel{HEADING:#} {}", proof.genesis.body.id);
-            eprintln!("Next: hibiki channel invite NAME; on requesting devices, hibiki use NAME.");
-            if generated {
-                println!("{HEADING}PSK{HEADING:#} {secret}");
-            }
+            println!("channel {}", value.genesis.body.id);
+            println!("invite {}", &*invite);
+            eprintln!("Channel created. Next: hibiki channel invite NAME; hibiki use NAME.");
         }
-        ChannelCommand::Invite { name } => {
+        ChannelCommand::Invite { name, psk_file } => {
             let id = app.resolve_channel(&name)?;
-            let proof = refresh(&app, &conn, &id).await?;
-            let state = proof.verify()?;
-            state.member(&app.identity.device.id())?;
-            let invite = Invite {
-                version: 1,
-                server: app.config.server.clone(),
-                genesis: proof.genesis,
-                checkpoint: state.checkpoint(),
-            };
-            println!("{}", invite.export()?);
+            let secret = psk(psk_file, false)?.0;
+            println!("{}", &*manager.invitation(&id, Some(secret)).await?);
         }
         ChannelCommand::Join {
             invite,
@@ -261,128 +346,73 @@ async fn run() -> Result<()> {
             no_wait,
         } => {
             pairing::show_device(&mut std::io::stderr().lock(), &app.identity.device)?;
-            if invite.starts_with("hibiki-init-v1:") {
-                let invite = EmptyChannelInvite::import(&invite)?;
-                if invite.server != app.config.server {
-                    bail!("initialization invitation server mismatch");
-                }
-                let genesis = invite.founder_genesis(&app.identity)?;
-                // Recovery after a lost Claim reply is allowed only for this exact founder.
-                let existing = conn
-                    .request(Control::GetChannel {
-                        channel: invite.id.clone(),
-                    })
-                    .await;
-                let proof = if let Ok(Reply::Proof(proof)) = existing {
-                    proof
-                } else {
-                    let (secret, _) = psk(psk_file, false)?;
-                    let Reply::Proof(proof) = conn
-                        .request(Control::Claim {
-                            genesis: genesis.clone(),
-                            psk: secret,
-                        })
-                        .await?
-                    else {
-                        bail!("invalid claim response");
-                    };
-                    proof
-                };
-                if proof.genesis != genesis {
-                    bail!(
-                        "initialization invitation already claimed by another identity or altered; obtain a member invitation"
-                    );
-                }
-                proof.verify()?.member(&app.identity.device.id())?;
-                app.bootstrap(proof, None)?;
-                println!("{SUCCESS}joined{SUCCESS:#} {} {}", invite.name, invite.id);
+            let invite = zeroize::Zeroizing::new(invite);
+            let embedded = ParsedInvitation::import(&invite)?.psk.is_some();
+            if embedded && psk_file.is_some() {
+                bail!("invitation already contains a PSK; remove --psk-file");
+            }
+            let external = if embedded {
+                None
+            } else {
+                Some(psk(psk_file, false)?.0)
+            };
+            let result = manager.join(invite.to_string(), external).await?;
+            if let Some(request_id) = &result.request {
+                // Flush before waiting: scripts and the approving terminal need this ID.
+                println!("request {request_id}");
+                std::io::stdout().flush()?;
                 eprintln!(
-                    "Next on requesting devices: hibiki use {:?}; then hibiki doctor.",
-                    invite.name
+                    "Channel: {}\nChannel ID: {}\nRequest ID: {request_id}\nStatus: Awaiting approval",
+                    hibiki::presentation::safe(&result.name),
+                    result.channel
                 );
-                conn.close();
-                return Ok(());
-            }
-            let invite = Invite::import(&invite)?;
-            if invite.server != app.config.server {
-                bail!("invite server does not match configured server");
-            }
-            let id = invite.genesis.body.id.clone();
-            let Reply::Proof(proof) = conn
-                .request(Control::GetChannel {
-                    channel: id.clone(),
-                })
-                .await?
-            else {
-                bail!("invalid channel response");
-            };
-            let proof = app.bootstrap(proof, Some(&invite))?;
-            let state = proof.verify()?;
-            let (secret, _) = psk(psk_file, false)?;
-            let request = JoinRequest::create(&app.identity, &state)?;
-            let request_id = request.id()?;
-            conn.request(Control::Join {
-                request,
-                psk: secret,
-            })
-            .await?;
-            println!("{HEADING}request{HEADING:#} {request_id}");
-            std::io::stdout().flush()?;
-            eprintln!(
-                "Ask a trusted member to run hibiki channel approve {:?} and verify the 24 words and request ID {request_id} before answering y.",
-                state.name
-            );
-            eprintln!("To cancel joining: hibiki channel leave {:?}", state.name);
-            if !no_wait {
-                loop {
-                    let Reply::JoinStatus(status) = conn
-                        .request(Control::JoinStatus {
-                            channel: id.clone(),
-                            request: request_id.clone(),
-                        })
-                        .await?
-                    else {
-                        bail!("invalid join status response");
-                    };
-                    match status {
-                        JoinState::Member => {
-                            refresh(&app, &conn, &id)
-                                .await?
-                                .verify()?
-                                .member(&app.identity.device.id())?;
-                            println!("{SUCCESS}joined{SUCCESS:#} {} {}", state.name, id);
-                            eprintln!(
-                                "Next on requesting devices: hibiki use {:?}; then hibiki doctor.",
-                                state.name
-                            );
-                            break;
+                eprintln!(
+                    "Compare all 24 words with the approving device. Approve with: hibiki channel approve {}\nWithdraw with: hibiki channel leave {}",
+                    hibiki::presentation::quote(&result.channel),
+                    hibiki::presentation::quote(&result.channel)
+                );
+                if !no_wait {
+                    loop {
+                        match manager.join_status(&result.channel, request_id).await? {
+                            JoinState::Member => {
+                                refresh(&app, &conn, &result.channel).await?;
+                                break;
+                            }
+                            JoinState::Absent => bail!(
+                                "request was rejected, withdrawn or invalidated; obtain a current invitation"
+                            ),
+                            JoinState::Pending => {}
                         }
-                        JoinState::Absent => bail!(
-                            "request was rejected, withdrawn or invalidated; obtain a current invitation and submit a new request"
-                        ),
-                        JoinState::Pending => {}
+                        tokio::select! { _=tokio::signal::ctrl_c()=>bail!("stopped waiting; request remains pending"), _=tokio::time::sleep(Duration::from_secs(1))=>{} }
                     }
-                    tokio::select! {
-                        _ = tokio::signal::ctrl_c() => bail!("stopped waiting; request remains pending"),
-                        _ = tokio::time::sleep(Duration::from_secs(1)) => {}
-                    }
+                } else {
+                    return Ok(());
                 }
             }
+            println!(
+                "Joined channel: {}\nChannel ID: {}",
+                hibiki::presentation::safe(&result.name),
+                result.channel
+            );
+            eprintln!(
+                "Next: hibiki use {}",
+                hibiki::presentation::quote(&result.channel)
+            );
         }
-        ChannelCommand::Pending { name } => {
+        ChannelCommand::Pending { name, json } => {
             let id = app.resolve_channel(&name)?;
-            refresh(&app, &conn, &id).await?;
-            let Reply::Requests(requests) = conn.request(Control::Pending { channel: id }).await?
-            else {
-                bail!("invalid pending response");
-            };
-            for request in requests {
-                request.verify()?;
+            let row = manager.channel(&id).await?;
+            if json {
                 println!(
-                    "{} {} {}",
-                    request.id()?,
-                    request.body.device.id(),
-                    request.body.device.name
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"schema_version":1,"channel":{"id":row.id,"name":row.name},"requests":row.pending})
+                    )?
+                );
+            } else {
+                print!(
+                    "{}",
+                    hibiki::presentation::pending(&row.name, &row.id, &row.pending)
                 );
             }
         }
@@ -407,28 +437,29 @@ async fn run() -> Result<()> {
             )?;
             if let Some(request) = request {
                 let request_id = request.id()?;
-                append(&app, &conn, &id, MembershipAction::Admit(request), None).await?;
-                println!("{SUCCESS}approved{SUCCESS:#} {request_id}");
+                manager.approve(&id, &request_id).await?;
+                println!(
+                    "{SUCCESS}Approved request:{SUCCESS:#} {request_id}\nChannel: {}\nDevice: {}\nDevice ID: {}",
+                    hibiki::presentation::safe(&name),
+                    hibiki::presentation::safe(&request.body.device.name),
+                    request.body.device.id()
+                );
             } else {
                 println!("{WARNING}not approved{WARNING:#}");
             }
         }
         ChannelCommand::Reject { name, request_id } => {
             let id = app.resolve_channel(&name)?;
-            refresh(&app, &conn, &id)
-                .await?
-                .verify()?
-                .member(&app.identity.device.id())?;
-            let Reply::Ok = conn
-                .request(Control::RejectJoin {
-                    channel: id,
-                    request: request_id.clone(),
-                })
-                .await?
-            else {
-                bail!("invalid rejection response");
-            };
-            println!("{SUCCESS}rejected{SUCCESS:#} {request_id}");
+            let request_id = manager.resolve_request(&id, &request_id).await?;
+            manager.reject(&id, &request_id).await?;
+            println!(
+                "Rejected request: {request_id}\nChannel: {} ({id})",
+                hibiki::presentation::safe(&name)
+            );
+            eprintln!(
+                "Next: hibiki channel pending {}",
+                hibiki::presentation::quote(&id)
+            );
         }
         ChannelCommand::RotatePsk {
             name,
@@ -437,11 +468,7 @@ async fn run() -> Result<()> {
         } => {
             let id = app.resolve_channel(&name)?;
             let (secret, generated) = psk(psk_file, !prompt_psk)?;
-            let verifier = hash_psk(&secret)?;
-            let action = MembershipAction::ChangePsk {
-                verifier_commitment: digest(verifier.as_bytes()),
-            };
-            append(&app, &conn, &id, action, Some(verifier)).await?;
+            manager.rotate_with_psk(&id, &secret).await?;
             println!("{SUCCESS}PSK updated; existing members retained{SUCCESS:#}");
             if generated {
                 println!("{HEADING}PSK{HEADING:#} {secret}");
@@ -449,52 +476,49 @@ async fn run() -> Result<()> {
         }
         ChannelCommand::Leave { name } => {
             let id = app.resolve_channel(&name)?;
-            leave(&app, &conn, &id).await?;
-            if app.config.default_channel.as_ref() == Some(&id) {
-                app.config.default_channel = None;
-                app.save_config()?;
-            }
-            println!("{SUCCESS}left{SUCCESS:#} {name} {id}");
+            manager.leave(&id).await?;
+            println!(
+                "Left channel: {}\nChannel ID: {id}",
+                hibiki::presentation::safe(&name)
+            );
+            eprintln!("Next: hibiki channel list");
             if app.proof(&id)?.verify()?.members().is_empty() {
                 eprintln!(
                     "{WARNING}No members remain;{WARNING:#} ask the server administrator to recreate the channel if needed."
                 );
             }
         }
-        ChannelCommand::Revoke { name, device_id } => {
+        ChannelCommand::Revoke {
+            name,
+            device_id,
+            subtree,
+        } => {
             let id = app.resolve_channel(&name)?;
-            append(
-                &app,
-                &conn,
-                &id,
-                MembershipAction::Revoke {
-                    device_id: device_id.clone(),
-                },
-                None,
-            )
-            .await?;
-            println!("{SUCCESS}revoked{SUCCESS:#} {device_id}");
+            let device_id = manager.resolve_device(&id, &device_id).await?;
+            let revision = manager.channel(&id).await?.revision;
+            let affected = manager.revoke(&id, &device_id, subtree, revision).await?;
+            println!(
+                "Revoked {} device(s):\n{}",
+                affected.len(),
+                affected.join("\n")
+            );
+            println!(
+                "Revoked device: {device_id}\nChannel: {} ({id})",
+                hibiki::presentation::safe(&name)
+            );
+            eprintln!("Next: hibiki device list");
         }
-        ChannelCommand::List => {
-            for proof in app.proofs()? {
-                let proof = match refresh(&app, &conn, &proof.genesis.body.id).await {
-                    Ok(current) => current,
-                    Err(_) => {
-                        println!(
-                            "{} {} {WARNING}unavailable{WARNING:#}",
-                            proof.genesis.body.id, proof.genesis.body.name
-                        );
-                        continue;
-                    }
-                };
-                let state = proof.verify()?;
+        ChannelCommand::List { json } => {
+            let snapshot = manager.snapshot().await?;
+            if json {
                 println!(
-                    "{} {} revision={} active={}",
-                    state.id,
-                    state.name,
-                    state.sequence,
-                    state.member(&app.identity.device.id()).is_ok()
+                    "{}",
+                    serde_json::to_string_pretty(
+                        &serde_json::json!({"schema_version":1,"channels":snapshot.channels})
+                    )?
                 );
+            } else {
+                print!("{}", hibiki::presentation::channels(&snapshot.channels));
             }
         }
     }
