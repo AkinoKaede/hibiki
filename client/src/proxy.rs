@@ -167,7 +167,6 @@ async fn password_race(
             password_remote(hub, &open, &settings, line, &stop, tx, targets).await
         });
     }
-    let mut canceled = None;
     let mut failed = None;
     loop {
         tokio::select! {
@@ -180,13 +179,13 @@ async fn password_race(
                     let terminal = result.lines.pop().context("missing pinentry result")?;
                     result.lines.clear();
                     result.lines.push(terminal);
-                    if result.fully_canceled() { return Ok(result); }
-                    if result.canceled() { canceled = Some(result); }
-                    else { failed = Some(result); }
+                    if result.canceled() { return Ok(result); }
+                    failed = Some(result);
                 },
                 Some(Ok(Ok(None))) => {},
+                Some(Ok(Err(error))) if error.is::<hibiki_core::endpoint::CandidateIgnored>() => {},
                 Some(_) => failed = Some(AssuanResult::error(assuan::GENERAL, "pinentry candidate failed")),
-                None => return Ok(failed.or(canceled).unwrap_or_else(||
+                None => return Ok(failed.unwrap_or_else(||
                     AssuanResult::error(assuan::GENERAL, "no pinentry providers"))),
             }
         }
@@ -211,7 +210,6 @@ async fn password_remote(
     let mut tasks = JoinSet::new();
     let mut running = HashSet::new();
     let mut failures = 0;
-    let mut canceled = None;
     let mut failed = None;
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     loop {
@@ -245,8 +243,8 @@ async fn password_remote(
                 }
                 if tasks.is_empty() && status.targets.iter().all(|t| t.state != TargetState::Pending) {
                     operation.finish(false).await?;
-                    if failures == 0 && canceled.is_none() { return Ok(None); }
-                    return Ok(Some(AssuanResult { lines: vec![(if failures == 0 { canceled } else { failed }).unwrap_or_else(||assuan::error(assuan::GENERAL,"no pinentry candidate completed; execution result may be unknown"))] }));
+                    if failures == 0 { return Ok(None); }
+                    return Ok(Some(AssuanResult { lines: vec![failed.unwrap_or_else(||assuan::error(assuan::GENERAL,"no pinentry candidate completed; execution result may be unknown"))] }));
                 }
             },
             result=tasks.join_next(), if !tasks.is_empty()=>{
@@ -254,7 +252,7 @@ async fn password_remote(
                     running.remove(&peer);
                     match result {
                         Ok(Some(result)) if result.success()=>{ operation.finish(true).await?; return Ok(Some(result)); },
-                        Ok(Some(mut result)) if result.fully_canceled()=>{
+                        Ok(Some(mut result)) if result.canceled()=>{
                             let terminal=result.lines.pop().context("missing pinentry cancellation")?;
                             // Returning drops the remaining candidates immediately. Queue
                             // cleanup must not delay cancellation behind relay traffic.
@@ -262,9 +260,9 @@ async fn password_remote(
                             tokio::spawn(async move { let _=operation.finish(false).await; });
                             return Ok(Some(AssuanResult { lines: vec![terminal] }));
                         },
-                        Ok(Some(mut result)) if result.canceled()=>canceled=result.lines.pop(),
                         Ok(Some(mut result))=>{failures+=1;failed=result.lines.pop();},
                         Ok(None)=>{},
+                        Err(error) if error.is::<hibiki_core::endpoint::CandidateIgnored>()=>{},
                         Err(_)=>failures+=1,
                     }
                     if !hub.connection().closed.is_cancelled() {
@@ -605,6 +603,36 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
 #[cfg(test)]
 mod card_state_tests {
     use super::*;
+    #[tokio::test]
+    async fn ignore_discards_partial_pin_and_does_not_become_an_assuan_result() {
+        use hibiki_lib::protocol::SessionOutput;
+        let (tx, _input) = mpsc::channel(8);
+        let (out, rx) = mpsc::channel(8);
+        let mut ep = Endpoint::new(tx, rx, CancellationToken::new(), CancellationToken::new());
+        ep.command("GETPIN".into()).await.unwrap();
+        out.send(SessionOutput::Line {
+            request: 1,
+            line: "D partial-secret".into(),
+        })
+        .await
+        .unwrap();
+        out.send(SessionOutput::Ignored { request: 1 })
+            .await
+            .unwrap();
+        let error = collect(&mut ep, None).await.unwrap_err();
+        assert!(error.is::<hibiki_core::endpoint::CandidateIgnored>());
+        ep.command("GETPIN".into()).await.unwrap();
+        out.send(SessionOutput::Line {
+            request: 2,
+            line: "OK".into(),
+        })
+        .await
+        .unwrap();
+        let result = collect(&mut ep, None).await.unwrap();
+        assert_eq!(result.lines.len(), 1);
+        assert_eq!(&*result.lines[0], b"OK");
+    }
+
     #[test]
     fn enumeration_does_not_select_the_first_registered_card() {
         let mut state = CardState::default();

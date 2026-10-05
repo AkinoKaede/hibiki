@@ -513,10 +513,23 @@ def main():
                 with Assuan(a, 'pinentry') as pin:
                     result = pin.command(b'GETPIN')
                     if canceled:
-                        assert result[-1].startswith(b'ERR 198 '), result
+                        assert result[-1].startswith(b'ERR 99 '), result
                         assert not any(line.startswith(b'D ') for line in result)
                     else: assert b'D desktop' in result, result
                 wait_for(a.idle)
+            # With no remaining candidates, Ignore ends promptly as an aggregate
+            # failure; no custom message or NO_DATA is forwarded to gpg-agent.
+            a.services(); a.restart()
+            mobile.send(action='usb_presence', present=False); mobile.wait('usb-presence')
+            mobile.pin_action = 'dismiss_request'
+            with Assuan(a, 'pinentry') as pin:
+                started = time.monotonic()
+                result = pin.command(b'GETPIN')
+                assert result == [b'ERR 1 no pinentry providers'], result
+                assert time.monotonic() - started < 3, 'all ignored waited for timeout'
+                # Explicitly starting another command is allowed after ignoring.
+                mobile.pin_action = None
+                assert pin.command(b'GETPIN')[-1] == b'OK'
             mobile.pin_action = None
             a.mode()
             print('PASS: iOS Cancel and connected X terminate input races; disconnected X only withdraws mobile', flush=True)

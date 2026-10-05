@@ -146,7 +146,28 @@ fn validate_fragment(value: &e2ee::Fragment) -> Result<()> {
 }
 
 /// Baseline hibiki/2 needs no extension capabilities. Add names only with gated uses.
+pub const PINENTRY_IGNORE: &str = "pinentry-ignore-v1";
 pub const CAPABILITIES: &[&str] = &[];
+
+/// Peer-only features are negotiated inside Noise, not by the relay.
+pub fn supported_peer_capabilities() -> Vec<String> {
+    vec![PINENTRY_IGNORE.into()]
+}
+
+/// Enforce peer extensions on both send and receive, independently of the relay.
+pub fn validate_private_capabilities(
+    message: &PrivateMessage,
+    capabilities: &[String],
+) -> Result<()> {
+    if matches!(
+        message,
+        PrivateMessage::Output(SessionOutput::Ignored { .. })
+    ) && !capabilities.iter().any(|value| value == PINENTRY_IGNORE)
+    {
+        return Err(invalid("pinentry ignore capability required"));
+    }
+    Ok(())
+}
 pub fn supported_capabilities() -> Vec<String> {
     CAPABILITIES
         .iter()

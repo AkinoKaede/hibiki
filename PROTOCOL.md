@@ -62,9 +62,10 @@ private operations as a compatibility fallback.
 Card preparation rejection is an additive failure detail: `CardPreparationUnavailable.rejected`
 (field 1, default false) identifies explicit whole-operation cancellation during card preparation.
 Updated requesters return Assuan cancellation immediately. During password entry,
-the existing Assuan error 198 (`GPG_ERR_FULLY_CANCELED`) cancels the entire race,
-while error 99 dismisses only the responding candidate. Baseline requesters ignore
-the field and retain unavailable/timeout behavior; the canceling provider still cannot
+standard Assuan cancellation errors 99 (`GPG_ERR_CANCELED`) and 198
+(`GPG_ERR_FULLY_CANCELED`) both cancel the entire race. Native terminal errors
+retain their original code and source. Baseline requesters ignore the card rejection
+field and retain unavailable/timeout behavior; the canceling provider still cannot
 execute the operation. Upgrade both endpoints for immediate rejection reporting.
 Existing baseline fields, variants and byte fixtures remain unchanged.
 
@@ -86,6 +87,23 @@ pinned keys, the initiator offers capabilities in `OpenService` or `PingOpen`.
 supported capabilities. The initiator rejects unoffered selections. Lists are
 protected inside the Noise session; relay capabilities do not authorize a peer
 extension. This adds no round trip to service or Ping setup.
+
+## Ignoring an input request
+
+`pinentry-ignore-v1` negotiates `SessionOutput.ignored` (oneof field 4), containing
+`SessionOutputIgnored.request` (uint64 field 1). It is a terminal, device-local
+withdrawal for the named active Pinentry request, not an Assuan response. Only
+Pinentry sessions may send it; the request ID must match an active command with
+no outstanding inquiry. The requester discards partial input, removes that
+candidate and continues waiting for the others. The provider releases its queue
+claim. If every candidate exits, the requester returns an aggregate failure;
+a later explicit caller command may start a new race.
+
+Ignore is never forwarded to gpg-agent. It has **no compatibility fallback** to
+NO_DATA, CANCELED, or a legacy failure message. Both peers must negotiate the
+capability before sending or accepting it; unsupported peers fail explicitly.
+Do not reintroduce error-code aliases for Ignore. Ordinary CANCELED (99) and
+FULLY_CANCELED (198) retain whole-operation cancellation semantics.
 
 ## Bounds and private data
 

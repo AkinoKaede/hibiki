@@ -220,6 +220,7 @@ pub enum SessionOutput {
     CardStatus { id: String, state: CardPreparation },
     Line { request: u64, line: Line },
     Failure,
+    Ignored { request: u64 },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)] // The trust proof is bounded and exchanged only at setup.

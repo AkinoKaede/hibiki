@@ -126,7 +126,10 @@ impl Pinentry {
                         AssuanResult { lines }
                     }
                     Err(error) if error.is::<crate::broker::OperationCancelled>() => {
-                        AssuanResult::error(assuan::FULLY_CANCELED, "operation canceled by user")
+                        AssuanResult::error(assuan::CANCELED, "operation canceled by user")
+                    }
+                    Err(error) if error.is::<crate::broker::CandidateWithdrawn>() => {
+                        return Err(error);
                     }
                     Err(_) => AssuanResult::error(assuan::CANCELED, "input canceled or timed out"),
                 });
@@ -237,10 +240,10 @@ mod tests {
                 .is_err()
         );
         for (inserted, explicit_cancel, expected) in [
-            (false, false, assuan::CANCELED),
-            (true, false, assuan::FULLY_CANCELED),
-            (false, true, assuan::FULLY_CANCELED),
-            (true, true, assuan::FULLY_CANCELED),
+            (false, false, None),
+            (true, false, Some(assuan::CANCELED)),
+            (false, true, Some(assuan::CANCELED)),
+            (true, true, Some(assuan::CANCELED)),
         ] {
             client.usb_present(inserted);
             ep.command("GETPIN".into()).await.unwrap();
@@ -254,9 +257,18 @@ mod tests {
             } else {
                 client.dismiss_request(token.clone()).unwrap();
             }
-            assert!(
-                matches!(assuan::parse_response(&ep.next().await.unwrap()).unwrap(), assuan::Response::Err(code) if code == expected)
-            );
+            if let Some(expected) = expected {
+                assert!(
+                    matches!(assuan::parse_response(&ep.next().await.unwrap()).unwrap(), assuan::Response::Err(code) if code == expected)
+                );
+            } else {
+                assert!(
+                    ep.next()
+                        .await
+                        .unwrap_err()
+                        .is::<hibiki_core::endpoint::CandidateIgnored>()
+                );
+            }
             assert!(!client.broker.pending(&token));
             assert!(client.respond(token, b"late reply".to_vec(), true).is_err());
         }

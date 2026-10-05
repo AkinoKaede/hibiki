@@ -389,6 +389,32 @@ fn every_network_variant_roundtrips_and_ignores_unknown_fields() {
 }
 
 #[test]
+fn ignore_roundtrips_and_requires_its_negotiated_capability() {
+    let message = PrivateMessage::Output(SessionOutput::Ignored { request: 7 });
+    roundtrip(&message);
+    let supported = wire::supported_peer_capabilities();
+    let selected = wire::negotiate_capabilities(&supported, &supported).unwrap();
+    assert!(selected.iter().any(|value| value == wire::PINENTRY_IGNORE));
+    wire::validate_private_capabilities(&message, &selected).unwrap();
+    assert!(wire::validate_private_capabilities(&message, &[]).is_err());
+    assert!(wire::validate_private_capabilities(&message, &["unrelated".into()]).is_err());
+    assert!(
+        wire::negotiate_capabilities(&supported, &[])
+            .unwrap()
+            .is_empty()
+    );
+    // Existing Assuan responses remain independent of the Ignore extension.
+    wire::validate_private_capabilities(
+        &PrivateMessage::Output(SessionOutput::Line {
+            request: 7,
+            line: "ERR 99 canceled".into(),
+        }),
+        &[],
+    )
+    .unwrap();
+}
+
+#[test]
 fn explicit_card_rejection_roundtrips_with_baseline_unavailable_fallback() {
     let value = PrivateMessage::Output(SessionOutput::CardStatus {
         id: "prepare".into(),

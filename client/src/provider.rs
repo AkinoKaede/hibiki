@@ -368,15 +368,6 @@ pub async fn open(
                         if let Response::Data(d) = r {
                             assuan::unescape(d)?;
                         }
-                        // Desktop Cancel always ends the whole input operation. Mobile
-                        // dismissal keeps its distinct, device-local CANCELED semantics.
-                        let line = if service == ServiceKind::Pinentry
-                            && matches!(r, Response::Err(code) if code & 0xffff == assuan::CANCELED)
-                        {
-                            assuan::error(assuan::FULLY_CANCELED, "operation canceled by user")
-                        } else {
-                            line
-                        };
                         outputs.send(SessionOutput::Line { request, line }).await?;
                         if inquire {
                             loop {
@@ -668,7 +659,13 @@ async fn insertion_prompt(
     }
     let result = hibiki_core::preparation::query(&mut ep, "CONFIRM".into()).await?;
     ep.close().await;
-    Ok(result.success())
+    if result.success() {
+        Ok(true)
+    } else if result.canceled() {
+        Ok(false)
+    } else {
+        bail!("insertion prompt failed");
+    }
 }
 
 #[cfg(test)]
@@ -878,6 +875,26 @@ done
             );
             ep.close().await;
         }
+    }
+
+    #[tokio::test]
+    async fn insertion_prompt_failure_does_not_reject_or_prevent_later_card_detection() {
+        let fixture = WaitingFixture::new();
+        let mut ep = fixture.endpoint().await;
+        let id = fixture.start(&mut ep, CardTarget::default()).await;
+        until(|| fixture.prompts().len() == 1).await;
+        let pid = fixture.prompts()[0];
+        fixture.write("answer", "ERR 1 unable to display dialog");
+        until(|| !alive(pid)).await;
+        for _ in 0..4 {
+            assert!(!query(&mut ep, "SERIALNO").await.success());
+        }
+        fixture.write("card", "AABB");
+        assert!(
+            matches!(prepared(&mut ep, &id).await, CardPreparation::Ready { serial } if serial == "AABB")
+        );
+        assert_eq!(fixture.prompts().len(), 1);
+        ep.close().await;
     }
 
     #[tokio::test]

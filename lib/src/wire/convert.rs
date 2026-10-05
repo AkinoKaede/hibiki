@@ -883,6 +883,9 @@ impl Wire for SessionOutput {
                 line: line.0.clone(),
             }),
             Self::Failure => Kind::Failure(pb::SessionOutputFailure {}),
+            Self::Ignored { request } => {
+                Kind::Ignored(pb::SessionOutputIgnored { request: *request })
+            }
         };
         pb::SessionOutput { kind: Some(kind) }
     }
@@ -898,6 +901,9 @@ impl Wire for SessionOutput {
                 line: Line(value.line.clone()),
             },
             Kind::Failure(_) => Self::Failure,
+            Kind::Ignored(value) => Self::Ignored {
+                request: value.request,
+            },
         })
     }
 }

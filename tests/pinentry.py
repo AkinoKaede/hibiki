@@ -44,7 +44,9 @@ try:
                 emit(b'D incomplete')
                 emit(b'ERR 83886278 operation canceled')
             elif mode.get('cancel'):
-                emit(b'ERR 83886179 canceled')
+                if mode.get('partial_cancel'):
+                    emit(b'D incomplete')
+                emit(('ERR %d canceled' % mode.get('cancel_code', 83886179)).encode())
             elif mode.get('partial_error'):
                 emit(b'D incomplete')
                 emit(b'ERR 1 failed')

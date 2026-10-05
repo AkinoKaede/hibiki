@@ -54,6 +54,7 @@ message SessionOutput {
     SessionOutputCardStatus card_status = 1;
     SessionOutputLine line = 2;
     SessionOutputFailure failure = 3;
+    SessionOutputIgnored ignored = 4;
   }
 }
 
@@ -68,6 +69,12 @@ message SessionOutputLine {
 }
 
 message SessionOutputFailure {
+}
+
+// The provider withdraws from this input request without canceling other devices.
+// Requires negotiated pinentry-ignore-v1 support; never forwarded to Assuan.
+message SessionOutputIgnored {
+  uint64 request = 1;
 }
 
 message PrivateMessage {

@@ -504,11 +504,19 @@ def test_all():
             print('PASS: lost private-operation result reports unknown and never repeats execution',flush=True)
             a.services();a.restart()
 
-            b.mode(delay=.05,cancel=True);c.mode(delay=.2,password='remote answer')
-            with Assuan(a,'pinentry') as pe:
-                assert pe.command(b'SETDESC Test remote input')[-1]==b'OK'
-                answer=pe.command(b'GETPIN');assert answer == [b'ERR 198 operation canceled by user'],answer
-            wait_for(lambda: all(d.idle() for d in devices))
+            for code in (99, 83886179):
+                for command in (b'GETPIN', b'CONFIRM', b'MESSAGE'):
+                    b.mode(delay=.05, confirm=True, cancel=True, cancel_code=code, partial_cancel=True)
+                    c.mode(delay=.6, confirm=True, password='remote answer')
+                    with Assuan(a,'pinentry') as pe:
+                        assert pe.command(b'SETDESC Test remote input')[-1]==b'OK'
+                        answer=pe.command(command)
+                        assert answer == [('ERR %d canceled' % code).encode()], answer
+                        wait_for(lambda: all(d.idle() for d in devices))
+                        # A new caller command is a new race, never an automatic retry.
+                        b.mode(delay=.01, password='new request')
+                        assert pe.command(b'GETPIN') == [b'D new request', b'OK']
+                    wait_for(lambda: all(d.idle() for d in devices))
             print('PASS: requester with both services disabled, single cancellation terminates all peers',flush=True)
 
             b.mode(fully_cancel=True,delay=.05);c.mode(password='must not win',delay=3)
@@ -540,12 +548,12 @@ def test_all():
             with Assuan(a,'pinentry') as pe: assert b'D local' in pe.command(b'GETPIN')
             wait_for(lambda: all(d.idle() for d in devices))
             a.mode(cancel=True,delay=.01);c.mode(password='remote after local cancel',delay=.2)
-            with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN') == [b'ERR 198 operation canceled by user']
+            with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN') == [b'ERR 83886179 canceled']
             a.mode(delay=3);c.mode(password='remote wins',delay=.05)
             with Assuan(a,'pinentry') as pe: assert b'D remote wins' in pe.command(b'GETPIN')
             wait_for(lambda: all(d.idle() for d in devices))
             a.services();a.restart();b.mode(cancel=True);c.mode(cancel=True)
-            with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN')==[b'ERR 198 operation canceled by user']
+            with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN')==[b'ERR 83886179 canceled']
             print('PASS: local participation, all-cancel and losing process cleanup',flush=True)
 
             b.mode(confirm=True);c.mode(confirm=True)
@@ -655,7 +663,7 @@ def test_all():
             with Assuan(a,'pinentry') as pe: assert b'D local only' in pe.command(b'GETPIN')
             a.mode(cancel=True)
             with Assuan(a,'pinentry') as pe:
-                assert pe.command(b'GETPIN')==[b'ERR 198 operation canceled by user'], 'disabled peers changed cancellation into a failure'
+                assert pe.command(b'GETPIN')==[b'ERR 83886179 canceled'], 'disabled peers changed cancellation into a failure'
             a.mode(partial_error=True)
             with Assuan(a,'pinentry') as pe:
                 assert pe.command(b'GETPIN')==[b'ERR 1 failed'], 'failed candidate leaked partial data or changed the native error'

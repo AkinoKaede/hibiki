@@ -18,6 +18,10 @@ pub struct RequestCancelled;
 #[error("operation canceled by user")]
 pub struct OperationCancelled;
 
+#[derive(Debug, thiserror::Error)]
+#[error("this device declined to provide input")]
+pub struct CandidateWithdrawn;
+
 type Answer = Result<Zeroizing<Vec<u8>>>;
 pub struct Broker {
     tx: mpsc::Sender<NativeEvent>,
@@ -71,7 +75,7 @@ impl Broker {
             Err(if entire_operation {
                 OperationCancelled.into()
             } else {
-                RequestCancelled.into()
+                CandidateWithdrawn.into()
             }),
         )
     }

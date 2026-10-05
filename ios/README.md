@@ -394,7 +394,10 @@ Neither confirmation nor a registered public key is proof of USB readiness.
 
 The request page has a **Cancel** button that cancels the whole operation and
 closes other input candidates. The **×** closes only this device's candidate when
-USB is absent; with USB inserted, it also cancels the whole operation. USB presence
+USB is absent, sending an internal Ignore message so other candidates may continue;
+with USB inserted, it also cancels the whole operation. Ignore requires both peers
+to support `pinentry-ignore-v1`, has no legacy error-code fallback, and never reaches
+gpg-agent. Explicit cancellation returns standard Assuan Canceled (99). USB presence
 is refreshed when × is tapped. A canceled or dismissed card preparation is not
 reopened by metadata queries or target refinement; RESET/RESTART or a new request
 session permits another attempt. Desktop insertion and PIN dialogs always cancel

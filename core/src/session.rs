@@ -105,6 +105,7 @@ impl PeerSession {
         transport: &mut Transport,
         message: &PrivateMessage,
     ) -> Result<()> {
+        wire::validate_private_capabilities(message, &self.capabilities)?;
         let kind = match message {
             PrivateMessage::Input(SessionInput::Command { .. }) => "query",
             PrivateMessage::Execute { .. } => "execute",
@@ -132,6 +133,7 @@ impl PeerSession {
             if let Some(plain) = transport.decrypt(&packet)? {
                 let plain = zeroize::Zeroizing::new(plain);
                 let message: PrivateMessage = decode(&plain)?;
+                wire::validate_private_capabilities(&message, &self.capabilities)?;
                 match &message {
                     PrivateMessage::Input(
                         SessionInput::Command { line, .. }
@@ -432,7 +434,7 @@ impl Hub {
                     &mut transport,
                     &PrivateMessage::PingOpen {
                         proof,
-                        capabilities: wire::supported_capabilities(),
+                        capabilities: wire::supported_peer_capabilities(),
                     },
                 )
                 .await?;
@@ -444,7 +446,7 @@ impl Hub {
                 bail!("ping handshake failed");
             };
             session.capabilities =
-                wire::validate_negotiated(&wire::supported_capabilities(), &capabilities)?;
+                wire::validate_negotiated(&wire::supported_peer_capabilities(), &capabilities)?;
             if proof.genesis.body.id != channel {
                 bail!("ping channel mismatch");
             }
@@ -561,7 +563,7 @@ impl Hub {
                     &PrivateMessage::OpenService {
                         proof,
                         service,
-                        capabilities: wire::supported_capabilities(),
+                        capabilities: wire::supported_peer_capabilities(),
                     },
                 )
                 .await?;
@@ -574,7 +576,7 @@ impl Hub {
                 bail!("service open response required");
             };
             session.capabilities =
-                wire::validate_negotiated(&wire::supported_capabilities(), &capabilities)?;
+                wire::validate_negotiated(&wire::supported_peer_capabilities(), &capabilities)?;
             if proof.genesis.body.id != channel {
                 bail!("trust channel mismatch");
             }
@@ -628,6 +630,10 @@ impl Hub {
                             },
                             PrivateMessage::Output(output)=>{
                                 hub.authorized(&session.channel,&session.peer)?;
+                                if matches!(output, SessionOutput::Ignored { .. }) {
+                                    if service != ServiceKind::Pinentry { bail!("ignore outside pinentry"); }
+                                    hub.bind_session(&session.id, None);
+                                }
                                 if let SessionOutput::Line { line, .. } = &output
                                     && matches!(hibiki_lib::assuan::parse_response(line)?, hibiki_lib::assuan::Response::Ok | hibiki_lib::assuan::Response::Err(_)) {
                                     hub.bind_session(&session.id, None);
@@ -691,7 +697,7 @@ impl Hub {
                 _ => bail!("service or ping open required"),
             };
             session.capabilities =
-                wire::negotiate_capabilities(&wire::supported_capabilities(), &offered)?;
+                wire::negotiate_capabilities(&wire::supported_peer_capabilities(), &offered)?;
             if proof.genesis.body.id != session.channel {
                 bail!("trust channel mismatch");
             }
@@ -845,6 +851,15 @@ impl Hub {
                     output=endpoint.rx.recv()=>match output {
                         Some(output)=>{
                             self.authorized(&session.channel,&session.peer)?;
+                            if matches!(output, SessionOutput::Ignored { .. }) {
+                                if service != ServiceKind::Pinentry { bail!("ignore outside pinentry"); }
+                                collected.clear();
+                                if let Some(id)=operation.take() {
+                                    monitor_tx.send_replace(None);
+                                    session.connection.request(Control::TargetDone { id, success: false }).await?;
+                                    self.bind_session(&session.id, None);
+                                }
+                            }
                             if let SessionOutput::Line { line, .. } = &output {
                                 let response=hibiki_lib::assuan::parse_response(line)?;
                                 if matches!(response, hibiki_lib::assuan::Response::Ok | hibiki_lib::assuan::Response::Err(_))

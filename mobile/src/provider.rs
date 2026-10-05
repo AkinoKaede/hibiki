@@ -217,7 +217,9 @@ impl Provider for MobileProvider {
                                 if error.is::<crate::broker::OperationCancelled>() {
                                     return Err(hibiki_core::provider::PreparationRejected.into());
                                 }
-                                if error.is::<crate::broker::RequestCancelled>() {
+                                if error.is::<crate::broker::CandidateWithdrawn>()
+                                    || error.is::<crate::broker::RequestCancelled>()
+                                {
                                     return Err(hibiki_core::provider::PreparationDeclined.into());
                                 }
                                 return Err(error);
@@ -380,6 +382,13 @@ impl Provider for MobileProvider {
                             .await
                             {
                                 Ok(Ok(result)) => result,
+                                Ok(Err(error))
+                                    if kind == ServiceKind::Pinentry
+                                        && error.is::<crate::broker::CandidateWithdrawn>() =>
+                                {
+                                    outputs.send(SessionOutput::Ignored { request }).await?;
+                                    continue;
+                                }
                                 Ok(Err(_)) if command_stop.is_cancelled() => {
                                     card::operation_error(&crate::broker::RequestCancelled.into())
                                 }
