@@ -135,12 +135,13 @@ class Device:
                                        capture_output=True, text=True, timeout=5).stdout.strip()
                 return not state or state.startswith('Z')
             wait_for(stopped)
-    def start(self):
+    def start(self, connected=True):
         self.log_path=self.root/'daemon.log';self.log=self.log_path.open('w')
         self.daemon=subprocess.Popen([str(CLIENT),'daemon'],env=self.env,stdout=self.log,stderr=self.log)
         def ready():
             assert self.daemon.poll() is None,self.log_path.read_text()
-            return 'HIbiki daemon connected' in self.log_path.read_text()
+            if connected: return 'HIbiki daemon connected' in self.log_path.read_text()
+            return b'daemon: running;' in self.cli('status', ok=False).stdout
         wait_for(ready)
     def stop(self):
         if self.daemon and self.daemon.poll() is None:
@@ -310,6 +311,36 @@ def test_all():
             assert b'hibiki use NAME' in a.cli('setup').stderr
             print('PASS: fresh HIbiki pairing, server-only creation and independent services',flush=True)
 
+            # Freeze relay replies: local startup, results and selected-card commands
+            # must not depend on queue registration, peer discovery or completion ACKs.
+            a.services(scdaemon=True,pinentry=True);a.mode(password='local fast',delay=.01);a.restart()
+            (a.root/'card.json').write_text(json.dumps(card))
+            server.send_signal(signal.SIGSTOP)
+            try:
+                for cold in (False, True):
+                    if cold:
+                        a.stop();a.start(connected=False)
+                    started=time.monotonic()
+                    with Assuan(a,'pinentry') as pe:
+                        assert b'D local fast' in pe.command(b'GETPIN')
+                        assert pe.command(b'MESSAGE')[-1]==b'OK'
+                    with Assuan(a,'scdaemon') as sc:
+                        assert sc.command(('SERIALNO --demand='+card['serial']).encode())[-1]==b'OK'
+                        assert sc.command(b'SETDATA '+b'00'*32)[-1]==b'OK'
+                        assert sc.command(('PKSIGN --hash=sha256 '+card['keys'][0]['grip']).encode(),
+                                          lambda _: [b'D 123456',b'END'])[-1]==b'OK'
+                    assert time.monotonic()-started < 3, 'local service waited for stalled relay'
+                    wait_for(lambda:a.idle() and a.idle('scdaemon'))
+                a.stop()
+            finally:
+                server.send_signal(signal.SIGCONT)
+            # Requests whose registration was in flight must not appear on peers later.
+            counts=[len(list(d.root.glob('pinentry-[0-9]*'))) for d in (b,c)]
+            a.services();a.start()
+            time.sleep(.5)
+            assert counts==[len(list(d.root.glob('pinentry-[0-9]*'))) for d in (b,c)]
+            print('PASS: local input and signing bypass stalled relay, including cold daemon startup',flush=True)
+
             concurrent_agent_sessions(a)
             print('PASS: simultaneous GnuPG clients use independent scdaemon connections', flush=True)
 
@@ -384,6 +415,11 @@ def test_all():
             a.services(pinentry=True);a.mode(password='local',delay=.01);a.restart()
             b.mode(delay=2);c.mode(delay=2)
             with Assuan(a,'pinentry') as pe: assert b'D local' in pe.command(b'GETPIN')
+            wait_for(lambda: all(d.idle() for d in devices))
+            a.mode(cancel=True,delay=.01);c.mode(password='remote after local cancel',delay=.2)
+            with Assuan(a,'pinentry') as pe: assert b'D remote after local cancel' in pe.command(b'GETPIN')
+            a.mode(delay=3);c.mode(password='remote wins',delay=.05)
+            with Assuan(a,'pinentry') as pe: assert b'D remote wins' in pe.command(b'GETPIN')
             wait_for(lambda: all(d.idle() for d in devices))
             a.services();a.restart();b.mode(cancel=True);c.mode(cancel=True)
             with Assuan(a,'pinentry') as pe: assert pe.command(b'GETPIN')==[b'ERR 83886179 canceled']
@@ -522,9 +558,14 @@ def test_all():
             try:
                 with selectors.DefaultSelector() as selector:
                     selector.register(adapter.stdout, selectors.EVENT_READ)
-                    assert selector.select(4), 'startup wait exceeded the configured deadline'
+                    assert selector.select(4), 'local adapter greeting waited for relay'
                 response = adapter.stdout.readline()
-                assert response.startswith(b'ERR ') and b'startup wait timed out' in response, response
+                assert response.startswith(b'OK '), response
+                adapter.stdin.write(b'GETPIN\n');adapter.stdin.flush()
+                with selectors.DefaultSelector() as selector:
+                    selector.register(adapter.stdout, selectors.EVENT_READ)
+                    assert selector.select(4), 'remote-only command exceeded its deadline'
+                assert adapter.stdout.readline().startswith(b'ERR ')
             finally:
                 adapter.terminate(); adapter.wait(timeout=5)
                 adapter.stdin.close(); adapter.stdout.close(); adapter.stderr.close()
@@ -532,7 +573,7 @@ def test_all():
             a.config.write_text(a.config.read_text().replace(str(a.root/'test-scdaemon'), str(a.root/'missing-scdaemon')))
             error = a.cli('daemon', ok=False).stderr
             assert b'enabled but unavailable' in error, error
-            print('PASS: live offline status, bounded adapter startup and enabled-provider preflight', flush=True)
+            print('PASS: live offline status, immediate adapter greeting, bounded remote command and enabled-provider preflight', flush=True)
 
         except Exception:
             for d in devices:

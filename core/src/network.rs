@@ -45,6 +45,18 @@ pub fn validate_url(value: &str, insecure: bool) -> Result<()> {
     Ok(())
 }
 impl Connection {
+    /// Placeholder for local service before the first relay connection succeeds.
+    pub fn disconnected() -> Arc<Self> {
+        let (tx, _) = mpsc::channel(1);
+        let closed = CancellationToken::new();
+        closed.cancel();
+        Arc::new(Self {
+            tx,
+            pending: Default::default(),
+            closed,
+        })
+    }
+
     pub async fn open(
         url: &str,
         insecure: bool,

@@ -265,10 +265,11 @@ policy. Both exit nonzero when a checked component needs attention. Native check
 do not test physical card access or GUI/TTY availability. For custom configuration,
 CLI commands and adapters both honor `HIBIKI_CONFIG`; CLI `--config` takes precedence.
 
-Local adapter startup waits at most `operation_timeout_seconds` (default 120)
-for the first relay connection, then returns an Assuan error suggesting `hibiki status`.
-Each waiting connection runs independently, so it does not block status queries or
-other callers. Once connected, existing operation/reconnection deadlines apply.
+Local adapters and enabled local providers start without waiting for the relay,
+including at daemon startup. Local input and card operations use the saved channel
+membership proof and can complete while offline. Remote candidates prepare in
+parallel and can join before the command deadline. Commands that need a remote
+provider still wait at most `operation_timeout_seconds` (default 120).
 
 ## Channel administration
 

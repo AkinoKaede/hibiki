@@ -13,7 +13,7 @@ use tokio::{
     task::JoinSet,
 };
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct LocalOpen {
     pub channel: String,
     pub service: ServiceKind,

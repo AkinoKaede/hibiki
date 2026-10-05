@@ -51,7 +51,8 @@ native Pinentry. Relay-only hosts do not need GnuPG.
    and [sign or decrypt](USAGE.md#sign-and-decrypt).
 
 Relay and clients must use matching builds of protocol `hibiki/1`. The desktop
-daemon needs a relay connection even when using local providers. Card access
+daemon starts local providers immediately, including while the relay is offline;
+remote providers join the race independently. Card access
 supports discovery, public-key reading, signing, and decryption; PIN changes,
 key writing/generation, and raw APDU commands are rejected.
 See [session behavior and limits](ARCHITECTURE.md#session-behavior-and-limits).

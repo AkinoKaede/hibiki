@@ -96,7 +96,8 @@ The native agent or card validates the password. A retry starts a new race; Hibi
 - Caller exit, timeout, revocation, or channel deletion cancels pending work and closes affected backends. Offline members can join a waiting operation before its original deadline; the first success cancels every other queued copy. Relay reconnection preserves live callers and uses new encrypted sessions.
 - A selected card stays bound to its original device and serial. Reconnection restores confirmed selection and SETDATA preparation for commands not yet executed. An execution claim is durable: if execution started and its result was lost, Hibiki reports an unknown result and never automatically repeats the private command.
 - The relay persists operation IDs, deadlines, targets, and execution states, not PINs, plaintext command data, or results. Queue limits are 128 operations per caller or target and 4096 in total. Pending work survives a relay restart only when the live caller resumes it; restarting the caller daemon does not restore vanished calls.
-- The daemon currently needs a relay connection even when only local providers are used.
+- Local providers start immediately, even before the first relay connection. Local discovery, password answers, and selected-card commands never wait for relay operation registration or completion; remote candidates prepare concurrently. Offline local access uses the saved channel membership proof; received revocations and channel deletion still cancel affected sessions.
+- Relay operation metadata and durable execution claims apply to remote candidates. Local card commands run once on the bound native session; a lost private-operation response is never automatically replayed.
 
 ## Trust and storage
 

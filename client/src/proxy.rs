@@ -199,7 +199,37 @@ async fn discover(
     line: Line,
     stop: &CancellationToken,
 ) -> Result<(Endpoint, AssuanResult)> {
-    let targets = hub.eligible(&open.channel, ServiceKind::Scdaemon)?;
+    let mut targets = hub.eligible(&open.channel, ServiceKind::Scdaemon)?;
+    let local = hub.app.identity.device.id();
+    let mut tasks = JoinSet::new();
+    if targets.contains(&local) {
+        targets.retain(|peer| peer != &local);
+        let hub = hub.clone();
+        let open = open.clone();
+        let line = line.clone();
+        let stop = stop.child_token();
+        tasks.spawn(async move { discover_round(hub, &open, line, &stop, vec![local]).await });
+    }
+    if !targets.is_empty() {
+        let open = open.clone();
+        let stop = stop.child_token();
+        tasks.spawn(async move { discover_remote(hub, &open, line, &stop, targets).await });
+    }
+    while let Some(result) = tasks.join_next().await {
+        if let Ok(Ok(winner)) = result {
+            return Ok(winner);
+        }
+    }
+    bail!("no matching OpenPGP card available")
+}
+
+async fn discover_remote(
+    hub: Arc<Hub>,
+    open: &LocalOpen,
+    line: Line,
+    stop: &CancellationToken,
+    targets: Vec<String>,
+) -> Result<(Endpoint, AssuanResult)> {
     if targets.is_empty() {
         bail!("no card providers");
     }
@@ -236,6 +266,8 @@ async fn discover(
     }
 }
 
+// The local candidate never awaits relay control traffic. Keep remote discovery,
+// queue registration and completion in a separate task, including during reconnect.
 async fn password_race(
     hub: Arc<Hub>,
     open: &LocalOpen,
@@ -245,7 +277,82 @@ async fn password_race(
     writer: &mut OwnedWriteHalf,
     inputs: &mut mpsc::Receiver<Line>,
 ) -> Result<AssuanResult> {
-    let targets = hub.eligible(&open.channel, ServiceKind::Pinentry)?;
+    let mut targets = hub.eligible(&open.channel, ServiceKind::Pinentry)?;
+    let local = hub.app.identity.device.id();
+    let mut tasks = JoinSet::new();
+    let (tx, mut inquiries) = mpsc::channel(32);
+    if targets.contains(&local) {
+        targets.retain(|peer| peer != &local);
+        let hub = hub.clone();
+        let open = open.clone();
+        let settings = settings.clone();
+        let line = line.clone();
+        let stop = stop.child_token();
+        let tx = tx.clone();
+        tasks.spawn(async move {
+            let mut ep = hub
+                .open(
+                    &open.channel,
+                    &local,
+                    ServiceKind::Pinentry,
+                    stop,
+                    LocalContext {
+                        display: open.display.clone(),
+                    },
+                )
+                .await?
+                .context("local pinentry disabled")?;
+            for setting in settings.values() {
+                let result = transaction(&mut ep, setting.clone(), None).await?;
+                if !result.success() {
+                    return Ok(Some(result));
+                }
+            }
+            transaction(&mut ep, line, Some(&tx)).await.map(Some)
+        });
+    }
+    if !targets.is_empty() {
+        let open = open.clone();
+        let settings = settings.clone();
+        let stop = stop.child_token();
+        tasks.spawn(async move {
+            password_remote(hub, &open, &settings, line, &stop, tx, targets).await
+        });
+    }
+    let mut canceled = None;
+    let mut failed = None;
+    loop {
+        tokio::select! {
+            Some(inquiry) = inquiries.recv() => upstream_inquiry(inquiry, writer, inputs).await?,
+            result = tasks.join_next() => match result {
+                Some(Ok(Ok(Some(result)))) if result.success() => return Ok(result),
+                Some(Ok(Ok(Some(mut result)))) => {
+                    // Failed candidates may have emitted partial password data.
+                    // Preserve only the native terminal error, never that data.
+                    let terminal = result.lines.pop().context("missing pinentry result")?;
+                    result.lines.clear();
+                    result.lines.push(terminal);
+                    if result.canceled() { canceled = Some(result); }
+                    else { failed = Some(result); }
+                },
+                Some(Ok(Ok(None))) => {},
+                Some(_) => failed = Some(AssuanResult::error(assuan::GENERAL, "pinentry candidate failed")),
+                None => return Ok(failed.or(canceled).unwrap_or_else(||
+                    AssuanResult::error(assuan::GENERAL, "no pinentry providers"))),
+            }
+        }
+    }
+}
+
+async fn password_remote(
+    hub: Arc<Hub>,
+    open: &LocalOpen,
+    settings: &Settings,
+    line: Line,
+    stop: &CancellationToken,
+    tx: mpsc::Sender<Inquiry>,
+    targets: Vec<String>,
+) -> Result<Option<AssuanResult>> {
     if targets.is_empty() {
         bail!("no pinentry providers");
     }
@@ -253,7 +360,6 @@ async fn password_race(
         QueuedOperation::new(hub.clone(), &open.channel, ServiceKind::Pinentry, targets).await?,
     );
     let mut tasks = JoinSet::new();
-    let (tx, mut inquiries) = mpsc::channel(32);
     let mut running = HashSet::new();
     let mut failures = 0;
     let mut canceled = None;
@@ -261,7 +367,6 @@ async fn password_race(
     let mut tick = tokio::time::interval(Duration::from_millis(250));
     loop {
         tokio::select! {
-            Some(inquiry)=inquiries.recv()=>upstream_inquiry(inquiry,writer,inputs).await?,
             _=tick.tick()=>{
                 let status=operation.status().await?;
                 for peer in operation.ready().await? {
@@ -272,22 +377,17 @@ async fn password_race(
                     let operation=operation.clone();
                     tasks.spawn(async move {
                         let result=async {
-                            let local=peer == hub.app.identity.device.id();
                             let Some(mut ep)=hub.open(&channel, &peer, ServiceKind::Pinentry, stop, context).await? else { return Ok(None); };
                             for setting in settings.values() {
                                 let (cmd,args)=assuan::command(setting)?;
-                                if !local && cmd == "OPTION" && assuan::local_option(args) { continue; }
+                                if cmd == "OPTION" && assuan::local_option(args) { continue; }
                                 let result=transaction(&mut ep,setting.clone(),None).await?;
                                 if !result.success() { return Ok(Some(result)); }
                             }
-                            if local { operation.claim_local().await?; }
-                            else { ep.bind_operation(Some(operation.value.id.clone())); }
+                            ep.bind_operation(Some(operation.value.id.clone()));
                             let watching=operation.watch(ep.stop.clone());
                             let result=transaction(&mut ep,line,Some(&tx)).await;
                             watching.abort();
-                            if local && let Ok(result)=&result {
-                                operation.local_done(result.success()).await?;
-                            }
                             drop(ep);
                             result.map(Some)
                         }.await;
@@ -296,14 +396,15 @@ async fn password_race(
                 }
                 if tasks.is_empty() && status.targets.iter().all(|t| t.state != TargetState::Pending) {
                     operation.finish(false).await?;
-                    return Ok(AssuanResult { lines: vec![(if failures == 0 { canceled } else { failed }).unwrap_or_else(||assuan::error(assuan::GENERAL,"no pinentry candidate completed; execution result may be unknown"))] });
+                    if failures == 0 && canceled.is_none() { return Ok(None); }
+                    return Ok(Some(AssuanResult { lines: vec![(if failures == 0 { canceled } else { failed }).unwrap_or_else(||assuan::error(assuan::GENERAL,"no pinentry candidate completed; execution result may be unknown"))] }));
                 }
             },
             result=tasks.join_next(), if !tasks.is_empty()=>{
                 if let Some(Ok((peer,result)))=result {
                     running.remove(&peer);
                     match result {
-                        Ok(Some(result)) if result.success()=>{ operation.finish(true).await?; return Ok(result); },
+                        Ok(Some(result)) if result.success()=>{ operation.finish(true).await?; return Ok(Some(result)); },
                         Ok(Some(mut result)) if result.canceled()=>canceled=result.lines.pop(),
                         Ok(Some(mut result))=>{failures+=1;failed=result.lines.pop();},
                         Ok(None)=>{},
@@ -462,6 +563,23 @@ async fn card_transaction(
 ) -> Result<AssuanResult> {
     let (cmd, _) = assuan::command(&line)?;
     let private = matches!(cmd, "PKSIGN" | "PKDECRYPT");
+    if state.peer == hub.app.identity.device.id() {
+        // A local session needs neither a relay queue nor a distributed execution
+        // claim. Never reopen/replay an interrupted command on the selected card.
+        let ep = selected.as_mut().context("local card session ended")?;
+        if ep.done.is_cancelled() || ep.stop.is_cancelled() {
+            bail!("local card session ended; reset or select a card again");
+        }
+        return interactive(ep, line, io.0, io.1).await.map_err(|error| {
+            if private {
+                anyhow::anyhow!(
+                    "execution result unknown; private operation will not be repeated: {error}"
+                )
+            } else {
+                error
+            }
+        });
+    }
     let operation = QueuedOperation::new(
         hub.clone(),
         &open.channel,
@@ -480,13 +598,8 @@ async fn card_transaction(
             *selected = Some(restore_card(hub.clone(), open, state, stop, &operation).await?);
         }
         let ep = selected.as_mut().unwrap();
-        let local = state.peer == hub.app.identity.device.id();
         if private {
-            if local {
-                operation.claim_local().await?;
-            } else {
-                ep.bind_operation(Some(operation.value.id.clone()));
-            }
+            ep.bind_operation(Some(operation.value.id.clone()));
         }
         let watching = operation.watch(ep.stop.clone());
         let result = interactive(ep, line.clone(), io.0, io.1).await;
@@ -494,9 +607,6 @@ async fn card_transaction(
         ep.bind_operation(None);
         match result {
             Ok(result) => {
-                if private && local {
-                    operation.local_done(result.success()).await?;
-                }
                 operation.finish(result.success()).await?;
                 return Ok(result);
             }

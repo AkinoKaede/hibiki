@@ -11,7 +11,7 @@ use hibiki_lib::protocol::*;
 use std::{sync::Arc, time::Duration};
 async fn local_connection(
     app: Arc<App>,
-    mut available: tokio::sync::watch::Receiver<Option<Arc<Hub>>>,
+    hub: Arc<Hub>,
     mut stream: tokio::net::UnixStream,
 ) -> Result<()> {
     use crate::frontend::{DaemonStatus, LocalRequest};
@@ -35,10 +35,7 @@ async fn local_connection(
         LocalRequest::Status => {
             let status = DaemonStatus {
                 device: app.identity.device.id(),
-                relay_connected: available
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|hub| !hub.connection().closed.is_cancelled()),
+                relay_connected: !hub.connection().closed.is_cancelled(),
                 config: app.config.clone(),
             };
             let bytes = hibiki_lib::encode(&status)?;
@@ -51,32 +48,7 @@ async fn local_connection(
         }
         LocalRequest::Open(open) => open,
     };
-    let ready = tokio::time::timeout_at(deadline, async {
-        loop {
-            if let Some(hub) = available.borrow().clone() {
-                return Ok::<_, anyhow::Error>(hub);
-            }
-            available.changed().await?;
-        }
-    })
-    .await;
-    match ready {
-        Ok(Ok(hub)) => crate::proxy::serve(hub, stream, open).await,
-        _ => {
-            tokio::time::timeout(
-                Duration::from_secs(2),
-                crate::assuan_io::write_line(
-                    &mut stream,
-                    &hibiki_lib::assuan::error(
-                        hibiki_lib::assuan::GENERAL,
-                        "relay unavailable; startup wait timed out; run hibiki status",
-                    ),
-                ),
-            )
-            .await??;
-            Ok(())
-        }
-    }
+    crate::proxy::serve(hub, stream, open).await
 }
 
 pub async fn run(app: App) -> Result<()> {
@@ -119,11 +91,16 @@ pub async fn run(app: App) -> Result<()> {
     let card_slot = Arc::new(tokio::sync::Semaphore::new(1));
     let local_slots = Arc::new(tokio::sync::Semaphore::new(128));
     let mut delay = 1;
-    let mut stable_hub: Option<Arc<Hub>> = None;
-    let (available, available_rx) = tokio::sync::watch::channel::<Option<Arc<Hub>>>(None);
+    let hub = Hub::new(
+        app.clone(),
+        Connection::disconnected(),
+        Arc::new(crate::provider::NativeProvider(app.config.clone())),
+        card_slot,
+    );
     let listener_stop = tokio_util::sync::CancellationToken::new();
     let accept_stop = listener_stop.clone();
     let listener_app = app.clone();
+    let listener_hub = hub.clone();
     let listener_job = tokio::spawn(async move {
         let mut local_jobs = tokio::task::JoinSet::new();
         loop {
@@ -134,10 +111,10 @@ pub async fn run(app: App) -> Result<()> {
                     let Ok((stream,_))=accepted else { break; };
                     if let Ok(permit)=local_slots.clone().try_acquire_owned() {
                         let app = listener_app.clone();
-                        let available = available_rx.clone();
+                        let hub = listener_hub.clone();
                         local_jobs.spawn(async move {
                             let _permit = permit;
-                            let _ = local_connection(app, available, stream).await;
+                            let _ = local_connection(app, hub, stream).await;
                         });
                     }
                 }
@@ -159,27 +136,11 @@ pub async fn run(app: App) -> Result<()> {
                 continue;
             }
         };
-        let hub = match &stable_hub {
-            Some(hub) => {
-                hub.reconnect(connection.clone());
-                hub.clone()
-            }
-            None => {
-                let hub = Hub::new(
-                    app.clone(),
-                    connection.clone(),
-                    Arc::new(crate::provider::NativeProvider(app.config.clone())),
-                    card_slot.clone(),
-                );
-                stable_hub = Some(hub.clone());
-                hub
-            }
-        };
+        hub.reconnect(connection.clone());
         if announce(&hub).await.is_err() {
             connection.close();
             continue;
         }
-        available.send_replace(Some(hub.clone()));
         hub.changed.notify_waiters();
         eprintln!("{SUCCESS}HIbiki daemon connected{SUCCESS:#}");
         delay = 1;
@@ -217,9 +178,7 @@ pub async fn run(app: App) -> Result<()> {
             break;
         }
     }
-    if let Some(hub) = stable_hub {
-        hub.stop_all();
-    }
+    hub.stop_all();
     listener_stop.cancel();
     let _ = listener_job.await;
     Ok(())
@@ -229,11 +188,16 @@ pub async fn run(app: App) -> Result<()> {
 mod tests {
     use super::*;
     use crate::frontend::{DaemonStatus, LocalOpen, LocalRequest};
-    use hibiki_lib::{decode, encode, identity::Identity, paths::AppPaths};
+    use hibiki_lib::{
+        channel::{ChannelGenesis, MembershipProof},
+        decode, encode,
+        identity::Identity,
+        paths::AppPaths,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test(start_paused = true)]
-    async fn offline_startup_expires_without_blocking_status() {
+    async fn offline_status_and_local_requests_do_not_wait_for_relay() {
         let dir = tempfile::tempdir().unwrap();
         let app = Arc::new(App {
             config: crate::storage::Config {
@@ -246,11 +210,22 @@ mod tests {
             }),
             identity: Arc::new(Identity::generate("test".into()).unwrap()),
         });
-        let (_sender, available) = tokio::sync::watch::channel(None);
+        let proof = MembershipProof {
+            genesis: ChannelGenesis::create(&app.identity, "test".into(), "verifier").unwrap(),
+            events: vec![],
+        };
+        let channel = proof.genesis.body.id.clone();
+        app.bootstrap(proof, None).unwrap();
+        let hub = Hub::new(
+            app.clone(),
+            Connection::disconnected(),
+            Arc::new(crate::provider::NativeProvider(app.config.clone())),
+            Arc::new(tokio::sync::Semaphore::new(1)),
+        );
         let (mut caller, accepted) = tokio::net::UnixStream::pair().unwrap();
-        let task = tokio::spawn(local_connection(app.clone(), available.clone(), accepted));
+        let task = tokio::spawn(local_connection(app.clone(), hub.clone(), accepted));
         let request = encode(&LocalRequest::Open(LocalOpen {
-            channel: "test".into(),
+            channel,
             service: ServiceKind::Pinentry,
             pid: 1,
             display: None,
@@ -260,7 +235,7 @@ mod tests {
         caller.write_all(&request).await.unwrap();
         tokio::task::yield_now().await;
         let (mut status_client, status_stream) = tokio::net::UnixStream::pair().unwrap();
-        let status_task = tokio::spawn(local_connection(app, available, status_stream));
+        let status_task = tokio::spawn(local_connection(app, hub, status_stream));
         let request = encode(&LocalRequest::Status).unwrap();
         status_client.write_u32(request.len() as u32).await.unwrap();
         status_client.write_all(&request).await.unwrap();
@@ -269,11 +244,17 @@ mod tests {
         status_client.read_exact(&mut bytes).await.unwrap();
         assert!(!decode::<DaemonStatus>(&bytes).unwrap().relay_connected);
         status_task.await.unwrap().unwrap();
-        tokio::time::advance(Duration::from_secs(3)).await;
+        // The adapter can open and close using saved trust before the first
+        // relay connection, without consuming the command timeout.
+        caller.write_all(b"BYE\n").await.unwrap();
+        tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let mut output = String::new();
         caller.read_to_string(&mut output).await.unwrap();
-        assert!(output.starts_with("ERR "), "{output}");
-        assert!(output.contains("startup wait timed out"));
-        task.await.unwrap().unwrap();
+        assert!(output.starts_with("OK HIbiki Assuan"), "{output}");
+        assert!(output.contains("OK closing connection"));
     }
 }
