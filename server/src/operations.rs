@@ -1,5 +1,6 @@
-//! Durable metadata only. Service's authority lock serializes queue transitions
-//! with membership changes and routing. No Assuan plaintext is stored here.
+//! Durable metadata only. Service's channel authority locks exclude membership
+//! changes during execution claims, operation locks serialize state transitions,
+//! and its admission lock protects global queue limits. No Assuan plaintext is stored.
 use crate::{db::Database, entities::operation};
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{channel::valid_id, decode, encode, now, protocol::*};
@@ -8,6 +9,19 @@ use sea_orm::{
 };
 
 impl Database {
+    /// Read immutable routing metadata without expiring or canceling an operation.
+    /// The service must load and validate the full operation again under authority.
+    pub async fn operation_channel(&self, caller: &str, id: &str) -> Result<String> {
+        let row = operation::Entity::find_by_id(id)
+            .one(&self.connection)
+            .await?
+            .context("operation not found")?;
+        let op: Operation = decode(&row.data)?;
+        if op.initiator != caller && !op.targets.iter().any(|t| t.device == caller) {
+            bail!("unauthorized operation");
+        }
+        Ok(op.channel)
+    }
     pub async fn queued_for(&self, device: &str) -> Result<Vec<(Operation, String)>> {
         let rows = operation::Entity::find()
             .filter(operation::Column::Active.eq(true))
@@ -135,11 +149,32 @@ impl Database {
         Ok(op)
     }
     pub async fn operation(&self, caller: &str, id: &str) -> Result<(Operation, String)> {
+        self.operation_scoped(caller, id, None).await
+    }
+    pub async fn operation_in_channel(
+        &self,
+        caller: &str,
+        id: &str,
+        channel: &str,
+    ) -> Result<(Operation, String)> {
+        self.operation_scoped(caller, id, Some(channel)).await
+    }
+    async fn operation_scoped(
+        &self,
+        caller: &str,
+        id: &str,
+        channel: Option<&str>,
+    ) -> Result<(Operation, String)> {
         let row = operation::Entity::find_by_id(id)
             .one(&self.connection)
             .await?
             .context("operation not found")?;
         let mut op: Operation = decode(&row.data)?;
+        // Expired IDs may be purged and reused. Never mutate a replacement
+        // operation under the authority lock of its former channel.
+        if channel.is_some_and(|channel| channel != op.channel) {
+            bail!("CONFLICT: operation channel changed; retry status");
+        }
         if op.initiator != caller && !op.targets.iter().any(|t| t.device == caller) {
             bail!("unauthorized operation");
         }

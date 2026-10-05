@@ -18,10 +18,12 @@ use hibiki_lib::{
 };
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
     time::Duration,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{
+    OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock, mpsc, oneshot,
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
@@ -29,8 +31,31 @@ pub struct Service {
     pub db: Database,
     pub allow_client_channel_creation: bool,
     executors: Arc<Mutex<HashMap<String, Executor>>>,
-    // Serialize authority changes with routing to prevent a revoke/relay TOCTOU.
-    authority: Arc<tokio::sync::Mutex<()>>,
+    // Readers route concurrently; authority changes exclude readers only in
+    // their own channel. Weak entries do not retain locks for arbitrary IDs.
+    authority: Arc<Mutex<HashMap<String, Weak<RwLock<()>>>>>,
+    operations: Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>>,
+    // Queue limits span channels, so admission still needs a global guard.
+    queue_admission: Arc<tokio::sync::Mutex<()>>,
+}
+// Keep owned guards alive until the command and its notifications complete.
+#[derive(Default)]
+struct AuthorityGuard {
+    _reads: Vec<OwnedRwLockReadGuard<()>>,
+    _write: Option<OwnedRwLockWriteGuard<()>>,
+    _operation: Option<OwnedMutexGuard<()>>,
+    channel: String,
+}
+
+fn shared_lock<T: Default>(locks: &Mutex<HashMap<String, Weak<T>>>, key: &str) -> Arc<T> {
+    let mut locks = locks.lock().unwrap();
+    if let Some(lock) = locks.get(key).and_then(Weak::upgrade) {
+        return lock;
+    }
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    let lock = Arc::new(T::default());
+    locks.insert(key.into(), Arc::downgrade(&lock));
+    lock
 }
 #[derive(Clone)]
 struct Executor {
@@ -72,14 +97,89 @@ impl Service {
             db,
             allow_client_channel_creation,
             executors: Arc::new(Mutex::new(HashMap::new())),
-            authority: Arc::new(tokio::sync::Mutex::new(())),
+            authority: Default::default(),
+            operations: Default::default(),
+            queue_admission: Default::default(),
         }
+    }
+    fn channel_authority(&self, channel: &str) -> Arc<RwLock<()>> {
+        shared_lock(&self.authority, channel)
+    }
+    async fn control_authority(&self, device: &str, cmd: &Control) -> Result<AuthorityGuard> {
+        let (channel, write) = match cmd {
+            Control::Policy | Control::ListChannels => return Ok(AuthorityGuard::default()),
+            Control::Announce { channels } => {
+                // Always take multi-channel locks in the same order.
+                let mut channels = channels.clone();
+                channels.sort();
+                channels.dedup();
+                let mut guards = Vec::new();
+                for channel in channels {
+                    guards.push(self.channel_authority(&channel).read_owned().await);
+                }
+                return Ok(AuthorityGuard {
+                    _reads: guards,
+                    ..Default::default()
+                });
+            }
+            Control::GetChannel { channel }
+            | Control::ChannelSnapshot { channel }
+            | Control::Peers { channel }
+            | Control::Pending { channel }
+            | Control::JoinStatus { channel, .. } => (channel.clone(), false),
+            Control::RejectJoin { channel, .. }
+            | Control::WithdrawJoin { channel, .. }
+            | Control::WithdrawPending { channel } => (channel.clone(), false),
+            Control::Queue { operation } => (operation.channel.clone(), false),
+            Control::ResumeOperation { id }
+            | Control::OperationStatus { id }
+            | Control::ClaimOperation { id, .. }
+            | Control::TargetDone { id, .. }
+            | Control::AbandonTarget { id, .. }
+            | Control::EndOperation { id, .. } => {
+                // Resolve from immutable stored metadata, not an untrusted
+                // ClaimOperation channel. Recheck the operation under the lock.
+                (self.db.operation_channel(device, id).await?, false)
+            }
+            Control::Create { genesis, .. } | Control::Claim { genesis, .. } => {
+                (genesis.body.id.clone(), true)
+            }
+            Control::Join { request, .. } => (request.body.channel_id.clone(), false),
+            Control::Append { event, .. } => (event.body.channel_id.clone(), true),
+        };
+        let lock = self.channel_authority(&channel);
+        let mut guard = if write {
+            AuthorityGuard {
+                _write: Some(lock.write_owned().await),
+                channel,
+                ..Default::default()
+            }
+        } else {
+            AuthorityGuard {
+                _reads: vec![lock.read_owned().await],
+                channel,
+                ..Default::default()
+            }
+        };
+        let operation = match cmd {
+            Control::Queue { operation } => Some(&operation.id),
+            Control::ResumeOperation { id }
+            | Control::OperationStatus { id }
+            | Control::ClaimOperation { id, .. }
+            | Control::TargetDone { id, .. }
+            | Control::AbandonTarget { id, .. }
+            | Control::EndOperation { id, .. } => Some(id),
+            _ => None,
+        };
+        if let Some(id) = operation {
+            guard._operation = Some(shared_lock(&self.operations, id).lock_owned().await);
+        }
+        Ok(guard)
     }
     async fn channel(&self, id: &str) -> Result<hibiki_lib::channel::MembershipProof> {
         self.db.get(id).await
     }
     pub async fn notify_deleted(&self) -> Result<()> {
-        let _authority = self.authority.lock().await;
         let channels: HashSet<String> = self
             .executors
             .lock()
@@ -88,6 +188,7 @@ impl Service {
             .flat_map(|e| e.channels.iter().cloned())
             .collect();
         for channel in channels {
+            let _authority = self.channel_authority(&channel).write_owned().await;
             let exists = self.db.exists(&channel).await?;
             let revoked = self.db.revoked(&channel).await?;
             if !exists || !revoked.is_empty() {
@@ -134,7 +235,14 @@ impl Service {
         cmd: Control,
         stop: &CancellationToken,
     ) -> Result<Reply> {
-        let _authority = self.authority.lock().await;
+        // Wait for global admission before taking channel authority, so a queue
+        // request waiting on another channel cannot delay its own revocation.
+        let _admission = if matches!(&cmd, Control::Queue { .. }) {
+            Some(self.queue_admission.lock().await)
+        } else {
+            None
+        };
+        let authority = self.control_authority(device, &cmd).await?;
         match cmd {
             Control::Policy => Ok(Reply::Policy {
                 allow_client_channel_creation: self.allow_client_channel_creation,
@@ -167,13 +275,24 @@ impl Service {
             }
             Control::ResumeOperation { id } => {
                 self.executor(device, connection)?;
-                Ok(Reply::Operation(
-                    self.db.resume_operation(device, connection, &id).await?,
-                ))
+                let (op, saved_connection) = self
+                    .db
+                    .operation_in_channel(device, &id, &authority.channel)
+                    .await?;
+                if op.initiator != device {
+                    bail!("only initiator can resume operation");
+                }
+                if saved_connection != connection {
+                    self.db.save_operation(&op, connection, &op).await?;
+                }
+                Ok(Reply::Operation(op))
             }
-            Control::OperationStatus { id } => {
-                Ok(Reply::Operation(self.db.operation(device, &id).await?.0))
-            }
+            Control::OperationStatus { id } => Ok(Reply::Operation(
+                self.db
+                    .operation_in_channel(device, &id, &authority.channel)
+                    .await?
+                    .0,
+            )),
             Control::ClaimOperation {
                 id,
                 initiator,
@@ -181,7 +300,10 @@ impl Service {
                 service,
             } => {
                 self.executor(device, connection)?;
-                let (mut op, owner_connection) = self.db.operation(device, &id).await?;
+                let (mut op, owner_connection) = self
+                    .db
+                    .operation_in_channel(device, &id, &authority.channel)
+                    .await?;
                 let previous = op.clone();
                 if op.state != OperationState::Pending
                     || op.initiator != initiator
@@ -206,7 +328,10 @@ impl Service {
                 Ok(Reply::Operation(op))
             }
             Control::TargetDone { id, success } => {
-                let (mut op, owner_connection) = self.db.operation(device, &id).await?;
+                let (mut op, owner_connection) = self
+                    .db
+                    .operation_in_channel(device, &id, &authority.channel)
+                    .await?;
                 let previous = op.clone();
                 let target = op
                     .targets
@@ -231,7 +356,10 @@ impl Service {
                 Ok(Reply::Operation(op))
             }
             Control::AbandonTarget { id, peer } => {
-                let (mut op, owner_connection) = self.db.operation(device, &id).await?;
+                let (mut op, owner_connection) = self
+                    .db
+                    .operation_in_channel(device, &id, &authority.channel)
+                    .await?;
                 let previous = op.clone();
                 if op.initiator != device {
                     bail!("only initiator can abandon a target");
@@ -250,7 +378,10 @@ impl Service {
                 Ok(Reply::Operation(op))
             }
             Control::EndOperation { id, completed } => {
-                let (mut op, owner_connection) = self.db.operation(device, &id).await?;
+                let (mut op, owner_connection) = self
+                    .db
+                    .operation_in_channel(device, &id, &authority.channel)
+                    .await?;
                 let previous = op.clone();
                 if op.initiator != device {
                     bail!("only initiator can end operation");
@@ -415,7 +546,7 @@ impl Service {
         session: String,
         data: Vec<u8>,
     ) -> Result<()> {
-        let _authority = self.authority.lock().await;
+        let _authority = self.channel_authority(&channel).read_owned().await;
         if data.len() > 65535 || !hibiki_lib::channel::valid_id(&session) {
             bail!("invalid relay frame");
         }
@@ -424,19 +555,22 @@ impl Service {
         self.db.require_access(&channel, &peer).await?;
         state.member(sender)?;
         state.member(&peer)?;
-        let target = {
-            let executors = self.executors.lock().unwrap();
-            let source = executors.get(sender).context("sender is not an executor")?;
-            if source.connection != connection || !source.channels.contains(&channel) {
-                bail!("unauthorized source");
-            }
-            let target = executors.get(&peer).context("peer is offline")?;
-            if !target.channels.contains(&channel) {
-                bail!("peer is not subscribed to channel");
-            }
-            target.tx.clone()
-        };
+        // Keep subscription validation and nonblocking enqueue atomic with
+        // Announce and disconnect, which update this same executor registry.
+        let executors = self.executors.lock().unwrap();
+        let source = executors.get(sender).context("sender is not an executor")?;
+        if source.connection != connection
+            || !source.channels.contains(&channel)
+            || source.stop.is_cancelled()
+        {
+            bail!("unauthorized source");
+        }
+        let target = executors.get(&peer).context("peer is offline")?;
+        if !target.channels.contains(&channel) || target.stop.is_cancelled() {
+            bail!("peer is not subscribed to channel");
+        }
         target
+            .tx
             .try_send(Envelope::Relay {
                 channel,
                 peer: sender.into(),
@@ -444,6 +578,63 @@ impl Service {
                 data,
             })
             .map_err(|_| anyhow::anyhow!("peer queue is full or closed"))?;
+        Ok(())
+    }
+
+    async fn process_envelope(
+        &self,
+        device: &str,
+        connection: &str,
+        tx: &mpsc::Sender<Envelope>,
+        stop: &CancellationToken,
+        envelope: Envelope,
+    ) -> Result<()> {
+        let response = match envelope {
+            Envelope::Request { id, command } => {
+                let result = self
+                    .control(device, connection, tx, command, stop)
+                    .await
+                    .map_err(|e| {
+                        let message = e.to_string();
+                        let code = if message.contains("CONFLICT") {
+                            "conflict"
+                        } else {
+                            "request_failed"
+                        };
+                        WireError::new(code, message)
+                    });
+                Some(Envelope::Response { id, result })
+            }
+            Envelope::Relay {
+                channel,
+                peer,
+                session,
+                data,
+            } => {
+                match self
+                    .relay(
+                        device,
+                        connection,
+                        channel,
+                        peer.clone(),
+                        session.clone(),
+                        data,
+                    )
+                    .await
+                {
+                    Ok(()) => None,
+                    Err(e) => Some(Envelope::RelayFailure {
+                        session,
+                        peer,
+                        error: WireError::new("relay_failed", e.to_string()),
+                    }),
+                }
+            }
+            _ => bail!("unexpected envelope"),
+        };
+        if let Some(response) = response {
+            tokio::time::timeout(Duration::from_secs(10), tx.send(response)).await??;
+        }
         Ok(())
     }
 
@@ -565,52 +756,117 @@ async fn session(service: Service, mut socket: WebSocket) -> Result<()> {
         connection: connection.clone(),
     };
     let (tx, mut rx) = mpsc::channel::<Envelope>(64);
+    let (frames, mut frame_rx) = mpsc::channel::<Message>(16);
     let (mut writer, mut reader) = socket.split();
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
-    let mut last_seen = tokio::time::Instant::now();
-    loop {
-        tokio::select! {
-            _ = stop.cancelled() => break,
-            _ = heartbeat.tick() => {
-                if last_seen.elapsed() > Duration::from_secs(45) { break; }
-                if send_bounded(&mut writer, Message::Ping(vec![].into())).await.is_err() { break; }
-            }
-            Some(message) = rx.recv() => {
-                if send_bounded(&mut writer, Message::Binary(encode(&message)?.into())).await.is_err() { break; }
-            }
-            incoming = reader.next() => {
-                let Some(Ok(message)) = incoming else { break; };
-                last_seen = tokio::time::Instant::now();
-                match message {
-                    Message::Ping(data) => { if send_bounded(&mut writer, Message::Pong(data)).await.is_err() { break; } }
-                    Message::Pong(_) => {}
-                    Message::Close(_) => break,
-                    Message::Binary(bytes) => {
-                        let envelope: Envelope = match decode(&bytes) { Ok(e) => e, Err(_) => break };
-                        match envelope {
-                            Envelope::Request { id, command } => {
-                                let result = service.control(&device_id, &connection, &tx, command, &stop).await.map_err(|e| {
-                                    let message = e.to_string();
-                                    let code = if message.contains("CONFLICT") { "conflict" } else { "request_failed" };
-                                    WireError::new(code, message)
-                                });
-                                if send_bounded(&mut writer, Message::Binary(encode(&Envelope::Response { id, result })?.into())).await.is_err() { break; }
-                            }
-                            Envelope::Relay { channel, peer, session, data } => {
-                                if let Err(e) = service.relay(&device_id, &connection, channel, peer.clone(), session.clone(), data).await {
-                                    let failure = Envelope::RelayFailure { session, peer, error: WireError::new("relay_failed", e.to_string()) };
-                                    if send_bounded(&mut writer, Message::Binary(encode(&failure)?.into())).await.is_err() { break; }
-                                }
-                            }
-                            _ => break,
-                        }
-                    }
-                    _ => break,
+    let mut jobs = tokio::task::JoinSet::new();
+    let mut order = RelayOrder::default();
+    let bytes_in_flight = Arc::new(tokio::sync::Semaphore::new(MAX_WIRE * 2));
+    let result = {
+        // One writer owns the sink. Slow database work never prevents it from
+        // sending queued relays, responses, pongs, or periodic heartbeats.
+        let write = async {
+            let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                let message = tokio::select! {
+                    _ = heartbeat.tick() => Message::Ping(vec![].into()),
+                    Some(message) = frame_rx.recv() => message,
+                    Some(envelope) = rx.recv() => Message::Binary(encode(&envelope)?.into()),
+                };
+                if let Err(error) = send_bounded(&mut writer, message).await {
+                    break Err::<(), _>(error);
                 }
             }
+        };
+        let read = async {
+            let mut last_seen = tokio::time::Instant::now();
+            loop {
+                tokio::select! {
+                    result = jobs.join_next(), if !jobs.is_empty() => { result.unwrap()??; }
+                    incoming = tokio::time::timeout_at(last_seen + Duration::from_secs(45), reader.next()) => {
+                        let Some(message) = incoming? else { break; };
+                        last_seen = tokio::time::Instant::now();
+                        match message? {
+                            Message::Ping(data) => { frames.try_send(Message::Pong(data))?; }
+                            Message::Pong(_) => {}
+                            Message::Close(_) => break,
+                            Message::Binary(bytes) => {
+                                // Bound both task count and retained request bytes. Overload
+                                // closes this connection instead of blocking heartbeat reads.
+                                while let Some(result) = jobs.try_join_next() { result??; }
+                                if jobs.len() >= 128 {
+                                    bail!("too many in-flight messages");
+                                }
+                                let budget = bytes_in_flight.clone()
+                                    .try_acquire_many_owned(bytes.len() as u32)?;
+                                let envelope: Envelope = decode(&bytes)?;
+                                let previous = order.enqueue(&envelope);
+                                let service = service.clone();
+                                let device = device_id.clone();
+                                let connection = connection.clone();
+                                let tx = tx.clone();
+                                let stop = stop.clone();
+                                jobs.spawn(async move {
+                                    let _budget = budget;
+                                    let _complete = if let Some((previous, complete)) = previous {
+                                        if let Some(previous) = previous {
+                                            let _ = previous.await;
+                                        }
+                                        Some(complete)
+                                    } else {
+                                        None
+                                    };
+                                    service.process_envelope(&device, &connection, &tx, &stop, envelope).await
+                                });
+                            }
+                            _ => bail!("unexpected WebSocket message"),
+                        }
+                    }
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::select! {
+            _ = stop.cancelled() => Ok(()),
+            result = write => result,
+            result = read => result,
         }
+    };
+    stop.cancel();
+    // Finish dropping every worker before unregistering the executor; a queued
+    // Announce must not outlive disconnect and resurrect an abandoned connection.
+    jobs.abort_all();
+    while jobs.join_next().await.is_some() {}
+    result
+}
+
+/// Chain only frames belonging to the same peer/channel/Noise session. Other
+/// sessions and independent control requests can complete out of order.
+#[derive(Default)]
+struct RelayOrder {
+    tails: HashMap<(String, String, String), oneshot::Receiver<()>>,
+}
+impl RelayOrder {
+    fn enqueue(
+        &mut self,
+        envelope: &Envelope,
+    ) -> Option<(Option<oneshot::Receiver<()>>, oneshot::Sender<()>)> {
+        self.tails
+            .retain(|_, tail| matches!(tail.try_recv(), Err(oneshot::error::TryRecvError::Empty)));
+        let Envelope::Relay {
+            channel,
+            peer,
+            session,
+            ..
+        } = envelope
+        else {
+            return None;
+        };
+        let (complete, tail) = oneshot::channel();
+        let previous = self
+            .tails
+            .insert((channel.clone(), peer.clone(), session.clone()), tail);
+        Some((previous, complete))
     }
-    Ok(())
 }
 
 async fn send_bounded<S>(writer: &mut S, message: Message) -> Result<()>
@@ -723,6 +979,503 @@ mod tests {
                 service: ServiceKind::Pinentry,
             }
         }
+    }
+
+    use tokio_tungstenite::tungstenite::Message as ClientMessage;
+
+    struct TestSocket {
+        ws: tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        server: tokio::task::JoinHandle<()>,
+    }
+    impl Drop for TestSocket {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+    impl TestSocket {
+        async fn new(service: Service, identity: &Identity) -> Self {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("ws://{}{WS_PATH}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                axum::serve(listener, service.router()).await.unwrap();
+            });
+            let (ws, _) = tokio_tungstenite::connect_async(url).await.unwrap();
+            let mut socket = Self { ws, server };
+            let Envelope::Hello {
+                version,
+                nonce,
+                capabilities,
+            } = socket.envelope().await
+            else {
+                panic!()
+            };
+            let client_caps = wire::supported_capabilities();
+            let signature = identity
+                .sign(
+                    "server-auth/v2",
+                    &wire::authentication_body(
+                        &version,
+                        &nonce,
+                        &identity.device.id(),
+                        &capabilities,
+                        &client_caps,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+            socket
+                .send(Envelope::Authenticate {
+                    device: identity.device.clone(),
+                    signature,
+                    capabilities: client_caps,
+                })
+                .await;
+            assert!(matches!(
+                socket.envelope().await,
+                Envelope::Authenticated { .. }
+            ));
+            socket
+        }
+        async fn send(&mut self, envelope: Envelope) {
+            self.ws
+                .send(ClientMessage::Binary(encode(&envelope).unwrap().into()))
+                .await
+                .unwrap();
+        }
+        async fn envelope(&mut self) -> Envelope {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match self.ws.next().await.unwrap().unwrap() {
+                        ClientMessage::Binary(raw) => return decode(&raw).unwrap(),
+                        ClientMessage::Ping(data) => {
+                            self.ws.send(ClientMessage::Pong(data)).await.unwrap()
+                        }
+                        ClientMessage::Pong(_) => {}
+                        message => panic!("unexpected frame: {message:?}"),
+                    }
+                }
+            })
+            .await
+            .unwrap()
+        }
+        async fn announce(&mut self, channel: &str) {
+            self.send(Envelope::Request {
+                id: "announce".into(),
+                command: Control::Announce {
+                    channels: vec![channel.into()],
+                },
+            })
+            .await;
+            assert!(matches!(
+                self.envelope().await,
+                Envelope::Response {
+                    result: Ok(Reply::Ok),
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn routing_shares_authority_but_revocation_is_exclusive_and_channel_scoped() {
+        let f = QueueFixture::new().await;
+        let proof = f.service.db.get(&f.channel).await.unwrap();
+        let event = MembershipEvent::create(
+            &f.a,
+            &proof.verify().unwrap(),
+            MembershipAction::Revoke {
+                device_id: f.b.device.id(),
+            },
+        )
+        .unwrap();
+        let verifier = hash_psk("other-secret").unwrap();
+        let genesis = ChannelGenesis::create(&f.a, "other".into(), &verifier).unwrap();
+        let other = f
+            .service
+            .db
+            .create(&f.a.device.id(), genesis, verifier)
+            .await
+            .unwrap();
+        let lock = f.service.channel_authority(&f.channel);
+        let reader = lock.clone().read_owned().await;
+        // A reader already holding authority must not serialize another relay.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            f.service.relay(
+                &f.a.device.id(),
+                "a",
+                f.channel.clone(),
+                f.b.device.id(),
+                random_id(),
+                vec![1],
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut revoke = Box::pin(f.command(
+            &f.a,
+            "a",
+            Control::Append {
+                event,
+                verifier: None,
+            },
+        ));
+        // Poll once to enqueue the exclusive acquisition behind the held reader.
+        tokio::select! {
+            biased;
+            result = &mut revoke => panic!("revocation bypassed reader: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        // A queued writer on this channel must not block another channel.
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            f.command(
+                &f.a,
+                "a",
+                Control::GetChannel {
+                    channel: other.genesis.body.id,
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(reader);
+        revoke.await.unwrap();
+        assert!(
+            f.service
+                .relay(
+                    &f.a.device.id(),
+                    "a",
+                    f.channel.clone(),
+                    f.b.device.id(),
+                    random_id(),
+                    vec![2],
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_control_does_not_block_socket_io_or_other_requests() {
+        let f = QueueFixture::new().await;
+        f.service.executors.lock().unwrap().remove(&f.a.device.id());
+        let mut socket = TestSocket::new(f.service.clone(), &f.a).await;
+        socket.announce(&f.channel).await;
+        let guard = f.service.channel_authority(&f.channel).write_owned().await;
+        socket
+            .send(Envelope::Request {
+                id: "blocked".into(),
+                command: Control::GetChannel {
+                    channel: f.channel.clone(),
+                },
+            })
+            .await;
+        socket
+            .send(Envelope::Request {
+                id: "fast".into(),
+                command: Control::Policy,
+            })
+            .await;
+        assert!(matches!(socket.envelope().await,
+            Envelope::Response { id, result: Ok(Reply::Policy { .. }) } if id == "fast"));
+        // An outbound notification must be written while the request is blocked.
+        f.service.executors.lock().unwrap()[&f.a.device.id()]
+            .tx
+            .try_send(Envelope::PeerOnline {
+                peer: "notification".into(),
+            })
+            .unwrap();
+        assert!(
+            matches!(socket.envelope().await, Envelope::PeerOnline { peer } if peer == "notification")
+        );
+        socket
+            .ws
+            .send(ClientMessage::Ping(vec![1, 2, 3].into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match socket.ws.next().await.unwrap().unwrap() {
+                    ClientMessage::Pong(data) if data.as_ref() == [1, 2, 3] => break,
+                    ClientMessage::Ping(data) => {
+                        socket.ws.send(ClientMessage::Pong(data)).await.unwrap()
+                    }
+                    _ => panic!("expected pong while control is blocked"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        drop(guard);
+        assert!(matches!(socket.envelope().await,
+            Envelope::Response { id, result: Ok(Reply::Proof(_)) } if id == "blocked"));
+    }
+
+    #[tokio::test]
+    async fn socket_relays_preserve_session_order_without_blocking_other_channels() {
+        let mut f = QueueFixture::new().await;
+        f.service.executors.lock().unwrap().remove(&f.a.device.id());
+        let mut socket = TestSocket::new(f.service.clone(), &f.a).await;
+        socket.announce(&f.channel).await;
+        // Subscribe the same executors to a second channel with the same members.
+        let verifier = hash_psk("test-secret").unwrap();
+        let genesis = ChannelGenesis::create(&f.a, "other".into(), &verifier).unwrap();
+        let proof = f
+            .service
+            .db
+            .create(&f.a.device.id(), genesis, verifier)
+            .await
+            .unwrap();
+        let request = JoinRequest::create(&f.b, &proof.verify().unwrap()).unwrap();
+        f.service
+            .db
+            .join(&f.b.device.id(), request.clone(), "test-secret".into())
+            .await
+            .unwrap();
+        let event = MembershipEvent::create(
+            &f.a,
+            &proof.verify().unwrap(),
+            MembershipAction::Admit(request),
+        )
+        .unwrap();
+        f.service
+            .db
+            .append(&f.a.device.id(), event, None)
+            .await
+            .unwrap();
+        let other = proof.genesis.body.id;
+        for executor in f.service.executors.lock().unwrap().values_mut() {
+            executor.channels.insert(other.clone());
+        }
+        while f._rx.try_recv().is_ok() {}
+        let guard = f.service.channel_authority(&f.channel).write_owned().await;
+        let session = random_id();
+        for n in 0..16 {
+            socket
+                .send(Envelope::Relay {
+                    channel: f.channel.clone(),
+                    peer: f.b.device.id(),
+                    session: session.clone(),
+                    data: vec![n],
+                })
+                .await;
+        }
+        socket
+            .send(Envelope::Relay {
+                channel: f.channel.clone(),
+                peer: f.b.device.id(),
+                session: session.clone(),
+                data: Vec::new(),
+            })
+            .await;
+        socket
+            .send(Envelope::Relay {
+                channel: other.clone(),
+                peer: f.b.device.id(),
+                session: session.clone(),
+                data: vec![99],
+            })
+            .await;
+        let first = tokio::time::timeout(Duration::from_secs(2), f._rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(first, Envelope::Relay { channel, data, .. } if channel == other && data == [99])
+        );
+        drop(guard);
+        for n in 0..16 {
+            let next = tokio::time::timeout(Duration::from_secs(2), f._rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(matches!(next, Envelope::Relay { data, .. } if data == [n]));
+        }
+        // The empty close queued with the batch must follow every data frame.
+        assert!(
+            matches!(tokio::time::timeout(Duration::from_secs(2), f._rx.recv()).await.unwrap().unwrap(),
+            Envelope::Relay { data, .. } if data.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn disconnect_cancels_waiting_announce_before_unregistering() {
+        let f = QueueFixture::new().await;
+        f.service.executors.lock().unwrap().remove(&f.a.device.id());
+        let mut socket = TestSocket::new(f.service.clone(), &f.a).await;
+        socket.announce(&f.channel).await;
+        let guard = f.service.channel_authority(&f.channel).write_owned().await;
+        socket
+            .send(Envelope::Request {
+                id: "waiting-announce".into(),
+                command: Control::Announce {
+                    channels: vec![f.channel.clone()],
+                },
+            })
+            .await;
+        socket
+            .send(Envelope::Request {
+                id: "barrier".into(),
+                command: Control::Policy,
+            })
+            .await;
+        assert!(
+            matches!(socket.envelope().await, Envelope::Response { id, .. } if id == "barrier")
+        );
+        socket.ws.send(ClientMessage::Close(None)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while f
+                .service
+                .executors
+                .lock()
+                .unwrap()
+                .contains_key(&f.a.device.id())
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(guard);
+        assert_eq!(
+            f.service.authority.lock().unwrap()[&f.channel].strong_count(),
+            0
+        );
+        assert!(
+            !f.service
+                .executors
+                .lock()
+                .unwrap()
+                .contains_key(&f.a.device.id())
+        );
+    }
+
+    #[tokio::test]
+    async fn blocked_operation_does_not_serialize_other_operations_or_relays() {
+        let f = QueueFixture::new().await;
+        let op = f.operation();
+        f.command(
+            &f.a,
+            "a",
+            Control::Queue {
+                operation: op.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let guard = shared_lock(&f.service.operations, &op.id)
+            .lock_owned()
+            .await;
+        let mut claim = Box::pin(f.command(&f.b, "b", f.claim(&op.id)));
+        tokio::select! {
+            biased;
+            result = &mut claim => panic!("claim bypassed operation lock: {result:?}"),
+            _ = std::future::ready(()) => {}
+        }
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            f.service.relay(
+                &f.a.device.id(),
+                "a",
+                f.channel.clone(),
+                f.b.device.id(),
+                random_id(),
+                vec![1],
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            f.command(
+                &f.a,
+                "a",
+                Control::Queue {
+                    operation: f.operation(),
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(guard);
+        claim.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn full_control_burst_drains_through_bounded_output_queue() {
+        let f = QueueFixture::new().await;
+        let mut socket = TestSocket::new(f.service.clone(), &f.a).await;
+        for n in 0..128 {
+            socket
+                .send(Envelope::Request {
+                    id: n.to_string(),
+                    command: Control::Policy,
+                })
+                .await;
+        }
+        let mut replies = HashSet::new();
+        for _ in 0..128 {
+            let Envelope::Response {
+                id,
+                result: Ok(Reply::Policy { .. }),
+            } = socket.envelope().await
+            else {
+                panic!()
+            };
+            assert!(replies.insert(id));
+        }
+        assert_eq!(replies.len(), 128);
+    }
+
+    #[tokio::test]
+    async fn socket_overload_closes_and_cleans_up_blocked_workers() {
+        let f = QueueFixture::new().await;
+        f.service.executors.lock().unwrap().remove(&f.a.device.id());
+        let mut socket = TestSocket::new(f.service.clone(), &f.a).await;
+        socket.announce(&f.channel).await;
+        let guard = f.service.channel_authority(&f.channel).write_owned().await;
+        for n in 0..129 {
+            socket
+                .send(Envelope::Request {
+                    id: n.to_string(),
+                    command: Control::GetChannel {
+                        channel: f.channel.clone(),
+                    },
+                })
+                .await;
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match socket.ws.next().await {
+                    Some(Ok(ClientMessage::Ping(data))) => {
+                        let _ = socket.ws.send(ClientMessage::Pong(data)).await;
+                    }
+                    None | Some(Err(_)) | Some(Ok(ClientMessage::Close(_))) => break,
+                    frame => panic!("overloaded connection accepted another request: {frame:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            !f.service
+                .executors
+                .lock()
+                .unwrap()
+                .contains_key(&f.a.device.id())
+        );
+        drop(guard);
+        assert_eq!(
+            f.service.authority.lock().unwrap()[&f.channel].strong_count(),
+            0
+        );
     }
 
     #[tokio::test]

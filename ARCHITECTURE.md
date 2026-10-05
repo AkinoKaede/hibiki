@@ -127,6 +127,22 @@ The WebSocket path remains `/hibiki`. Noise setup is followed by `OpenService` /
 
 The provider persists completion before returning the final result. The caller completes its end registration asynchronously and idempotently after receiving that result. Operation status monitoring has an independent task and cannot block Assuan reads or writes. Channel snapshots combine membership and online peers; online/offline notifications trigger discovery, and reconnect resynchronizes state.
 
+The relay uses shared authority locks per channel for routing and ordinary control
+requests. Membership changes take exclusive authority in that channel; unrelated
+channels continue processing. Operation transitions are serialized per operation
+ID, with a separate admission lock enforcing queue limits across channels.
+Subscription checks and relay enqueue are atomic with executor registration and
+disconnect. Membership and administrator access checks still run on every relay.
+
+Each authenticated connection reads and writes independently of its request
+workers. Independent controls can reply out of order and are matched by request
+ID; callers must await a response before sending work that depends on it. Relay
+frames retain arrival order within each channel/peer/session, including empty
+close frames. A connection permits at most 128 in-flight workers and 8 MiB of
+retained inbound wire bytes, in addition to bounded output queues. Overload closes
+the connection; disconnect cancels and drains workers before unregistering its
+executor. Heartbeats and the 45-second receive deadline continue during slow work.
+
 A matching authenticated outer Relay frame with empty data cancels an existing peer/channel/session, including a handshake interrupted before encrypted Close is available. Empty frames cannot open a session; routing and membership checks still apply. This also releases a backend opened concurrently with caller cancellation.
 
 Ping uses its own Noise-authenticated `PingOpen`/`PingOpened` session and random matching Ping/Pong nonces, never a provider slot. CLI, TUI and iOS report setup separately from RTT, with 1–20 samples and a five-second deadline per sample. It measures the encrypted path through the relay, not ICMP or a direct network route.
