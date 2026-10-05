@@ -414,3 +414,118 @@ impl EmptyChannelInvite {
         )
     }
 }
+
+/// Invitation kind is public; credentials are kept in the separate secret envelope.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum InvitationKind {
+    Member(Invite),
+    Initialization(EmptyChannelInvite),
+}
+impl InvitationKind {
+    pub fn import(text: &str) -> Result<Self> {
+        if text.starts_with("hibiki-init-v1:") {
+            Ok(Self::Initialization(EmptyChannelInvite::import(text)?))
+        } else {
+            Ok(Self::Member(Invite::import(text)?))
+        }
+    }
+    pub fn export(&self) -> Result<String> {
+        match self {
+            Self::Member(value) => value.export(),
+            Self::Initialization(value) => value.export(),
+        }
+    }
+    pub fn server(&self) -> &str {
+        match self {
+            Self::Member(v) => &v.server,
+            Self::Initialization(v) => &v.server,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+struct CredentialInvitation {
+    version: u16,
+    #[zeroize(skip)]
+    invitation: InvitationKind,
+    psk: String,
+}
+impl std::fmt::Debug for CredentialInvitation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[credential invitation redacted]")
+    }
+}
+
+pub struct ParsedInvitation {
+    pub invitation: InvitationKind,
+    pub psk: Option<zeroize::Zeroizing<String>>,
+}
+impl std::fmt::Debug for ParsedInvitation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[invitation redacted]")
+    }
+}
+impl ParsedInvitation {
+    pub fn import(text: &str) -> Result<Self> {
+        let text = text.trim();
+        let Some(raw) = text.strip_prefix("hibiki-psk-v1:") else {
+            return Ok(Self {
+                invitation: InvitationKind::import(text)?,
+                psk: None,
+            });
+        };
+        if raw.len() > 32768 {
+            return Err(Error::Invalid("invite too large".into()));
+        }
+        let bytes = zeroize::Zeroizing::new(
+            URL_SAFE_NO_PAD
+                .decode(raw)
+                .map_err(|_| Error::Invalid("invite encoding".into()))?,
+        );
+        let mut value: CredentialInvitation =
+            decode(&bytes).map_err(|_| Error::Invalid("credential invitation encoding".into()))?;
+        if value.version != 1 {
+            return Err(Error::Unsupported("credential invitation version".into()));
+        }
+        validate_invitation_psk(&value.psk)?;
+        // Reuse the original signature/version validation without accepting nesting.
+        InvitationKind::import(&value.invitation.export()?)?;
+        Ok(Self {
+            invitation: value.invitation.clone(),
+            psk: Some(zeroize::Zeroizing::new(std::mem::take(&mut value.psk))),
+        })
+    }
+    pub fn secret(
+        self,
+        external: Option<String>,
+    ) -> Result<(InvitationKind, Option<zeroize::Zeroizing<String>>)> {
+        let external = external.map(zeroize::Zeroizing::new);
+        if self.psk.is_some() && external.is_some() {
+            return Err(Error::Invalid(
+                "invitation already contains a PSK; do not supply another PSK".into(),
+            ));
+        }
+        Ok((self.invitation, self.psk.or(external)))
+    }
+}
+fn validate_invitation_psk(psk: &str) -> Result<()> {
+    if !(8..=1024).contains(&psk.len()) {
+        return Err(Error::Invalid("PSK must have 8..1024 bytes".into()));
+    }
+    Ok(())
+}
+pub fn invitation_with_psk(invitation: InvitationKind, psk: String) -> Result<String> {
+    let value = CredentialInvitation {
+        version: 1,
+        invitation,
+        psk,
+    };
+    validate_invitation_psk(&value.psk)?;
+    InvitationKind::import(&value.invitation.export()?)?;
+    let bytes = crate::encode_secret(&value)?;
+    let raw = URL_SAFE_NO_PAD.encode(&*bytes);
+    if raw.len() > 32768 {
+        return Err(Error::Invalid("invite too large".into()));
+    }
+    Ok(format!("hibiki-psk-v1:{raw}"))
+}

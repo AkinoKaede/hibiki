@@ -377,3 +377,55 @@ fn public_key_words_encode_the_complete_public_key_without_secret_material() {
     assert_ne!(b.device.public_key_words().unwrap(), words);
     assert_ne!(mnemonic.to_entropy(), a.noise_secret());
 }
+
+#[test]
+fn embedded_psk_invites_preserve_identity_and_redact_credentials() {
+    let (_, proof) = root();
+    let invitation = InvitationKind::Member(Invite {
+        version: 1,
+        server: "wss://example.com/hibiki".into(),
+        genesis: proof.genesis.clone(),
+        checkpoint: proof.verify().unwrap().checkpoint(),
+    });
+    let legacy = invitation.export().unwrap();
+    assert!(ParsedInvitation::import(&legacy).unwrap().psk.is_none());
+    let text = invitation_with_psk(invitation.clone(), "secret-123456".into()).unwrap();
+    assert!(text.starts_with("hibiki-psk-v1:"));
+    let parsed = ParsedInvitation::import(&text).unwrap();
+    assert!(!format!("{parsed:?}").contains("secret"));
+    assert_eq!(
+        parsed.psk.as_deref().map(|s| s.as_str()),
+        Some("secret-123456")
+    );
+    assert!(parsed.secret(Some("secret-123456".into())).is_err());
+    assert_eq!(
+        ParsedInvitation::import(&text)
+            .unwrap()
+            .invitation
+            .export()
+            .unwrap(),
+        legacy
+    );
+    for secret in ["short".to_string(), "x".repeat(1025)] {
+        assert!(invitation_with_psk(invitation.clone(), secret).is_err());
+    }
+    for text in [
+        "hibiki-psk-v1:%%%".to_string(),
+        format!("hibiki-psk-v1:{}", "a".repeat(32769)),
+        "hibiki-psk-v1:hibiki-psk-v1:x".into(),
+    ] {
+        assert!(ParsedInvitation::import(&text).is_err());
+    }
+    let initialization = InvitationKind::Initialization(EmptyChannelInvite {
+        version: 1,
+        id: random_id(),
+        server: "wss://example.com/hibiki".into(),
+        name: "Empty".into(),
+        psk_commitment: [0; 32],
+    });
+    let text = invitation_with_psk(initialization, "initial-secret".into()).unwrap();
+    assert!(matches!(
+        ParsedInvitation::import(&text).unwrap().invitation,
+        InvitationKind::Initialization(_)
+    ));
+}
