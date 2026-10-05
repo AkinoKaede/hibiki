@@ -7,7 +7,6 @@ pub struct Model {
     pub id: String,
     pub channel: String,
     pub request: Vec<u8>,
-    pub epoch: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

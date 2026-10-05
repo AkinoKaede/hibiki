@@ -150,7 +150,7 @@ impl AdmissionRequest {
             created_at: now(),
         };
         Ok(Self {
-            signature: identity.sign("join/v3", &body)?,
+            signature: identity.sign("join/v4", &body)?,
             body,
         })
     }
@@ -172,7 +172,7 @@ impl AdmissionRequest {
         }
         verify(
             &self.body.device.signing_key,
-            "join/v3",
+            "join/v4",
             &self.body,
             &self.signature,
         )

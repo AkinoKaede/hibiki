@@ -50,26 +50,6 @@ impl Database {
         ] {
             tx.execute(statement.if_not_exists()).await?;
         }
-        let version = tx
-            .query_one_raw(sea_orm::Statement::from_string(
-                sea_orm::DatabaseBackend::Sqlite,
-                "PRAGMA user_version",
-            ))
-            .await?
-            .context("database version unavailable")?
-            .try_get_by_index::<i64>(0)?;
-        if version < 3 {
-            pending::Entity::delete_many().exec(&tx).await?;
-            channel::Entity::update_many()
-                .col_expr(channel::Column::Verifier, Expr::value(""))
-                .exec(&tx)
-                .await?;
-            empty::Entity::update_many()
-                .col_expr(empty::Column::Verifier, Expr::value(""))
-                .exec(&tx)
-                .await?;
-            tx.execute_unprepared("PRAGMA user_version = 3").await?;
-        }
         tx.commit().await?;
         Ok(())
     }
@@ -86,7 +66,6 @@ impl Database {
         empty::ActiveModel {
             id: Set(invite.metadata.channel.clone()),
             invitation: Set(Vec::new()),
-            verifier: Set(String::new()),
         }
         .insert(&tx)
         .await?;
@@ -125,8 +104,7 @@ impl Database {
         invite: OneTimeInvitation,
     ) -> Result<MembershipProof> {
         genesis.verify()?;
-        if genesis.body.version != 2
-            || genesis.body.founder.id() != caller
+        if genesis.body.founder.id() != caller
             || genesis.body.id != invite.metadata.channel
             || genesis.body.name != invite.metadata.name
             || invite.metadata.genesis_hash.is_some()
@@ -184,8 +162,7 @@ impl Database {
         let proof = proof_tx(&tx, &metadata.channel).await?;
         let state = proof.verify()?;
         state.member(caller)?;
-        if !state.invitations_enabled
-            || metadata.genesis_hash != Some(state.genesis_hash)
+        if metadata.genesis_hash != Some(state.genesis_hash)
             || metadata.issuer_admission != state.admission_id(caller).unwrap_or_default()
             || metadata.name != state.name
             || metadata.expires_at <= now()
@@ -455,7 +432,7 @@ impl Database {
     }
     pub async fn create(&self, caller: &str, genesis: ChannelGenesis) -> Result<MembershipProof> {
         genesis.verify()?;
-        if genesis.body.version != 2 || genesis.body.founder.id() != caller {
+        if genesis.body.founder.id() != caller {
             bail!("invalid channel creation authority");
         }
         let proof = MembershipProof {
@@ -542,7 +519,6 @@ impl Database {
             id: Set(request_id),
             channel: Set(state.id),
             request: Set(encode(&request)?),
-            epoch: Set(0),
         }
         .insert(&tx)
         .await?;
@@ -653,12 +629,6 @@ impl Database {
         if event.body.issuer_device_id != caller || event.body.issued_at > now() + 30 {
             bail!("invalid issuer or timestamp");
         }
-        if matches!(
-            event.body.action,
-            MembershipAction::Admit(_) | MembershipAction::ChangePsk { .. }
-        ) {
-            bail!("PSK admission is no longer supported");
-        }
         let tx = self.connection.begin().await?;
         let id = &event.body.channel_id;
         lock_channel(&tx, id).await?;
@@ -738,7 +708,6 @@ fn channel_model(proof: &MembershipProof) -> Result<channel::ActiveModel> {
         name: Set(state.name),
         proof: Set(encode(proof)?),
         head: Set(state.head.to_vec()),
-        verifier: Set(String::new()),
     })
 }
 async fn lock_channel(tx: &sea_orm::DatabaseTransaction, id: &str) -> Result<()> {

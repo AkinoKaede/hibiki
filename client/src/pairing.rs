@@ -125,7 +125,7 @@ mod tests {
         let founder = Identity::generate("founder".into()).unwrap();
         let applicant = Identity::generate("new device".into()).unwrap();
         let proof = MembershipProof {
-            genesis: ChannelGenesis::without_psk(&founder, hibiki_lib::random_id(), "test".into())
+            genesis: ChannelGenesis::create(&founder, hibiki_lib::random_id(), "test".into())
                 .unwrap(),
             events: vec![],
         };

@@ -89,3 +89,27 @@ impl AppPaths {
         ))
     }
 }
+
+/// Create (mode 0700) or validate a directory owned by the current user.
+pub fn private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    if !path.exists() {
+        // DirBuilder applies the mode to every newly created component.
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path)?;
+    }
+    let m = std::fs::symlink_metadata(path)?;
+    // Read-only UID query; no environment or filesystem changes.
+    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "expected current-user directory with mode 0700: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}

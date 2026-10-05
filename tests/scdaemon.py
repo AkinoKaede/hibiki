@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from assuan_stdio import emit, esc
 
 base = Path(sys.argv[1])
 card = json.loads((base / 'card.json').read_text()) if (base / 'card.json').exists() else {'present': False, 'serial': 'D2760001240100000000000000000000', 'keys': []}
@@ -17,13 +18,6 @@ marker.write_text('started')
 data = b''
 # Opaque stand-in for scdaemon's process-key-wrapped PIN, never an actual PIN.
 pin_cache = {}
-
-def emit(line):
-    sys.stdout.buffer.write(line + b'\n')
-    sys.stdout.buffer.flush()
-
-def esc(data):
-    return data.replace(b'%', b'%25').replace(b'\r', b'%0D').replace(b'\n', b'%0A')
 
 def unesc(data):
     import re

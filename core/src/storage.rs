@@ -69,24 +69,7 @@ pub struct App {
     pub identity: Arc<Identity>,
 }
 
-pub fn private_dir(path: &Path) -> Result<()> {
-    if !path.exists() {
-        // DirBuilder applies the mode to every newly created component.
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)?;
-    }
-    let m = fs::symlink_metadata(path)?;
-    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 {
-        bail!(
-            "expected current-user directory with mode 0700: {}",
-            path.display()
-        );
-    }
-    Ok(())
-}
+pub use hibiki_lib::paths::private_dir;
 pub fn read_private(path: &Path) -> Result<Vec<u8>> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -147,7 +130,7 @@ pub fn ensure_runtime(paths: &AppPaths) -> Result<()> {
     if let Some(base) = &paths.runtime_base {
         private_dir(base)?;
     }
-    private_dir(&paths.runtime)
+    Ok(private_dir(&paths.runtime)?)
 }
 pub fn lock_file(path: &Path) -> Result<File> {
     let file = OpenOptions::new()
@@ -380,7 +363,7 @@ mod tests {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let app = app(dir.path());
         let genesis =
-            ChannelGenesis::create(&app.identity, "test".into(), "test-verifier").unwrap();
+            ChannelGenesis::create(&app.identity, hibiki_lib::random_id(), "test".into()).unwrap();
         let original = MembershipProof {
             genesis,
             events: vec![],
@@ -389,8 +372,8 @@ mod tests {
         let event = MembershipEvent::create(
             &app.identity,
             &original.verify().unwrap(),
-            MembershipAction::ChangePsk {
-                verifier_commitment: [1; 32],
+            MembershipAction::Rename {
+                device: app.identity.renamed("one".into()).unwrap().device.clone(),
             },
         )
         .unwrap();
@@ -403,8 +386,8 @@ mod tests {
             MembershipEvent::create(
                 &app.identity,
                 &original.verify().unwrap(),
-                MembershipAction::ChangePsk {
-                    verifier_commitment: [2; 32],
+                MembershipAction::Rename {
+                    device: app.identity.renamed("two".into()).unwrap().device.clone(),
                 },
             )
             .unwrap(),
@@ -417,11 +400,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let app = app(dir.path());
         let original = MembershipProof {
-            genesis: ChannelGenesis::create(&app.identity, "same".into(), "verifier").unwrap(),
+            genesis: ChannelGenesis::create(&app.identity, hibiki_lib::random_id(), "same".into())
+                .unwrap(),
             events: vec![],
         };
         let replacement = MembershipProof {
-            genesis: ChannelGenesis::create(&app.identity, "same".into(), "verifier").unwrap(),
+            genesis: ChannelGenesis::create(&app.identity, hibiki_lib::random_id(), "same".into())
+                .unwrap(),
             events: vec![],
         };
         app.bootstrap(original.clone(), None).unwrap();

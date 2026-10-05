@@ -3,7 +3,7 @@ use crate::{assuan::Line, channel::*, identity::Device};
 use serde::{Deserialize, Serialize};
 
 /// Hibiki wire protocol identifier, authenticated by the device and bound into Noise.
-pub const VERSION: &str = "hibiki/3";
+pub const VERSION: &str = "hibiki/4";
 pub const WS_PATH: &str = "/hibiki";
 pub const MAX_WIRE: usize = 4 * 1024 * 1024;
 /// An hour of caller time plus less than a second of wire timestamp rounding.

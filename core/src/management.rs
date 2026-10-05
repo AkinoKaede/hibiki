@@ -28,9 +28,6 @@ pub async fn append(
         let proof = refresh(app, conn, id).await?;
         let state = proof.verify()?;
         state.member(&app.identity.device.id())?;
-        if matches!(action, MembershipAction::EnableInvitations) && state.invitations_enabled {
-            return Ok(());
-        }
         let event = MembershipEvent::create(&app.identity, &state, action.clone())?;
         match conn.request(Control::Append { event }).await {
             Ok(Reply::Proof(proof)) => {
@@ -169,11 +166,7 @@ pub async fn revoke(
 }
 
 pub async fn invitation(app: &App, conn: &Connection, id: &str) -> Result<OneTimeInvitation> {
-    let mut proof = refresh(app, conn, id).await?;
-    if !proof.verify()?.invitations_enabled {
-        append(app, conn, id, MembershipAction::EnableInvitations).await?;
-        proof = refresh(app, conn, id).await?;
-    }
+    let proof = refresh(app, conn, id).await?;
     let state = proof.verify()?;
     state.member(&app.identity.device.id())?;
     let invitation = OneTimeInvitation::new(
@@ -198,7 +191,7 @@ pub async fn create_channel(
     conn: &Connection,
     name: String,
 ) -> Result<OneTimeInvitation> {
-    let genesis = ChannelGenesis::without_psk(&app.identity, hibiki_lib::random_id(), name)?;
+    let genesis = ChannelGenesis::create(&app.identity, hibiki_lib::random_id(), name)?;
     let Reply::Proof(proof) = conn
         .request(Control::Create {
             genesis: genesis.clone(),
@@ -229,7 +222,7 @@ pub async fn join(app: &App, conn: &Connection, text: &str) -> Result<AdmissionR
     }
     if meta.genesis_hash.is_none() {
         let genesis =
-            ChannelGenesis::without_psk(&app.identity, meta.channel.clone(), meta.name.clone())?;
+            ChannelGenesis::create(&app.identity, meta.channel.clone(), meta.name.clone())?;
         let Reply::Proof(proof) = conn
             .request(Control::Claim {
                 genesis: genesis.clone(),
@@ -253,7 +246,7 @@ pub async fn join(app: &App, conn: &Connection, text: &str) -> Result<AdmissionR
     let saved = app
         .paths
         .channel_dir(&meta.channel)?
-        .join("join-request-v3.bin");
+        .join("join-request-v4.bin");
     let previous: Option<AdmissionRequest> = if saved.exists() {
         Some(hibiki_lib::decode(&crate::storage::read_private(&saved)?)?)
     } else {

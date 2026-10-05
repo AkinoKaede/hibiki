@@ -691,7 +691,7 @@ struct SettingsView: View {
             } header: { Text("Public-Key Verification Words") } footer: { Text("These words verify this device’s public key. They are not a recovery phrase.") }
             Section("Connection") {
                 Text(verbatim: model.server)
-                LabeledContent("Protocol", value: "hibiki/3")
+                LabeledContent("Protocol", value: "hibiki/4")
                 Button("Disconnect", role: .destructive) { confirmDisconnect = true }
                     .disabled(model.busy).accessibilityIdentifier("disconnectServer")
             }

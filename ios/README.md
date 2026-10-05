@@ -116,8 +116,8 @@ its required signing metadata.
    `0.3.0`, without `v`. It controls the iOS marketing version, Rust binary
    versions, and package filenames. Desktop releases automatically use Git tag
    `v0.3.0`; iOS-only runs do not create a tag. The input must match the committed
-   Cargo workspace version and lockfile. Developers must manually bump and commit
-   both before releasing. Prerelease suffixes are not accepted; the
+   Cargo workspace version and lockfile. Run `python3 scripts/bump-version.py X.Y.Z` to update the
+   workspace, lockfile and Xcode project together, and commit the result before releasing. Prerelease suffixes are not accepted; the
    desktop `prereleased` checkbox marks the GitHub Release and does not affect iOS.
 4. Normally leave `ios_build_number` empty: the job queries every ASC build for
    that iOS marketing version and uses the highest integer plus one, starting
@@ -390,7 +390,7 @@ Hardware release checklist (must run on an actual iPhone and YubiKey):
 
 ## Server policy and pending requests
 
-The app uses the Protobuf `hibiki/3` baseline. Upgrade the server and desktop components together when moving from v2; identities, channels and members survive the migration. Server and client application
+The app uses the Protobuf `hibiki/4` baseline. Upgrade the server and desktop components together when moving from an earlier protocol major; device identities survive, but channels must be recreated and members rejoin by invitation. Server and client application
 versions may differ under the [compatibility contract](../PROTOCOL.md).
 The Channels screen shows Create only when the connected server permits client channel
 creation. Otherwise, obtain an initialization invitation from the administrator.
@@ -435,7 +435,7 @@ RESET/RESTART or a new request session permits another attempt. Desktop insertio
 and PIN dialogs also cancel the whole operation when Cancel is clicked.
 
 When replacing an unpublished Postcard build, upgrade all components to the
-Protobuf `hibiki/3` baseline once. Later same-major releases support separate
+Protobuf `hibiki/4` baseline once. Later same-major releases support separate
 upgrades through capability negotiation.
 
 ### Approval-chain authority

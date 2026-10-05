@@ -52,28 +52,6 @@ async fn unavailable_nfc_cannot_open_native_reader_or_register_a_card() {
     assert_eq!(encode(&core.nfc_card()).unwrap(), before);
 }
 
-#[test]
-fn records_are_not_loaded_and_legacy_files_are_removed_without_decoding() {
-    let root = tempfile::tempdir().unwrap();
-    let core = client(root.path());
-    seed(&core);
-    for name in ["cards.bin", "nfc-cards.bin"] {
-        std::fs::write(
-            core.app.paths.data.join(name),
-            b"obsolete or corrupted registry",
-        )
-        .unwrap();
-    }
-    let reopened = client(root.path());
-    assert!(reopened.nfc_card().is_none());
-    for name in ["cards.bin", "nfc-cards.bin"] {
-        assert!(!core.app.paths.data.join(name).exists());
-    }
-    assert_eq!(core.nfc_card().unwrap().serial, "previous");
-    core.clear_nfc_card();
-    assert!(core.nfc_card().is_none());
-}
-
 // An empty OpenPGP card is enough to verify the production public-read path.
 fn application_data() -> Vec<u8> {
     let mut data =

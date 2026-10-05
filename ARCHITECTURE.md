@@ -121,7 +121,7 @@ Card private keys stay on the card; software private keys stay on the requesting
 
 Private files use mode `0600` and directories use `0700`. Back up identity and trust records together.
 
-The protocol identifier is **`hibiki/3`** and the WebSocket path is **`/hibiki`**. It includes server policy discovery and pending-request rejection, withdrawal and status queries. Network messages use Protocol Buffers. Server and clients may use different application releases while supporting the same baseline and negotiating extensions; unpublished Postcard network formats are not supported. See [the compatibility contract](PROTOCOL.md).
+The protocol identifier is **`hibiki/4`** and the WebSocket path is **`/hibiki`**. It includes server policy discovery and pending-request rejection, withdrawal and status queries. Network messages use Protocol Buffers. Server and clients may use different application releases while supporting the same baseline and negotiating extensions; unpublished Postcard network formats are not supported. See [the compatibility contract](PROTOCOL.md).
 
 ## Protocol v2 and measurements
 

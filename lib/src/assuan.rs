@@ -16,7 +16,6 @@ pub const UNKNOWN_OPTION: u32 = 174;
 pub const MISSING_VALUE: u32 = 128;
 pub const FALSE: u32 = 256;
 pub const NO_DATA: u32 = 58;
-pub const BUSY: u32 = 137;
 
 #[derive(Clone, Default, Serialize, Deserialize, Zeroize, ZeroizeOnDrop, PartialEq, Eq)]
 pub struct Line(pub Vec<u8>);

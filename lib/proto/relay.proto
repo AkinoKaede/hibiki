@@ -1,6 +1,6 @@
-// hibiki/3: never reuse tags or enum values; reserve deleted names and numbers.
+// hibiki/4: never reuse tags or enum values; reserve deleted names and numbers.
 syntax = "proto3";
-package hibiki.v3;
+package hibiki.v4;
 import "membership.proto";
 import "control.proto";
 

@@ -130,25 +130,6 @@ impl QueuedOperation {
         .await?;
         Ok(())
     }
-    pub async fn claim_local(&self) -> Result<()> {
-        let op = self
-            .control(Control::ClaimOperation {
-                id: self.value.id.clone(),
-                initiator: self.value.initiator.clone(),
-                channel: self.value.channel.clone(),
-                service: self.value.service,
-            })
-            .await?;
-        record_execution(&self.hub.app, &op)
-    }
-    pub async fn local_done(&self, success: bool) -> Result<()> {
-        self.control(Control::TargetDone {
-            id: self.value.id.clone(),
-            success,
-        })
-        .await?;
-        Ok(())
-    }
     pub async fn ready(&self) -> Result<Vec<String>> {
         loop {
             let op = self.status().await?;

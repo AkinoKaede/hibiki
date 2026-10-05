@@ -1,22 +1,7 @@
 use hibiki_lib::{channel::*, identity::Identity, invitation::*, *};
-fn root() -> (Identity, MembershipProof) {
-    let a = Identity::generate("founder".into()).unwrap();
-    let p = MembershipProof {
-        genesis: ChannelGenesis::without_psk(&a, random_id(), "Team".into()).unwrap(),
-        events: vec![],
-    };
-    (a, p)
-}
-fn append(p: &mut MembershipProof, issuer: &Identity, action: MembershipAction) {
-    let e = MembershipEvent::create(issuer, &p.verify().unwrap(), action).unwrap();
-    p.events.push(e);
-    p.verify().unwrap();
-}
-fn admit(p: &mut MembershipProof, issuer: &Identity, subject: &Identity) -> AdmissionRequest {
-    let request = AdmissionRequest::create(subject, &p.verify().unwrap(), random_id(), 0).unwrap();
-    append(p, issuer, MembershipAction::Accept(request.clone()));
-    request
-}
+mod common;
+use common::*;
+
 #[test]
 fn invitations_have_distinct_keys_compact_payloads_and_redacted_debug() {
     let (a, p) = root();
@@ -49,14 +34,7 @@ fn invitations_have_distinct_keys_compact_payloads_and_redacted_debug() {
         )
         .contains(&text[..])
     );
-    for prefix in [
-        "hibiki-v1:",
-        "hibiki-init-v1:",
-        "hibiki-psk-v1:",
-        "hibiki-invite-v2:%%%",
-    ] {
-        assert!(OneTimeInvitation::import(prefix).is_err());
-    }
+    assert!(OneTimeInvitation::import("hibiki-invite-v2:%%%").is_err());
     assert!(OneTimeInvitation::import(&format!("hibiki-invite-v2:{}", "A".repeat(4097))).is_err());
 }
 #[test]
@@ -138,40 +116,6 @@ fn removed_id_cannot_replay_an_unsubmitted_request_or_reuse_an_invitation() {
     let duplicate =
         AdmissionRequest::create(&b, &p.verify().unwrap(), accepted.body.invitation_id, 0).unwrap();
     assert!(p.verify().unwrap().validate_admission(&duplicate).is_err());
-}
-#[test]
-fn legacy_history_bytes_and_checkpoint_survive_explicit_upgrade() {
-    let a: Identity = decode(include_bytes!("fixtures/wire-identity.postcard")).unwrap();
-    let b = Identity::generate("guest".into()).unwrap();
-    let mut p = MembershipProof {
-        genesis: ChannelGenesis::create(&a, "legacy".into(), "verifier").unwrap(),
-        events: vec![],
-    };
-    let req = JoinRequest::create(&b, &p.verify().unwrap()).unwrap();
-    append(&mut p, &a, MembershipAction::Admit(req));
-    let bytes = encode(&p).unwrap();
-    let checkpoint = p.verify().unwrap().checkpoint();
-    let genesis_hash = p.genesis.hash().unwrap();
-    append(&mut p, &a, MembershipAction::EnableInvitations);
-    p.verify_from(&genesis_hash, &checkpoint).unwrap();
-    let prefix = MembershipProof {
-        genesis: p.genesis.clone(),
-        events: p.events[..1].to_vec(),
-    };
-    assert_eq!(bytes, encode(&prefix).unwrap());
-    assert!(
-        p.verify()
-            .unwrap()
-            .can_revoke(&a.device.id(), &b.device.id())
-    );
-    append(
-        &mut p,
-        &a,
-        MembershipAction::Revoke {
-            device_id: b.device.id(),
-        },
-    );
-    admit(&mut p, &a, &b);
 }
 #[test]
 fn qr_images_have_valid_png_and_full_quiet_zone() {

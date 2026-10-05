@@ -1,4 +1,4 @@
-//! Typed hibiki/3 conversions. Persistent and signed formats use the separate Postcard codec.
+//! Typed hibiki/4 conversions. Persistent and signed formats use the separate Postcard codec.
 use super::{Wire, array32, invalid, pb, required, signature64};
 use crate::e2ee::Fragment;
 use crate::invitation::{AdmissionRequest, InvitationMetadata, OneTimeInvitation};
@@ -205,20 +205,16 @@ impl Wire for GenesisBody {
     const NAME: &'static str = "GenesisBody";
     fn to_proto(&self) -> Self::Proto {
         pb::GenesisBody {
-            version: u32::from(self.version),
             id: self.id.clone(),
             name: self.name.clone(),
             founder: Some(self.founder.to_proto()),
-            psk_commitment: self.psk_commitment.to_vec(),
         }
     }
     fn from_proto(value: &Self::Proto) -> Result<Self> {
         let result = Self {
-            version: u16::try_from(value.version).map_err(|_| invalid("version out of range"))?,
             id: value.id.clone(),
             name: value.name.clone(),
             founder: Device::from_proto(required(&value.founder)?)?,
-            psk_commitment: array32(&value.psk_commitment)?,
         };
         Ok(result)
     }
@@ -237,51 +233,6 @@ impl Wire for ChannelGenesis {
         signature64(&value.signature)?;
         let result = Self {
             body: GenesisBody::from_proto(required(&value.body)?)?,
-            signature: value.signature.clone(),
-        };
-        Ok(result)
-    }
-}
-
-impl Wire for JoinBody {
-    type Proto = pb::JoinBody;
-    const NAME: &'static str = "JoinBody";
-    fn to_proto(&self) -> Self::Proto {
-        pb::JoinBody {
-            channel_id: self.channel_id.clone(),
-            genesis_hash: self.genesis_hash.to_vec(),
-            device: Some(self.device.to_proto()),
-            nonce: self.nonce.clone(),
-            psk_epoch: self.psk_epoch,
-            created_at: self.created_at,
-        }
-    }
-    fn from_proto(value: &Self::Proto) -> Result<Self> {
-        let result = Self {
-            channel_id: value.channel_id.clone(),
-            genesis_hash: array32(&value.genesis_hash)?,
-            device: Device::from_proto(required(&value.device)?)?,
-            nonce: value.nonce.clone(),
-            psk_epoch: value.psk_epoch,
-            created_at: value.created_at,
-        };
-        Ok(result)
-    }
-}
-
-impl Wire for JoinRequest {
-    type Proto = pb::JoinRequest;
-    const NAME: &'static str = "JoinRequest";
-    fn to_proto(&self) -> Self::Proto {
-        pb::JoinRequest {
-            body: Some(self.body.to_proto()),
-            signature: self.signature.clone(),
-        }
-    }
-    fn from_proto(value: &Self::Proto) -> Result<Self> {
-        signature64(&value.signature)?;
-        let result = Self {
-            body: JoinBody::from_proto(required(&value.body)?)?,
             signature: value.signature.clone(),
         };
         Ok(result)
@@ -1100,24 +1051,13 @@ impl Wire for MembershipAction {
     fn to_proto(&self) -> Self::Proto {
         use pb::membership_action::Kind;
         let kind = match self {
-            Self::Admit(value) => Kind::Admit(pb::MembershipActionAdmit {
-                value: Some(value.to_proto()),
-            }),
             Self::Revoke { device_id } => Kind::Revoke(pb::MembershipActionRevoke {
                 device_id: device_id.clone(),
-            }),
-            Self::ChangePsk {
-                verifier_commitment,
-            } => Kind::ChangePsk(pb::MembershipActionChangePsk {
-                verifier_commitment: verifier_commitment.to_vec(),
             }),
             Self::Leave => Kind::Leave(pb::MembershipActionLeave {}),
             Self::Rename { device } => Kind::Rename(pb::MembershipActionRename {
                 device: Some(device.to_proto()),
             }),
-            Self::EnableInvitations => {
-                Kind::EnableInvitations(pb::MembershipActionEnableInvitations {})
-            }
             Self::Accept(request) => Kind::Accept(request.to_proto()),
             Self::RevokeSubtree { device_id } => {
                 Kind::RevokeSubtree(pb::MembershipActionRevokeSubtree {
@@ -1130,18 +1070,13 @@ impl Wire for MembershipAction {
     fn from_proto(value: &Self::Proto) -> Result<Self> {
         use pb::membership_action::Kind;
         Ok(match required(&value.kind)? {
-            Kind::Admit(value) => Self::Admit(JoinRequest::from_proto(required(&value.value)?)?),
             Kind::Revoke(value) => Self::Revoke {
                 device_id: value.device_id.clone(),
-            },
-            Kind::ChangePsk(value) => Self::ChangePsk {
-                verifier_commitment: array32(&value.verifier_commitment)?,
             },
             Kind::Leave(_) => Self::Leave,
             Kind::Rename(value) => Self::Rename {
                 device: Device::from_proto(required(&value.device)?)?,
             },
-            Kind::EnableInvitations(_) => Self::EnableInvitations,
             Kind::Accept(v) => Self::Accept(AdmissionRequest::from_proto(v)?),
             Kind::RevokeSubtree(value) => Self::RevokeSubtree {
                 device_id: value.device_id.clone(),

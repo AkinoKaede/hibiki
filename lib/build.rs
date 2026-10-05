@@ -6,10 +6,10 @@ fn main() {
         .protoc_executable(protoc_bin_vendored::protoc_bin_path().expect("bundled protoc"))
         .type_attribute(".", "#[derive(zeroize::Zeroize)]")
         .type_attribute(
-            ".hibiki.v3.ResponseResult.kind",
+            ".hibiki.v4.ResponseResult.kind",
             "#[allow(clippy::large_enum_variant)]",
         )
-        .file_descriptor_set_path(output.join("hibiki-v3.bin"));
+        .file_descriptor_set_path(output.join("hibiki-v4.bin"));
     let schema = config
         .load_fds(
             &[
@@ -21,7 +21,7 @@ fn main() {
             ],
             &["proto"],
         )
-        .expect("compile hibiki/3 schema");
+        .expect("compile hibiki/4 schema");
     // prost creates local nested values before attaching them to their parent.
     // Clear their owned strings/bytes on every drop, including partial decode errors.
     // Scalar-only generated messages are Copy and have no secret allocations.
@@ -34,12 +34,12 @@ fn main() {
             )
         }) {
             config.message_attribute(
-                format!(".hibiki.v3.{}", message.name.as_deref().unwrap()),
+                format!(".hibiki.v4.{}", message.name.as_deref().unwrap()),
                 "#[derive(zeroize::ZeroizeOnDrop)]",
             );
         }
     }
-    config.compile_fds(schema).expect("generate hibiki/3 codec");
+    config.compile_fds(schema).expect("generate hibiki/4 codec");
     write_shapes(&output);
 }
 
@@ -48,7 +48,7 @@ fn main() {
 fn write_shapes(output: &std::path::Path) {
     use prost::Message;
     use prost_types::field_descriptor_proto::{Label, Type};
-    let bytes = std::fs::read(output.join("hibiki-v3.bin")).unwrap();
+    let bytes = std::fs::read(output.join("hibiki-v4.bin")).unwrap();
     let schema = prost_types::FileDescriptorSet::decode(bytes.as_slice()).unwrap();
     let messages: Vec<_> = schema
         .file
@@ -73,7 +73,7 @@ fn write_shapes(output: &std::path::Path) {
                     .type_name
                     .as_deref()
                     .unwrap()
-                    .strip_prefix(".hibiki.v3.")
+                    .strip_prefix(".hibiki.v4.")
                     .unwrap();
                 format!(
                     "Some({})",

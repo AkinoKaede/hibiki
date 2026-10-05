@@ -1,6 +1,6 @@
-// hibiki/3: never reuse tags or enum values; reserve deleted names and numbers.
+// hibiki/4: never reuse tags or enum values; reserve deleted names and numbers.
 syntax = "proto3";
-package hibiki.v3;
+package hibiki.v4;
 
 message Device {
   string name = 1;
@@ -10,29 +10,15 @@ message Device {
 }
 
 message GenesisBody {
-  uint32 version = 1;
+  reserved 1, 5;
+  reserved "version", "psk_commitment";
   string id = 2;
   string name = 3;
   Device founder = 4;
-  bytes psk_commitment = 5;
 }
 
 message ChannelGenesis {
   GenesisBody body = 1;
-  bytes signature = 2;
-}
-
-message JoinBody {
-  string channel_id = 1;
-  bytes genesis_hash = 2;
-  Device device = 3;
-  string nonce = 4;
-  uint64 psk_epoch = 5;
-  uint64 created_at = 6;
-}
-
-message JoinRequest {
-  JoinBody body = 1;
   bytes signature = 2;
 }
 
@@ -56,28 +42,19 @@ message MembershipProof {
 }
 
 message MembershipAction {
+  reserved 1, 3, 7;
+  reserved "admit", "change_psk", "enable_invitations";
   oneof kind {
-    MembershipActionAdmit admit = 1;
     MembershipActionRevoke revoke = 2;
-    MembershipActionChangePsk change_psk = 3;
     MembershipActionLeave leave = 4;
     MembershipActionRename rename = 5;
     MembershipActionRevokeSubtree revoke_subtree = 6;
-    MembershipActionEnableInvitations enable_invitations = 7;
     AdmissionRequest accept = 8;
   }
 }
 
-message MembershipActionAdmit {
-  JoinRequest value = 1;
-}
-
 message MembershipActionRevoke {
   string device_id = 1;
-}
-
-message MembershipActionChangePsk {
-  bytes verifier_commitment = 1;
 }
 
 message MembershipActionLeave {
@@ -91,8 +68,7 @@ message MembershipActionRevokeSubtree {
   string device_id = 1;
 }
 
-// Canonical signed v3 data; preserving its Postcard bytes is part of the signature contract.
+// Canonical signed v4 data; preserving its Postcard bytes is part of the signature contract.
 message AdmissionRequest { bytes canonical = 1; }
 message InvitationMetadata { bytes canonical = 1; }
 message OneTimeInvitation { InvitationMetadata metadata = 1; bytes key = 2; }
-message MembershipActionEnableInvitations {}

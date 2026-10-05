@@ -1,6 +1,6 @@
 # Hibiki network protocol
 
-`hibiki/3` uses Protocol Buffers over binary WebSocket messages
+`hibiki/4` uses Protocol Buffers over binary WebSocket messages
 at `/hibiki`. One WebSocket message contains one `Envelope`, without an extra
 length prefix. The server routes Noise packets as opaque bytes. The Noise XX
 handshake and its Postcard-encoded prologue remain unchanged; authenticated
@@ -9,7 +9,7 @@ one Protobuf `PrivateMessage`.
 
 ## Schema and codecs
 
-The `hibiki.v3` package is split by function in `lib/proto`:
+The `hibiki.v4` package is split by function in `lib/proto`:
 
 | File | Responsibility |
 | --- | --- |
@@ -27,14 +27,14 @@ The desktop, server and iOS Rust framework share this codec.
 `hibiki_lib::{encode, encode_secret, decode}` remains the separate Postcard codec
 for local IPC, identities, trust files, database blobs, invitations, signing inputs
 and hashes. Never sign or hash re-encoded Protobuf as a replacement for a historical
-preimage: Protobuf is not a canonical serialization. Network conversions preserve certificates, signatures, history hashes and trust checkpoints. Admission requests use bounded canonical Postcard blobs inside Protobuf messages, signed under `join/v3`. Genesis records are signed under `genesis/v2` and membership events under `membership/v3`.
+preimage: Protobuf is not a canonical serialization. Network conversions preserve certificates, signatures, history hashes and trust checkpoints. Admission requests use bounded canonical Postcard blobs inside Protobuf messages, signed under `join/v4`. Genesis records are signed under `genesis/v2` and membership events under `membership/v4`.
 
 ## Compatibility contract
 
 The schema, message behavior and limits at the first publication are the
-`hibiki/3` baseline. Application release numbers need not match. A newer server,
+`hibiki/4` baseline. Application release numbers need not match. A newer server,
 desktop client or iOS client must continue supporting this baseline for as long
-as it advertises `hibiki/3`. A same-major upgrade requires no simultaneous rollout.
+as it advertises `hibiki/4`. A same-major upgrade requires no simultaneous rollout.
 Older protocol majors are unsupported at runtime. Upgrading requires upgrading every component, and channels from earlier releases are not migrated.
 
 Within this major version:
@@ -82,7 +82,7 @@ Server setup uses `Hello.capabilities` for the server declaration and
 `Authenticate.capabilities` for the client declaration. Both lists are sorted and
 deduplicated before signing the Postcard tuple
 `(version, nonce, device_id, server_capabilities, client_capabilities)` under
-`server-auth/v3`. The server verifies that tuple against its actual declaration
+`server-auth/v4`. The server verifies that tuple against its actual declaration
 before registering the client. `Authenticated.capabilities` returns the
 intersection; the client checks it against the intersection it computed.
 Declarations are limited to 64 entries of 1–128 ASCII letters, digits or `._/-`.
@@ -113,8 +113,8 @@ secret-bearing message bodies are never logged.
 
 ## Baseline tests
 
-`lib/tests/fixtures/wire-v3.descriptor` freezes field numbers, types, oneof
-membership and enum values across all five schemas. `wire-v3.hex` freezes bytes for
+`lib/tests/fixtures/wire-v4.descriptor` freezes field numbers, types, oneof
+membership and enum values across all five schemas. `wire-v4.hex` freezes bytes for
 all network variants. `wire-identity.postcard` contains only a synthetic test
 identity; it also anchors the identity storage format and signed preimages. Do not regenerate
 published fixtures to silence a compatibility failure.

@@ -1,6 +1,6 @@
-use super::{db::Database, service::Service};
+use super::db::Database;
 use hibiki_lib::{channel::*, identity::Identity, invitation::*, now, random_id};
-use sea_orm::{ActiveModelTrait, ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 
 #[test]
 fn server_defaults_and_shipped_configs_use_system_storage_and_admin_creation() {
@@ -119,7 +119,7 @@ impl Fixture {
         let b = Identity::generate("b".into()).unwrap();
         db.register(&a.device).await.unwrap();
         db.register(&b.device).await.unwrap();
-        let genesis = ChannelGenesis::without_psk(&a, random_id(), "Team".into()).unwrap();
+        let genesis = ChannelGenesis::create(&a, random_id(), "Team".into()).unwrap();
         let proof = db.create(&a.device.id(), genesis).await.unwrap();
         Self {
             dir,
@@ -225,7 +225,7 @@ async fn one_key_has_one_winner_and_retries_survive_restart() {
     let mut replay = winner.clone();
     replay.body.nonce = random_id();
     let identity = if one.is_ok() { &f.b } else { &c };
-    replay.signature = identity.sign("join/v3", &replay.body).unwrap();
+    replay.signature = identity.sign("join/v4", &replay.body).unwrap();
     assert!(other.join(caller, replay, invite).await.is_err());
 }
 
@@ -553,8 +553,8 @@ async fn initialization_is_single_use_refreshable_and_delete_cannot_resurrect() 
             .unwrap();
     assert_ne!(old.key, invitation.key);
     let id = invitation.metadata.channel.clone();
-    let a = ChannelGenesis::without_psk(&f.a, id.clone(), "Empty".into()).unwrap();
-    let b = ChannelGenesis::without_psk(&f.b, id.clone(), "Empty".into()).unwrap();
+    let a = ChannelGenesis::create(&f.a, id.clone(), "Empty".into()).unwrap();
+    let b = ChannelGenesis::create(&f.b, id.clone(), "Empty".into()).unwrap();
     let aid = f.a.device.id();
     let bid = f.b.device.id();
     let (one, two) = tokio::join!(
@@ -571,137 +571,4 @@ async fn initialization_is_single_use_refreshable_and_delete_cannot_resurrect() 
     assert!(f.db.claim(&aid, a.clone(), invitation).await.is_err());
     assert!(f.db.create(&aid, a).await.is_err());
     assert!(f.db.get(&f.proof.genesis.body.id).await.is_ok());
-}
-
-#[tokio::test]
-async fn persistence_identity_pinning_and_legacy_migration_are_repeatable() {
-    use super::entities::{channel, pending, registry, revoked};
-    let f = Fixture::new().await;
-    // Published v2 wire bytes and identity: migration must not regenerate or
-    // reinterpret their genesis, device certificate or membership signature.
-    use hibiki_lib::protocol::{Control, Envelope, Reply};
-    let founder: Identity = hibiki_lib::decode(include_bytes!(
-        "../../lib/tests/fixtures/wire-identity.postcard"
-    ))
-    .unwrap();
-    let old_envelope = |name: &str| {
-        let line = include_str!("../../lib/tests/fixtures/wire-v2.hex")
-            .lines()
-            .find(|line| line.starts_with(&format!("{name} ")))
-            .unwrap();
-        hibiki_lib::wire::decode::<Envelope>(&hex::decode(line.split_once(' ').unwrap().1).unwrap())
-            .unwrap()
-    };
-    let Envelope::Response {
-        result: Ok(Reply::Proof(mut legacy)),
-        ..
-    } = old_envelope("envelope-43")
-    else {
-        panic!("published v2 proof fixture changed");
-    };
-    let Envelope::Request {
-        command: Control::Append { event },
-        ..
-    } = old_envelope("envelope-38")
-    else {
-        panic!("published v2 membership fixture changed");
-    };
-    legacy.events.push(event);
-    let checkpoint = legacy.verify().unwrap().checkpoint();
-    let root = legacy.genesis.hash().unwrap();
-    f.db.register(&founder.device).await.unwrap();
-    let id = legacy.genesis.body.id.clone();
-    let bytes = hibiki_lib::encode(&legacy).unwrap();
-    registry::ActiveModel {
-        id: Set(id.clone()),
-        name: Set(legacy.genesis.body.name.clone()),
-    }
-    .insert(&f.db.connection)
-    .await
-    .unwrap();
-    channel::ActiveModel {
-        id: Set(id.clone()),
-        name: Set(legacy.genesis.body.name.clone()),
-        proof: Set(bytes.clone()),
-        head: Set(legacy.verify().unwrap().head.to_vec()),
-        verifier: Set("old-verifier".into()),
-    }
-    .insert(&f.db.connection)
-    .await
-    .unwrap();
-    pending::ActiveModel {
-        id: Set("old-request".into()),
-        channel: Set(id.clone()),
-        request: Set(hibiki_lib::encode(
-            &JoinRequest::create(&f.b, &legacy.verify().unwrap()).unwrap(),
-        )
-        .unwrap()),
-        epoch: Set(0),
-    }
-    .insert(&f.db.connection)
-    .await
-    .unwrap();
-    revoked::ActiveModel {
-        channel: Set(id.clone()),
-        device: Set(f.b.device.id()),
-        revoked_at: Set(1),
-    }
-    .insert(&f.db.connection)
-    .await
-    .unwrap();
-    f.db.connection
-        .execute_unprepared("PRAGMA user_version=2")
-        .await
-        .unwrap();
-    let reopened = Database::open(&f.dir.path().join("db")).await.unwrap();
-    assert_eq!(
-        hibiki_lib::encode(&reopened.get(&id).await.unwrap()).unwrap(),
-        bytes
-    );
-    assert!(
-        reopened
-            .pending(&founder.device.id(), &id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        reopened
-            .require_access(&id, &f.b.device.id())
-            .await
-            .is_err()
-    );
-    let upgrade = MembershipEvent::create(
-        &founder,
-        &legacy.verify().unwrap(),
-        MembershipAction::EnableInvitations,
-    )
-    .unwrap();
-    let upgraded = reopened
-        .append(&founder.device.id(), upgrade)
-        .await
-        .unwrap();
-    upgraded.verify_from(&root, &checkpoint).unwrap();
-    assert_eq!(upgraded.genesis, legacy.genesis);
-    assert_eq!(upgraded.events[0], legacy.events[0]);
-    let row = channel::Entity::find_by_id(&id)
-        .one(&reopened.connection)
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(row.verifier.is_empty());
-    let (request, invite) = invitation_request(&reopened, &upgraded, &founder, &f.b).await;
-    reopened
-        .join(&f.b.device.id(), request.clone(), invite)
-        .await
-        .unwrap();
-    let reopened = Database::open(&f.dir.path().join("db")).await.unwrap();
-    assert_eq!(
-        reopened.pending(&founder.device.id(), &id).await.unwrap(),
-        vec![request]
-    );
-    let mut changed = founder.device.clone();
-    changed.noise_key[0] ^= 1;
-    assert!(reopened.register(&changed).await.is_err());
-    let _ = Service::new(reopened, true);
 }

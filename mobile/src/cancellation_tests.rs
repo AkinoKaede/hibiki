@@ -24,7 +24,9 @@ fn fixture() -> (
         false,
     )
     .unwrap();
-    let genesis = ChannelGenesis::create(&client.app.identity, "test".into(), "verifier").unwrap();
+    let genesis =
+        ChannelGenesis::create(&client.app.identity, hibiki_lib::random_id(), "test".into())
+            .unwrap();
     let context = ProviderContext {
         local: None,
         channel: genesis.body.id.clone(),

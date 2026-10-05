@@ -9,7 +9,6 @@ pub struct Model {
     pub name: String,
     pub proof: Vec<u8>,
     pub head: Vec<u8>,
-    pub verifier: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

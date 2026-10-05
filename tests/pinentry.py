@@ -5,18 +5,12 @@ import os
 from pathlib import Path
 import sys
 import time
+from assuan_stdio import emit, esc
 
 base = Path(sys.argv[1])
 marker = base / ('pinentry-%s' % os.getpid())
 marker.write_text('started')
 replayed = []
-
-def emit(line):
-    sys.stdout.buffer.write(line + b'\n')
-    sys.stdout.buffer.flush()
-
-def escape(data):
-    return data.replace(b'%', b'%25').replace(b'\r', b'%0D').replace(b'\n', b'%0A')
 
 try:
     emit(b'OK controlled pinentry')
@@ -76,7 +70,7 @@ try:
                         attempt = int(counter.read_text()) if counter.exists() else 0
                         password = mode['sequence'][min(attempt,len(mode['sequence'])-1)]
                         counter.write_text(str(attempt+1))
-                    emit(b'D ' + escape(password.encode()))
+                    emit(b'D ' + esc(password.encode()))
                 emit(b'OK')
             marker.write_text('completed')
         elif command == b'BYE':

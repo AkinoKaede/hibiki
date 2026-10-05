@@ -1,18 +1,16 @@
 use crate::{
     Error, Result, digest, encode,
     identity::{Device, Identity, verify},
-    now, random_id,
+    now,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GenesisBody {
-    pub version: u16,
     pub id: String,
     pub name: String,
     pub founder: Device,
-    pub psk_commitment: [u8; 32],
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChannelGenesis {
@@ -21,13 +19,11 @@ pub struct ChannelGenesis {
 }
 
 impl ChannelGenesis {
-    pub fn without_psk(identity: &Identity, id: String, name: String) -> Result<Self> {
+    pub fn create(identity: &Identity, id: String, name: String) -> Result<Self> {
         let body = GenesisBody {
-            version: 2,
             id,
             name,
             founder: identity.device.clone(),
-            psk_commitment: [0; 32],
         };
         let value = Self {
             signature: identity.sign("genesis/v2", &body)?,
@@ -36,50 +32,13 @@ impl ChannelGenesis {
         value.verify()?;
         Ok(value)
     }
-    pub fn create(identity: &Identity, name: String, verifier: &str) -> Result<Self> {
-        Self::for_reserved(identity, random_id(), name, digest(verifier.as_bytes()))
-    }
-    pub fn for_reserved(
-        identity: &Identity,
-        id: String,
-        name: String,
-        psk_commitment: [u8; 32],
-    ) -> Result<Self> {
-        let body = GenesisBody {
-            version: 1,
-            id,
-            name,
-            founder: identity.device.clone(),
-            psk_commitment,
-        };
-        let value = Self {
-            signature: identity.sign("genesis/v1", &body)?,
-            body,
-        };
-        value.verify()?;
-        Ok(value)
-    }
     pub fn verify(&self) -> Result<()> {
         let b = &self.body;
-        if !matches!(b.version, 1 | 2)
-            || (b.version == 2 && b.psk_commitment != [0; 32])
-            || !valid_id(&b.id)
-            || b.name.trim().is_empty()
-            || b.name.len() > 128
-        {
+        if !valid_id(&b.id) || b.name.trim().is_empty() || b.name.len() > 128 {
             return Err(Error::Invalid("channel identity/name".into()));
         }
         b.founder.verify()?;
-        verify(
-            &b.founder.signing_key,
-            if b.version == 1 {
-                "genesis/v1"
-            } else {
-                "genesis/v2"
-            },
-            b,
-            &self.signature,
-        )
+        verify(&b.founder.signing_key, "genesis/v2", b, &self.signature)
     }
     pub fn hash(&self) -> Result<[u8; 32]> {
         Ok(digest(&encode(self)?))
@@ -93,61 +52,10 @@ pub fn valid_id(s: &str) -> bool {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JoinBody {
-    pub channel_id: String,
-    pub genesis_hash: [u8; 32],
-    pub device: Device,
-    pub nonce: String,
-    pub psk_epoch: u64,
-    pub created_at: u64,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct JoinRequest {
-    pub body: JoinBody,
-    pub signature: Vec<u8>,
-}
-
-impl JoinRequest {
-    pub fn create(identity: &Identity, state: &VerifiedChannelState) -> Result<Self> {
-        let body = JoinBody {
-            channel_id: state.id.clone(),
-            genesis_hash: state.genesis_hash,
-            device: identity.device.clone(),
-            nonce: random_id(),
-            psk_epoch: state.psk_epoch,
-            created_at: now(),
-        };
-        Ok(Self {
-            signature: identity.sign("join/v1", &body)?,
-            body,
-        })
-    }
-    pub fn id(&self) -> Result<String> {
-        Ok(hex::encode(digest(&encode(self)?)))
-    }
-    pub fn verify(&self) -> Result<()> {
-        self.body.device.verify()?;
-        if !valid_id(&self.body.nonce) {
-            return Err(Error::Invalid("join request nonce".into()));
-        }
-        verify(
-            &self.body.device.signing_key,
-            "join/v1",
-            &self.body,
-            &self.signature,
-        )
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)] // Bounded, serialized wire value.
 pub enum MembershipAction {
-    Admit(JoinRequest),
     Revoke {
         device_id: String,
-    },
-    ChangePsk {
-        verifier_commitment: [u8; 32],
     },
     /// A member leaves voluntarily; readmission requires a fresh signed request.
     Leave,
@@ -158,8 +66,6 @@ pub enum MembershipAction {
     RevokeSubtree {
         device_id: String,
     },
-    // Append only: these discriminants preserve every historical signing preimage.
-    EnableInvitations,
     Accept(crate::invitation::AdmissionRequest),
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,16 +98,7 @@ impl MembershipEvent {
             issued_at: now(),
         };
         Ok(Self {
-            signature: identity.sign(
-                if state.invitations_enabled
-                    || matches!(body.action, MembershipAction::EnableInvitations)
-                {
-                    "membership/v3"
-                } else {
-                    "membership/v1"
-                },
-                &body,
-            )?,
+            signature: identity.sign("membership/v4", &body)?,
             body,
         })
     }
@@ -228,11 +125,7 @@ pub struct VerifiedChannelState {
     pub genesis_hash: [u8; 32],
     pub sequence: u64,
     pub head: [u8; 32],
-    pub invitations_enabled: bool,
-    pub psk_epoch: u64,
-    pub psk_commitment: [u8; 32],
     members: BTreeMap<String, Device>,
-    seen: BTreeSet<String>,
     known: BTreeMap<String, Device>,
     admissions: BTreeSet<String>,
     // Keep departed intermediaries so ancestor authority does not disappear.
@@ -264,14 +157,8 @@ impl VerifiedChannelState {
             self.current_admission.insert(
                 id.clone(),
                 hex::encode(digest(
-                    format!("admission/v3:{}:{id}", hex::encode(self.head)).as_bytes(),
+                    format!("admission/v4:{}:{id}", hex::encode(self.head)).as_bytes(),
                 )),
-            );
-        }
-        for (child, parent) in &self.approved_by {
-            self.round_parents.insert(
-                self.current_admission[child].clone(),
-                self.current_admission[parent].clone(),
             );
         }
     }
@@ -279,8 +166,7 @@ impl VerifiedChannelState {
         request.verify()?;
         let r = &request.body;
         let id = r.device.id();
-        if !self.invitations_enabled
-            || r.channel_id != self.id
+        if r.channel_id != self.id
             || r.genesis_hash != self.genesis_hash
             || self.checkpoints.get(r.checkpoint.sequence as usize) != Some(&r.checkpoint.hash)
             || r.checkpoint.sequence < *self.removed_at.get(&id).unwrap_or(&0)
@@ -296,26 +182,13 @@ impl VerifiedChannelState {
         Ok(())
     }
     fn descends_from(&self, target: &str, ancestor: &str) -> bool {
-        if self.invitations_enabled {
-            let (Some(mut current), Some(ancestor)) =
-                (self.admission_id(target), self.admission_id(ancestor))
-            else {
-                return false;
-            };
-            for _ in 0..self.round_parents.len() {
-                let Some(parent) = self.round_parents.get(current) else {
-                    return false;
-                };
-                if parent == ancestor {
-                    return true;
-                }
-                current = parent;
-            }
+        let (Some(mut current), Some(ancestor)) =
+            (self.admission_id(target), self.admission_id(ancestor))
+        else {
             return false;
-        }
-        let mut current = target;
-        for _ in 0..self.approved_by.len() {
-            let Some(parent) = self.approved_by.get(current) else {
+        };
+        for _ in 0..self.round_parents.len() {
+            let Some(parent) = self.round_parents.get(current) else {
                 return false;
             };
             if parent == ancestor {
@@ -364,9 +237,6 @@ impl VerifiedChannelState {
             .cloned()
             .collect()
     }
-    pub fn is_revoked(&self, id: &str) -> bool {
-        self.seen.contains(id) && !self.members.contains_key(id)
-    }
     pub fn checkpoint(&self) -> TrustCheckpoint {
         TrustCheckpoint {
             sequence: self.sequence,
@@ -389,11 +259,7 @@ impl MembershipProof {
             genesis_hash: gh,
             sequence: 0,
             head: gh,
-            invitations_enabled: g.version == 2,
-            psk_epoch: 0,
-            psk_commitment: g.psk_commitment,
             members: BTreeMap::from([(g.founder.id(), g.founder.clone())]),
-            seen: BTreeSet::from([g.founder.id()]),
             known: BTreeMap::from([(g.founder.id(), g.founder.clone())]),
             admissions: BTreeSet::new(),
             approved_by: BTreeMap::new(),
@@ -404,9 +270,7 @@ impl MembershipProof {
             checkpoints: vec![gh],
             used_invitations: BTreeSet::new(),
         };
-        if state.invitations_enabled {
-            state.seed_admissions();
-        }
+        state.seed_admissions();
         for event in &self.events {
             let b = &event.body;
             if b.channel_id != state.id
@@ -416,26 +280,8 @@ impl MembershipProof {
                 return Err(Error::Fork);
             }
             let issuer = state.member(&b.issuer_device_id)?;
-            verify(
-                &issuer.signing_key,
-                if state.invitations_enabled
-                    || matches!(b.action, MembershipAction::EnableInvitations)
-                {
-                    "membership/v3"
-                } else {
-                    "membership/v1"
-                },
-                b,
-                &event.signature,
-            )?;
+            verify(&issuer.signing_key, "membership/v4", b, &event.signature)?;
             match &b.action {
-                MembershipAction::EnableInvitations => {
-                    if state.invitations_enabled {
-                        return Err(Error::Invalid("channel already upgraded".into()));
-                    }
-                    state.seed_admissions();
-                    state.invitations_enabled = true;
-                }
                 MembershipAction::Accept(request) => {
                     state.validate_admission(request)?;
                     let r = &request.body;
@@ -458,41 +304,7 @@ impl MembershipProof {
                         .insert(id.clone(), b.issuer_device_id.clone());
                     state.admitted_at.insert(id.clone(), b.issued_at);
                     state.known.insert(id.clone(), r.device.clone());
-                    state.seen.insert(id.clone());
                     state.members.insert(id, r.device.clone());
-                }
-                MembershipAction::Admit(request) => {
-                    if state.invitations_enabled {
-                        return Err(Error::Unsupported("legacy admission after upgrade".into()));
-                    }
-                    request.verify()?;
-                    let r = &request.body;
-                    if r.device.id() == g.founder.id()
-                        || state.descends_from(&b.issuer_device_id, &r.device.id())
-                    {
-                        return Err(Error::Invalid(
-                            "admission would reverse the approval chain".into(),
-                        ));
-                    }
-                    if r.channel_id != state.id
-                        || r.genesis_hash != gh
-                        || r.psk_epoch != state.psk_epoch
-                        || b.issued_at < r.created_at
-                        || !state.seen.insert(r.device.id())
-                        || !state.admissions.insert(request.id()?)
-                        || state.known.get(&r.device.id()).is_some_and(|old| {
-                            old.signing_key != r.device.signing_key
-                                || old.noise_key != r.device.noise_key
-                        })
-                    {
-                        return Err(Error::Invalid("invalid or reused admission".into()));
-                    }
-                    state.known.insert(r.device.id(), r.device.clone());
-                    state
-                        .approved_by
-                        .insert(r.device.id(), b.issuer_device_id.clone());
-                    state.admitted_at.insert(r.device.id(), b.issued_at);
-                    state.members.insert(r.device.id(), r.device.clone());
                 }
                 MembershipAction::Rename { device } => {
                     device.verify()?;
@@ -512,7 +324,6 @@ impl MembershipProof {
                         .members
                         .remove(&b.issuer_device_id)
                         .ok_or(Error::NotMember)?;
-                    state.seen.remove(&b.issuer_device_id);
                     state
                         .removed_at
                         .insert(b.issuer_device_id.clone(), b.sequence);
@@ -543,17 +354,7 @@ impl MembershipProof {
                     for id in removed {
                         state.members.remove(&id);
                         state.removed_at.insert(id.clone(), b.sequence);
-                        state.seen.insert(id);
                     }
-                }
-                MembershipAction::ChangePsk {
-                    verifier_commitment,
-                } => {
-                    if state.invitations_enabled {
-                        return Err(Error::Unsupported("PSK rotation after upgrade".into()));
-                    }
-                    state.psk_epoch += 1;
-                    state.psk_commitment = *verifier_commitment;
                 }
             }
             state.sequence = b.sequence;

@@ -19,7 +19,7 @@ jobs:
           python-version: '3.12'
       - run: python3 -m pip install -r ios/scripts/release-requirements.txt
       - run: python3 -m unittest discover -s ios/scripts -p test_release.py
-      - run: python3 -m unittest discover -s scripts -p test_check_version.py
+      - run: python3 -m unittest discover -s scripts -p 'test_*version.py'
       - run: shellcheck ios/scripts/release.sh
   localization:
     runs-on: ubuntu-24.04
@@ -55,3 +55,5 @@ jobs:
       - run: python3 tests/integration.py
       - run: python3 tests/mobile.py
       - run: python3 tests/mobile_tls.py
+      - run: python3 tests/pairing.py
+      - run: python3 tests/tui.py

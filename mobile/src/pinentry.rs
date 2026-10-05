@@ -171,7 +171,8 @@ mod tests {
         )
         .unwrap();
         let genesis =
-            ChannelGenesis::create(&client.app.identity, "test".into(), "verifier").unwrap();
+            ChannelGenesis::create(&client.app.identity, hibiki_lib::random_id(), "test".into())
+                .unwrap();
         let channel = genesis.body.id.clone();
         client
             .app

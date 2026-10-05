@@ -754,7 +754,7 @@ async fn session(service: Service, mut socket: WebSocket) -> Result<()> {
     let device_id = device.id();
     verify(
         &device.signing_key,
-        "server-auth/v3",
+        "server-auth/v4",
         &wire::authentication_body(
             VERSION,
             &nonce,
@@ -926,7 +926,7 @@ mod tests {
             db.register(&a.device).await.unwrap();
             db.register(&b.device).await.unwrap();
             let genesis =
-                ChannelGenesis::without_psk(&a, hibiki_lib::random_id(), "queue".into()).unwrap();
+                ChannelGenesis::create(&a, hibiki_lib::random_id(), "queue".into()).unwrap();
             let proof = db.create(&a.device.id(), genesis).await.unwrap();
             let (request, invitation) = invitation_request(&db, &proof, &a, &b).await;
             db.join(&b.device.id(), request.clone(), invitation.clone())
@@ -1038,7 +1038,7 @@ mod tests {
             let client_caps = wire::supported_capabilities();
             let signature = identity
                 .sign(
-                    "server-auth/v3",
+                    "server-auth/v4",
                     &wire::authentication_body(
                         &version,
                         &nonce,
@@ -1115,7 +1115,7 @@ mod tests {
         )
         .unwrap();
         let genesis =
-            ChannelGenesis::without_psk(&f.a, hibiki_lib::random_id(), "other".into()).unwrap();
+            ChannelGenesis::create(&f.a, hibiki_lib::random_id(), "other".into()).unwrap();
         let other = f
             .service
             .db
@@ -1241,7 +1241,7 @@ mod tests {
         socket.announce(&f.channel).await;
         // Subscribe the same executors to a second channel with the same members.
         let genesis =
-            ChannelGenesis::without_psk(&f.a, hibiki_lib::random_id(), "other".into()).unwrap();
+            ChannelGenesis::create(&f.a, hibiki_lib::random_id(), "other".into()).unwrap();
         let proof = f
             .service
             .db
@@ -1919,8 +1919,7 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(64);
         let stop = CancellationToken::new();
         let genesis =
-            ChannelGenesis::without_psk(&a, hibiki_lib::random_id(), "arbitrary-name".into())
-                .unwrap();
+            ChannelGenesis::create(&a, hibiki_lib::random_id(), "arbitrary-name".into()).unwrap();
         assert!(
             service
                 .control(&a.device.id(), "a", &tx, Control::Create { genesis }, &stop)
@@ -1938,7 +1937,7 @@ mod tests {
                 "a",
                 &tx,
                 Control::Claim {
-                    genesis: ChannelGenesis::without_psk(
+                    genesis: ChannelGenesis::create(
                         &a,
                         invite.metadata.channel.clone(),
                         invite.metadata.name.clone(),
@@ -2104,8 +2103,7 @@ mod tests {
         );
         let open = Service::new(db, true);
         for name in ["Team", "team", "Other", "工作"] {
-            let genesis =
-                ChannelGenesis::without_psk(&a, hibiki_lib::random_id(), name.into()).unwrap();
+            let genesis = ChannelGenesis::create(&a, hibiki_lib::random_id(), name.into()).unwrap();
             open.control(&a.device.id(), "a", &tx, Control::Create { genesis }, &stop)
                 .await
                 .unwrap();
@@ -2140,7 +2138,7 @@ mod tests {
             let capabilities = vec!["future/query".to_owned()];
             let signature = identity
                 .sign(
-                    "server-auth/v3",
+                    "server-auth/v4",
                     &wire::authentication_body(
                         &version,
                         &nonce,

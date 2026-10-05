@@ -53,7 +53,7 @@ native Pinentry. Server-only hosts do not need GnuPG.
 5. [Configure the requesting machine's GPG adapters](USAGE.md#4-connect-the-requesting-devices-agent)
    and [sign or decrypt](USAGE.md#sign-and-decrypt).
 
-Server and clients use the Protobuf `hibiki/3` baseline; application release
+Server and clients use the Protobuf `hibiki/4` baseline; application release
 versions may differ within its [compatibility contract](PROTOCOL.md). The desktop
 daemon starts local providers immediately, including while the server is offline;
 remote providers join the race independently. Card access
@@ -73,9 +73,10 @@ cargo build --locked --workspace
 python3 tests/server.py
 python3 tests/integration.py
 python3 tests/mobile.py
+python3 tests/mobile_tls.py
 python3 tests/pairing.py
 python3 tests/tui.py
-python3 tests/performance.py
+python3 tests/performance.py  # manual timing report, not run in CI
 ```
 
 CI runs on Ubuntu 24.04 and macOS. Integration tests use temporary identities and GnuPG homes, controlled stdio Pinentry processes, and an OpenPGP Card emulator. Real GnuPG exercises card learning, RSA signing and decryption, Git signing, password races and retries, cancellation, revocation, disconnects, and process cleanup.

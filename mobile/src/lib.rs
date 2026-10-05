@@ -384,14 +384,6 @@ impl MobileClient {
                 config,
                 identity: Arc::new(identity),
             });
-            // Retire both historical public-key registries, without decoding them.
-            for name in ["nfc-cards.bin", "cards.bin"] {
-                match std::fs::remove_file(app.paths.data.join(name)) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-            }
             let broker = Broker::new();
             let provider = MobileProvider::new(broker.clone());
             Ok(Arc::new(Self {

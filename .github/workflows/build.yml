@@ -8,6 +8,7 @@ on:
       - .cargo/**
       - scripts/package.py
       - scripts/check-version.py
+      - scripts/bump-version.py
       - packaging/**
       - examples/**
       - tests/server.py

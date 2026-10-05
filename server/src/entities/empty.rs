@@ -6,7 +6,6 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: String,
     pub invitation: Vec<u8>,
-    pub verifier: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

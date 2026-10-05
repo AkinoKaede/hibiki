@@ -1,8 +1,8 @@
-# Upgrading to Hibiki protocol v3
+# Upgrading to Hibiki protocol v4
 
-Upgrade the server, desktop daemon/adapters and iOS framework/app together. `hibiki/3` uses Protocol Buffers at the unchanged `/hibiki` endpoint and rejects v2 connections before authentication. Stop active signing/decryption before replacing binaries, then restart daemons. Do not automatically retry a private operation whose result is unknown.
+Upgrade the server, desktop daemon/adapters and iOS framework/app together. `hibiki/4` uses Protocol Buffers at the unchanged `/hibiki` endpoint and rejects v2 and v3 connections before authentication. Stop active signing/decryption before replacing binaries, then restart daemons. Do not automatically retry a private operation whose result is unknown.
 
-Channels created before this release use an incompatible history, genesis and database layout and are not migrated: server databases and local channel state must be recreated, then devices rejoin through fresh invitations. Device identities remain valid.
+Channels and server databases from earlier releases use incompatible signing domains, history, genesis and database layouts and are not migrated: server databases and local channel state must be recreated, then devices rejoin through fresh invitations. Device identities remain valid.
 
 PSK options, rotation, invitation exporters and importers no longer exist. Generate an invitation with `hibiki channel invite NAME`. Every invitation contains its own random 256-bit key, expires after 24 hours, and is consumed atomically by its first valid request. Pending requests outlive invitation expiry; rejection or withdrawal never restores a consumed key. For an unclaimed reserved channel, use `hibiki-server channel invite NAME --server URL` to replace its old initialization invitation.
 
@@ -63,8 +63,9 @@ python3 tests/server.py
 python3 tests/integration.py
 python3 tests/mobile.py
 python3 tests/mobile_tls.py
+python3 tests/pairing.py
 python3 tests/tui.py
-python3 tests/performance.py
+python3 tests/performance.py  # manual timing report, not run in CI
 bash ios/scripts/build-rust.sh Debug
 bash ios/scripts/check-zh-localization.sh
 ```

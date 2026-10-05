@@ -1,24 +1,11 @@
-use hibiki_lib::{channel::*, e2ee::*, identity::Identity, paths::AppPaths, *};
+use hibiki_lib::{
+    channel::*, e2ee::*, identity::Identity, invitation::AdmissionRequest, paths::AppPaths, *,
+};
 use std::{collections::BTreeMap, ffi::OsString, path::Path};
 
-fn root() -> (Identity, MembershipProof) {
-    let a = Identity::generate("A".into()).unwrap();
-    let genesis = ChannelGenesis::create(&a, "work".into(), "verifier").unwrap();
-    (
-        a,
-        MembershipProof {
-            genesis,
-            events: vec![],
-        },
-    )
-}
-fn admit(proof: &mut MembershipProof, issuer: &Identity, subject: &Identity) {
-    let state = proof.verify().unwrap();
-    let request = JoinRequest::create(subject, &state).unwrap();
-    let event = MembershipEvent::create(issuer, &state, MembershipAction::Admit(request)).unwrap();
-    proof.events.push(event);
-    proof.verify().unwrap();
-}
+mod common;
+use common::*;
+
 #[test]
 fn multilevel_chain_revocation_and_historical_authority() {
     let (a, mut p) = root();
@@ -93,36 +80,12 @@ fn multilevel_chain_revocation_and_historical_authority() {
 }
 
 #[test]
-fn readmission_cannot_reverse_approval_ancestry() {
-    let (a, mut p) = root();
-    let b = Identity::generate("B".into()).unwrap();
-    let c = Identity::generate("C".into()).unwrap();
-    admit(&mut p, &a, &b);
-    admit(&mut p, &b, &c);
-    p.events
-        .push(MembershipEvent::create(&b, &p.verify().unwrap(), MembershipAction::Leave).unwrap());
-    let state = p.verify().unwrap();
-    let request = JoinRequest::create(&b, &state).unwrap();
-    let mut reversed = p.clone();
-    reversed
-        .events
-        .push(MembershipEvent::create(&c, &state, MembershipAction::Admit(request)).unwrap());
-    assert!(reversed.verify().is_err());
-    admit(&mut p, &a, &b);
-    assert!(
-        p.verify()
-            .unwrap()
-            .can_revoke(&b.device.id(), &c.device.id())
-    );
-}
-
-#[test]
 fn key_substitution_signature_tampering_and_cross_channel_fail() {
     let (a, mut p) = root();
     let b = Identity::generate("B".into()).unwrap();
     admit(&mut p, &a, &b);
     let mut tampered = p.clone();
-    if let MembershipAction::Admit(r) = &mut tampered.events[0].body.action {
+    if let MembershipAction::Accept(r) = &mut tampered.events[0].body.action {
         r.body.device.noise_key[0] ^= 1;
     }
     assert!(tampered.verify().is_err());
@@ -159,29 +122,6 @@ fn rollback_and_same_height_fork_detected() {
             .is_err()
     );
 }
-#[test]
-fn psk_rotation_invalidates_pending_but_preserves_members() {
-    let (a, mut p) = root();
-    let b = Identity::generate("B".into()).unwrap();
-    admit(&mut p, &a, &b);
-    let c = Identity::generate("C".into()).unwrap();
-    let stale = JoinRequest::create(&c, &p.verify().unwrap()).unwrap();
-    let event = MembershipEvent::create(
-        &b,
-        &p.verify().unwrap(),
-        MembershipAction::ChangePsk {
-            verifier_commitment: digest(b"new"),
-        },
-    )
-    .unwrap();
-    p.events.push(event);
-    assert!(p.verify().unwrap().member(&a.device.id()).is_ok());
-    let event =
-        MembershipEvent::create(&a, &p.verify().unwrap(), MembershipAction::Admit(stale)).unwrap();
-    p.events.push(event);
-    assert!(p.verify().is_err());
-}
-
 fn transports(channel: &str) -> (Transport, Transport) {
     let a = Identity::generate("A".into()).unwrap();
     let b = Identity::generate("B".into()).unwrap();
@@ -282,10 +222,10 @@ fn hibiki_version_is_bound_to_authentication_and_noise() {
     let b = Identity::generate("b".into()).unwrap();
     let payload =
         hibiki_lib::wire::authentication_body(VERSION, "nonce", &a.device.id(), &[], &[]).unwrap();
-    let signature = a.sign("server-auth/v3", &payload).unwrap();
+    let signature = a.sign("server-auth/v4", &payload).unwrap();
     verify(
         &a.device.signing_key,
-        "server-auth/v3",
+        "server-auth/v4",
         &payload,
         &signature,
     )
@@ -293,7 +233,7 @@ fn hibiki_version_is_bound_to_authentication_and_noise() {
     assert!(
         verify(
             &a.device.signing_key,
-            "server-auth/v3",
+            "server-auth/v4",
             &hibiki_lib::wire::authentication_body(
                 "hibiki/invalid",
                 "nonce",
@@ -329,11 +269,7 @@ fn hibiki_version_is_bound_to_authentication_and_noise() {
 fn voluntary_leave_requires_fresh_admission_and_preserves_key_pins() {
     let (a, mut proof) = root();
     let b = Identity::generate("B".into()).unwrap();
-    admit(&mut proof, &a, &b);
-    let old_request = match &proof.events[0].body.action {
-        MembershipAction::Admit(r) => r.clone(),
-        _ => unreachable!(),
-    };
+    let old_request = admit(&mut proof, &a, &b);
     proof.events.push(
         MembershipEvent::create(&b, &proof.verify().unwrap(), MembershipAction::Leave).unwrap(),
     );
@@ -343,9 +279,9 @@ fn voluntary_leave_requires_fresh_admission_and_preserves_key_pins() {
     let mut reused = proof.clone();
     reused
         .events
-        .push(MembershipEvent::create(&a, &state, MembershipAction::Admit(old_request)).unwrap());
+        .push(MembershipEvent::create(&a, &state, MembershipAction::Accept(old_request)).unwrap());
     assert!(reused.verify().is_err());
-    let mut replaced_request = JoinRequest::create(&b, &state).unwrap();
+    let mut replaced_request = AdmissionRequest::create(&b, &state, random_id(), 0).unwrap();
     let device = &mut replaced_request.body.device;
     device.noise_key = Identity::generate("new-key".into())
         .unwrap()
@@ -357,31 +293,15 @@ fn voluntary_leave_requires_fresh_admission_and_preserves_key_pins() {
             &(&device.name, device.signing_key, device.noise_key),
         )
         .unwrap();
-    replaced_request.signature = b.sign("join/v1", &replaced_request.body).unwrap();
+    replaced_request.signature = b.sign("join/v4", &replaced_request.body).unwrap();
     replaced_request.verify().unwrap();
     let mut replaced = proof.clone();
     replaced.events.push(
-        MembershipEvent::create(&a, &state, MembershipAction::Admit(replaced_request)).unwrap(),
+        MembershipEvent::create(&a, &state, MembershipAction::Accept(replaced_request)).unwrap(),
     );
     assert!(replaced.verify().is_err());
     admit(&mut proof, &a, &b);
     assert!(proof.verify().unwrap().member(&b.device.id()).is_ok());
-    proof.events.push(
-        MembershipEvent::create(
-            &a,
-            &proof.verify().unwrap(),
-            MembershipAction::Revoke {
-                device_id: b.device.id(),
-            },
-        )
-        .unwrap(),
-    );
-    let state = proof.verify().unwrap();
-    let request = JoinRequest::create(&b, &state).unwrap();
-    proof
-        .events
-        .push(MembershipEvent::create(&a, &state, MembershipAction::Admit(request)).unwrap());
-    assert!(proof.verify().is_err());
 }
 
 #[test]
@@ -443,6 +363,9 @@ fn subtree_revocation_is_explicit_and_preserves_other_branches() {
     admit(&mut p, &b, &c);
     admit(&mut p, &a, &d);
     let state = p.verify().unwrap();
+    let stale: Vec<_> = [&b, &c]
+        .map(|identity| AdmissionRequest::create(identity, &state, random_id(), 0).unwrap())
+        .into();
     let mut ids = vec![b.device.id(), c.device.id()];
     ids.sort();
     assert_eq!(state.revocation_subtree(&b.device.id()), ids);
@@ -473,14 +396,9 @@ fn subtree_revocation_is_explicit_and_preserves_other_branches() {
     let state = p.verify().unwrap();
     assert!(state.member(&a.device.id()).is_ok());
     assert!(state.member(&d.device.id()).is_ok());
-    for identity in [&b, &c] {
-        assert!(state.is_revoked(&identity.device.id()));
-        let mut invalid = p.clone();
-        let request = JoinRequest::create(identity, &state).unwrap();
-        invalid
-            .events
-            .push(MembershipEvent::create(&a, &state, MembershipAction::Admit(request)).unwrap());
-        assert!(invalid.verify().is_err());
+    for (identity, request) in [&b, &c].into_iter().zip(&stale) {
+        assert!(state.member(&identity.device.id()).is_err());
+        assert!(state.validate_admission(request).is_err());
     }
 }
 
@@ -510,7 +428,7 @@ fn reverse_revocation_uses_current_admission_and_exact_thirty_day_boundary() {
         )
         .unwrap();
         event.body.issued_at = available;
-        event.signature = c.sign("membership/v1", &event.body).unwrap();
+        event.signature = c.sign("membership/v4", &event.body).unwrap();
         changed.events.push(event);
         assert!(
             changed
@@ -526,12 +444,12 @@ fn reverse_revocation_uses_current_admission_and_exact_thirty_day_boundary() {
     p.events
         .push(MembershipEvent::create(&c, &state, MembershipAction::Leave).unwrap());
     let state = p.verify().unwrap();
-    let mut request = JoinRequest::create(&c, &state).unwrap();
+    let mut request = AdmissionRequest::create(&c, &state, random_id(), 0).unwrap();
     request.body.created_at = available;
-    request.signature = c.sign("join/v1", &request.body).unwrap();
-    let mut event = MembershipEvent::create(&b, &state, MembershipAction::Admit(request)).unwrap();
+    request.signature = c.sign("join/v4", &request.body).unwrap();
+    let mut event = MembershipEvent::create(&b, &state, MembershipAction::Accept(request)).unwrap();
     event.body.issued_at = available;
-    event.signature = b.sign("membership/v1", &event.body).unwrap();
+    event.signature = b.sign("membership/v4", &event.body).unwrap();
     p.events.push(event);
     let state = p.verify().unwrap();
     assert!(!state.can_revoke_at(&c.device.id(), &a.device.id(), available));

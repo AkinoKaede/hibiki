@@ -375,7 +375,8 @@ mod tests {
             identity: Arc::new(Identity::generate("test".into()).unwrap()),
         });
         let proof = MembershipProof {
-            genesis: ChannelGenesis::create(&app.identity, "test".into(), "verifier").unwrap(),
+            genesis: ChannelGenesis::create(&app.identity, hibiki_lib::random_id(), "test".into())
+                .unwrap(),
             events: vec![],
         };
         let channel = proof.genesis.body.id.clone();

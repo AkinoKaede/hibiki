@@ -19,28 +19,14 @@ fn identity() -> Identity {
     // Synthetic test keys only. This also locks the original identity storage format.
     hibiki_lib::decode(&std::fs::read(fixture("wire-identity.postcard")).unwrap()).unwrap()
 }
-fn trust() -> (Identity, ChannelGenesis, JoinRequest, MembershipProof) {
+fn trust() -> (Identity, ChannelGenesis, MembershipProof) {
     let identity = identity();
-    let genesis =
-        ChannelGenesis::for_reserved(&identity, "a".repeat(32), "wire-test".into(), [7; 32])
-            .unwrap();
-    let body = JoinBody {
-        channel_id: genesis.body.id.clone(),
-        genesis_hash: genesis.hash().unwrap(),
-        device: identity.device.clone(),
-        nonce: "b".repeat(32),
-        psk_epoch: 0,
-        created_at: 1,
-    };
-    let request = JoinRequest {
-        signature: identity.sign("join/v1", &body).unwrap(),
-        body,
-    };
+    let genesis = ChannelGenesis::create(&identity, "a".repeat(32), "wire-test".into()).unwrap();
     let proof = MembershipProof {
         genesis: genesis.clone(),
         events: vec![],
     };
-    (identity, genesis, request, proof)
+    (identity, genesis, proof)
 }
 fn operation() -> Operation {
     Operation {
@@ -67,14 +53,13 @@ fn event(action: MembershipAction) -> MembershipEvent {
         issued_at: 1,
     };
     MembershipEvent {
-        signature: identity.sign("membership/v1", &body).unwrap(),
+        signature: identity.sign("membership/v4", &body).unwrap(),
         body,
     }
 }
 fn modern() -> (AdmissionRequest, OneTimeInvitation) {
     let identity = identity();
-    let genesis =
-        ChannelGenesis::without_psk(&identity, "a".repeat(32), "wire-test".into()).unwrap();
+    let genesis = ChannelGenesis::create(&identity, "a".repeat(32), "wire-test".into()).unwrap();
     let state = MembershipProof {
         genesis,
         events: vec![],
@@ -84,7 +69,7 @@ fn modern() -> (AdmissionRequest, OneTimeInvitation) {
     let mut request = AdmissionRequest::create(&identity, &state, "b".repeat(32), 0).unwrap();
     request.body.nonce = "c".repeat(32);
     request.body.created_at = 1;
-    request.signature = identity.sign("join/v3", &request.body).unwrap();
+    request.signature = identity.sign("join/v4", &request.body).unwrap();
     let invitation = OneTimeInvitation {
         metadata: InvitationMetadata {
             id: "b".repeat(32),
@@ -103,7 +88,7 @@ fn modern() -> (AdmissionRequest, OneTimeInvitation) {
 }
 fn envelopes() -> Vec<Envelope> {
     let (admission, invitation) = modern();
-    let (identity, genesis, join, proof) = trust();
+    let (identity, genesis, proof) = trust();
     let id = "id".to_owned();
     let channel = "channel".to_owned();
     let peer = "peer".to_owned();
@@ -232,14 +217,9 @@ fn envelopes() -> Vec<Envelope> {
         Control::WithdrawPending { channel },
     ];
     for action in [
-        MembershipAction::EnableInvitations,
         MembershipAction::Accept(admission.clone()),
-        MembershipAction::Admit(join.clone()),
         MembershipAction::Revoke {
             device_id: peer.clone(),
-        },
-        MembershipAction::ChangePsk {
-            verifier_commitment: [8; 32],
         },
         MembershipAction::Leave,
         MembershipAction::Rename {
@@ -323,7 +303,7 @@ fn inputs() -> Vec<SessionInput> {
     ]
 }
 fn private_messages() -> Vec<PrivateMessage> {
-    let proof = trust().3;
+    let proof = trust().2;
     let mut messages = vec![
         PrivateMessage::PingOpen {
             proof: proof.clone(),
@@ -459,7 +439,7 @@ fn explicit_card_rejection_roundtrips_with_baseline_unavailable_fallback() {
 }
 #[test]
 fn baseline_byte_fixtures_are_stable() {
-    let expected = std::fs::read_to_string(fixture("wire-v3.hex")).unwrap();
+    let expected = std::fs::read_to_string(fixture("wire-v4.hex")).unwrap();
     let actual = fixture_bytes();
     assert_eq!(
         actual, expected,
@@ -486,13 +466,13 @@ fn fixture_bytes() -> String {
 #[ignore = "one-time unpublished baseline creation; never regenerate a published baseline"]
 fn create_unpublished_baseline() {
     assert!(
-        !fixture("wire-v3.hex").exists(),
-        "v3 baseline already exists"
+        !fixture("wire-v4.hex").exists(),
+        "v4 baseline already exists"
     );
-    std::fs::write(fixture("wire-v3.hex"), fixture_bytes()).unwrap();
+    std::fs::write(fixture("wire-v4.hex"), fixture_bytes()).unwrap();
     std::fs::write(
-        fixture("wire-v3.descriptor"),
-        include_bytes!(concat!(env!("OUT_DIR"), "/hibiki-v3.bin")),
+        fixture("wire-v4.descriptor"),
+        include_bytes!(concat!(env!("OUT_DIR"), "/hibiki-v4.bin")),
     )
     .unwrap();
 }
@@ -589,7 +569,7 @@ fn capabilities_default_to_baseline_and_are_normalized_authenticated_and_bounded
     let identity = identity();
     let body = wire::authentication_body(VERSION, "nonce", &identity.device.id(), &server, &client)
         .unwrap();
-    let signature = identity.sign("server-auth/v3", &body).unwrap();
+    let signature = identity.sign("server-auth/v4", &body).unwrap();
     let normalized = wire::authentication_body(
         VERSION,
         "nonce",
@@ -600,7 +580,7 @@ fn capabilities_default_to_baseline_and_are_normalized_authenticated_and_bounded
     .unwrap();
     verify(
         &identity.device.signing_key,
-        "server-auth/v3",
+        "server-auth/v4",
         &normalized,
         &signature,
     )
@@ -614,7 +594,7 @@ fn capabilities_default_to_baseline_and_are_normalized_authenticated_and_bounded
         assert!(
             verify(
                 &identity.device.signing_key,
-                "server-auth/v3",
+                "server-auth/v4",
                 &changed,
                 &signature
             )
@@ -631,7 +611,7 @@ fn capabilities_default_to_baseline_and_are_normalized_authenticated_and_bounded
 }
 #[test]
 fn network_conversion_preserves_signed_history_hashes_and_postcard_storage() {
-    let (identity, genesis, join, proof) = trust();
+    let (identity, genesis, proof) = trust();
     let renamed = identity.renamed("new-name".into()).unwrap();
     let rename = event(MembershipAction::Rename {
         device: renamed.device.clone(),
@@ -655,9 +635,6 @@ fn network_conversion_preserves_signed_history_hashes_and_postcard_storage() {
         proof.verify().unwrap().checkpoint(),
         decoded.verify().unwrap().checkpoint()
     );
-    let join2: JoinRequest = wire::decode(&wire::encode(&join).unwrap()).unwrap();
-    join2.verify().unwrap();
-    assert_eq!(join.id().unwrap(), join2.id().unwrap());
     let invite = Invite {
         version: 1,
         server: "ws://localhost/hibiki".into(),
@@ -722,13 +699,13 @@ fn check_message(old: &DescriptorProto, new: &DescriptorProto) {
 #[test]
 fn published_schema_field_numbers_types_and_enum_values_are_frozen() {
     let old = FileDescriptorSet::decode(
-        std::fs::read(fixture("wire-v3.descriptor"))
+        std::fs::read(fixture("wire-v4.descriptor"))
             .unwrap()
             .as_slice(),
     )
     .unwrap();
     let new = FileDescriptorSet::decode(
-        include_bytes!(concat!(env!("OUT_DIR"), "/hibiki-v3.bin")).as_slice(),
+        include_bytes!(concat!(env!("OUT_DIR"), "/hibiki-v4.bin")).as_slice(),
     )
     .unwrap();
     for file in old.file {

@@ -6,7 +6,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 #[doc(hidden)]
 pub mod pb {
-    include!(concat!(env!("OUT_DIR"), "/hibiki.v3.rs"));
+    include!(concat!(env!("OUT_DIR"), "/hibiki.v4.rs"));
 }
 mod convert;
 mod preflight;
@@ -145,7 +145,7 @@ fn validate_fragment(value: &e2ee::Fragment) -> Result<()> {
     Ok(())
 }
 
-/// Baseline hibiki/3 needs no extension capabilities. Add names only with gated uses.
+/// Baseline hibiki/4 needs no extension capabilities. Add names only with gated uses.
 pub const CAPABILITIES: &[&str] = &[];
 pub fn supported_capabilities() -> Vec<String> {
     CAPABILITIES

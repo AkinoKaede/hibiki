@@ -6,6 +6,7 @@ mod service;
 use anyhow::{Context, Result, bail};
 use axum::serve::ListenerExt;
 use clap::{Parser, Subcommand};
+use hibiki_lib::paths::private_dir;
 use serde::Deserialize;
 use std::{
     fs::{self, OpenOptions},
@@ -117,23 +118,6 @@ fn load_config(explicit: Option<&Path>, defaults: &[&Path]) -> Result<(Config, O
     Ok((Config::default(), None))
 }
 
-fn private_dir(path: &Path) -> Result<()> {
-    if !path.exists() {
-        use std::os::unix::fs::DirBuilderExt;
-        fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(path)?;
-    }
-    let m = fs::symlink_metadata(path)?;
-    if !m.is_dir() || m.uid() != unsafe { libc::geteuid() } || m.mode() & 0o077 != 0 {
-        bail!(
-            "directory must be owned by current user and mode 0700: {}",
-            path.display()
-        );
-    }
-    Ok(())
-}
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
