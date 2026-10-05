@@ -321,7 +321,7 @@ To run a published image:
 docker run -d --name hibiki-server --restart unless-stopped \
   -p 127.0.0.1:7749:7749 \
   -v hibiki-server-data:/var/lib/hibiki \
-  ghcr.io/akinokaede/hibiki-server:0.2.1
+  ghcr.io/akinokaede/hibiki-server:0.2.2
 ```
 
 Mount a customized copy of `server/server.toml` read-only at
@@ -404,7 +404,7 @@ There are three GitHub Actions workflows:
   and pull requests, and
   uploads the archives as Actions artifacts. To prepare a release, start it from
   Actions → build → Run workflow, select the source branch/tag, enter a `version`
-  without a `v` prefix (for example `0.2.1`), and check
+  without a `v` prefix (for example `0.2.2`), and check
   `prereleased` only for a prerelease (it defaults to unchecked). Manual runs also create a **draft** GitHub Release with
   the archives and `SHA256SUMS`. The Git tag is automatically `vVERSION`; desktop
   binary/package versions and the iOS version follow the input. Versions are

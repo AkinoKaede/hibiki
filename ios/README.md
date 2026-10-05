@@ -108,9 +108,9 @@ its required signing metadata.
 2. Leave `build` as **all** to build desktop packages and upload iOS, or choose
    **ios** to upload iOS alone.
 3. Set the required `version` input to a three-component numeric version such as
-   `0.2.1`, without `v`. It controls the iOS marketing version, Rust binary
+   `0.2.2`, without `v`. It controls the iOS marketing version, Rust binary
    versions, and package filenames. Desktop releases automatically use Git tag
-   `v0.2.1`; iOS-only runs do not create a tag. The input must match the committed
+   `v0.2.2`; iOS-only runs do not create a tag. The input must match the committed
    Cargo workspace version and lockfile. Developers must manually bump and commit
    both before releasing. Prerelease suffixes are not accepted; the
    desktop `prereleased` checkbox marks the GitHub Release and does not affect iOS.
