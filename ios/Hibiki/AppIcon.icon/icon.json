@@ -1,0 +1,35 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.33000,0.24500,0.82000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "Echo.svg",
+          "name" : "Echo"
+        },
+        {
+          "image-name" : "Harmony.svg",
+          "name" : "Harmony"
+        },
+        {
+          "image-name" : "Resonance.svg",
+          "name" : "Resonance"
+        }
+      ],
+      "name" : "Hibiki Wave",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.28
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.16
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : "shared"
+  }
+}

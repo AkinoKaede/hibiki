@@ -15,7 +15,7 @@ appfiles=[ref('Hibiki/'+p.name,'sourcecode.swift') for p in sorted((ROOT/'Hibiki
 binding=ref('Generated/hibiki_mobile.swift','sourcecode.swift')
 testfiles=[ref('HibikiTests/'+p.name,'sourcecode.swift') for p in sorted((ROOT/'HibikiTests').glob('*.swift'))]
 uifiles=[ref('HibikiUITests/'+p.name,'sourcecode.swift') for p in sorted((ROOT/'HibikiUITests').glob('*.swift'))]
-resources=[ref('Hibiki/Localizable.xcstrings','text.json.xcstrings'),ref('Hibiki/Assets.xcassets','folder.assetcatalog')]
+resources=[ref('Hibiki/Localizable.xcstrings','text.json.xcstrings'),ref('Hibiki/Assets.xcassets','folder.assetcatalog'),ref('Hibiki/AppIcon.icon','folder.iconcomposer.icon')]
 framework=ref('Frameworks/HibikiCore.xcframework','wrapper.xcframework')
 signing=ref('Signing.xcconfig','text.xcconfig')
 devicekit_package=add('package:DeviceKit','XCRemoteSwiftPackageReference',repositoryURL='https://github.com/devicekit/DeviceKit.git',requirement={'kind':'upToNextMajorVersion','minimumVersion':'5.9.0'})

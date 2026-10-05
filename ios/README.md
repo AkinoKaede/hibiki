@@ -47,6 +47,17 @@ xcodebuild -project ios/Hibiki.xcodeproj -scheme Hibiki \
   -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO build
 ```
 
+### App icon
+
+Open `Hibiki/AppIcon.icon` in Icon Composer to edit the purple background and
+three SVG layers forming the five-bar Hibiki wave. The document supports default,
+dark, and monochrome appearances with native Liquid Glass effects. Keep the SVG
+layers on their shared 1024 × 1024 canvas so their spacing stays aligned.
+
+The Xcode project and its generator include this document as the `AppIcon`
+resource. Xcode compiles the layered icon and generates flattened icons for older
+iOS versions, including iOS 18; a separate PNG app icon set is not needed.
+
 ## App Store Connect upload
 
 The existing **build** workflow offers three manual build choices: **all**
