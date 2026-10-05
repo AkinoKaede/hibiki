@@ -226,6 +226,19 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    fn requester_config() -> crate::storage::Config {
+        // These lifecycle tests must not depend on installed native providers.
+        let disabled = crate::storage::ServiceConfig {
+            enabled: false,
+            program: None,
+        };
+        crate::storage::Config {
+            scdaemon: disabled.clone(),
+            pinentry: disabled,
+            ..Default::default()
+        }
+    }
+
     async fn shutdown_with_relay_activity(answer_announce: bool) {
         use futures_util::{SinkExt, StreamExt};
         use hibiki_lib::wire;
@@ -237,7 +250,7 @@ mod tests {
             config: crate::storage::Config {
                 server: format!("ws://{}{WS_PATH}", listener.local_addr().unwrap()),
                 allow_insecure: true,
-                ..Default::default()
+                ..requester_config()
             },
             config_file: dir.path().join("client.toml"),
             paths: AppPaths::resolve(&Default::default(), dir.path(), dir.path(), unsafe {
@@ -313,14 +326,16 @@ mod tests {
         });
         let stop = tokio_util::sync::CancellationToken::new();
         let shutdown = stop.clone();
-        let daemon = tokio::spawn(run_until_shutdown(app, async move {
+        let mut daemon = tokio::spawn(run_until_shutdown(app, async move {
             shutdown.cancelled().await;
             Ok(())
         }));
-        tokio::time::timeout(Duration::from_secs(2), waiting)
-            .await
-            .unwrap()
-            .unwrap();
+        tokio::select! {
+            result = &mut daemon => panic!("daemon exited before relay was ready: {result:?}"),
+            result = tokio::time::timeout(Duration::from_secs(2), waiting) => {
+                result.unwrap().unwrap();
+            }
+        }
         assert!(socket.exists());
         stop.cancel();
         tokio::time::timeout(Duration::from_secs(1), daemon)
@@ -351,7 +366,7 @@ mod tests {
         let app = Arc::new(App {
             config: crate::storage::Config {
                 operation_timeout_seconds: 2,
-                ..Default::default()
+                ..requester_config()
             },
             config_file: dir.path().join("client.toml"),
             paths: AppPaths::resolve(&Default::default(), dir.path(), dir.path(), unsafe {
