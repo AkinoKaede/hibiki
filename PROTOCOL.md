@@ -59,6 +59,15 @@ name only alongside the code that gates all its sends and effects. Unsupported
 features use baseline behavior where possible or fail explicitly; never replay
 private operations as a compatibility fallback.
 
+Card preparation rejection is an additive failure detail: `CardPreparationUnavailable.rejected`
+(field 1, default false) identifies explicit whole-operation cancellation during card preparation.
+Updated requesters return Assuan cancellation immediately. During password entry,
+the existing Assuan error 198 (`GPG_ERR_FULLY_CANCELED`) cancels the entire race,
+while error 99 dismisses only the responding candidate. Baseline requesters ignore
+the field and retain unavailable/timeout behavior; the canceling provider still cannot
+execute the operation. Upgrade both endpoints for immediate rejection reporting.
+Existing baseline fields, variants and byte fixtures remain unchanged.
+
 ## Capability negotiation
 
 Relay setup uses `Hello.capabilities` for the server declaration and

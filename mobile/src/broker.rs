@@ -14,6 +14,10 @@ use zeroize::Zeroizing;
 #[error("request canceled")]
 pub struct RequestCancelled;
 
+#[derive(Debug, thiserror::Error)]
+#[error("operation canceled by user")]
+pub struct OperationCancelled;
+
 type Answer = Result<Zeroizing<Vec<u8>>>;
 pub struct Broker {
     tx: mpsc::Sender<NativeEvent>,
@@ -58,6 +62,16 @@ impl Broker {
                 RequestCancelled.into()
             } else {
                 anyhow::anyhow!(message)
+            }),
+        )
+    }
+    pub fn cancel(&self, token: &str, entire_operation: bool) -> Result<()> {
+        self.answer(
+            token,
+            Err(if entire_operation {
+                OperationCancelled.into()
+            } else {
+                RequestCancelled.into()
             }),
         )
     }

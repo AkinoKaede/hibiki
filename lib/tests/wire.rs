@@ -387,6 +387,35 @@ fn every_network_variant_roundtrips_and_ignores_unknown_fields() {
         }
     }
 }
+
+#[test]
+fn explicit_card_rejection_roundtrips_with_baseline_unavailable_fallback() {
+    let value = PrivateMessage::Output(SessionOutput::CardStatus {
+        id: "prepare".into(),
+        state: CardPreparation::Rejected,
+    });
+    roundtrip(&value);
+    // Independent baseline shape: its empty unavailable message ignores the
+    // additive rejection field, preserving old peers' failure behavior.
+    #[derive(Clone, PartialEq, Message)]
+    struct OldPreparation {
+        #[prost(message, optional, tag = "3")]
+        unavailable: Option<Empty>,
+    }
+    #[derive(Clone, PartialEq, Message)]
+    struct Empty {}
+    let bytes = wire::encode(&CardPreparation::Rejected).unwrap();
+    let old = OldPreparation::decode(bytes.as_slice()).unwrap();
+    assert!(old.unavailable.is_some());
+    assert!(matches!(
+        wire::decode::<CardPreparation>(&old.encode_to_vec()).unwrap(),
+        CardPreparation::Unavailable
+    ));
+    assert!(matches!(
+        wire::decode::<CardPreparation>(&bytes).unwrap(),
+        CardPreparation::Rejected
+    ));
+}
 #[test]
 fn baseline_byte_fixtures_are_stable() {
     let expected = std::fs::read_to_string(fixture("wire-v2.hex")).unwrap();

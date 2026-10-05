@@ -40,7 +40,10 @@ try:
             if command == b'CONFIRM' and not mode.get('confirm'):
                 emit(b'ERR 99 canceled confirmation')
                 continue
-            if mode.get('cancel'):
+            if mode.get('fully_cancel'):
+                emit(b'D incomplete')
+                emit(b'ERR 83886278 operation canceled')
+            elif mode.get('cancel'):
                 emit(b'ERR 83886179 canceled')
             elif mode.get('partial_error'):
                 emit(b'D incomplete')

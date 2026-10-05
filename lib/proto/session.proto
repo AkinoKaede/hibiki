@@ -161,4 +161,7 @@ message CardPreparationReady {
 }
 
 message CardPreparationUnavailable {
+  // Older peers retain unavailable behavior; updated requesters terminate the
+  // operation immediately when its card provider explicitly denies consent.
+  bool rejected = 1;
 }

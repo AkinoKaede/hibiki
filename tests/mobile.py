@@ -127,11 +127,14 @@ class Mobile:
         self.card = Card(card)
         self.delay = 0
         self.cancel = False
+        self.pin_action = None
+        self.dismiss_card = False
         self.password = '123456'
         self.events = queue.Queue()
         self.lock = threading.Lock()
         self.prompts = set()
         self.card_confirmations = 0
+        self.card_delay = .05
         self.operation_events = []  # Event kind / transport only; never PINs or payloads.
         self.before_pin_reply = None
         self.decline_card = False
@@ -162,10 +165,18 @@ class Mobile:
                     token = event['token']
                     if event.get('prompt_kind') in ('CardUsb', 'CardNfc'):
                         self.card_confirmations += 1
-                        threading.Timer(.05, lambda token=token, accepted=not self.decline_card: self.send(action='reply', token=token, data='', accepted=accepted)).start()
+                        def answer_card(token=token, decline=self.decline_card, dismiss=self.dismiss_card):
+                            if decline: self.send(action='cancel_request', token=token, entire_operation=True)
+                            elif dismiss: self.send(action='dismiss_request', token=token)
+                            else: self.send(action='reply', token=token, data='', accepted=True)
+                        threading.Timer(self.card_delay, answer_card).start()
                         continue
                     self.prompts.add(token)
-                    def reply(token=token, prompt_kind=event.get('prompt_kind')):
+                    def reply(token=token, prompt_kind=event.get('prompt_kind'), action=self.pin_action):
+                        if action:
+                            self.prompts.discard(token)
+                            self.send(action=action, token=token, entire_operation=True)
+                            return
                         if prompt_kind == 'Pin' and self.before_pin_reply:
                             try:
                                 self.before_pin_reply()
@@ -253,6 +264,17 @@ def main():
             assert registered['name'] == 'JANE DOE'
             assert registered['serial'] == card['serial'] and registered['keys'] == 2
             time.sleep(1)
+            mobile.card_delay = 10
+            previous = mobile.card_confirmations
+            with Assuan(a, 'scdaemon') as scd:
+                wait_for(lambda: mobile.card_confirmations > previous)
+                prompts = mobile.card_confirmations
+                for _ in range(8):
+                    assert scd.command(b'SERIALNO')[-1] == b'OK'
+                    assert scd.command(b'READKEY OPENPGP.1')[-1] == b'OK'
+                assert mobile.card_confirmations == prompts, 'public queries recreated an unanswered mobile prompt'
+            mobile.card_delay = .05
+            wait_for(lambda: a.idle('scdaemon'))
             a.gpg('--card-status')
             signed = a.gpg('--local-user', fpr, '--detach-sign', data=b'mobile signing').stdout
             message = root/'message'; message.write_bytes(b'mobile signing')
@@ -275,13 +297,26 @@ def main():
             # Discovery uses public data; each private operation requires fresh consent.
             assert mobile.card_confirmations >= 2
             a.kill_agent()
-            mobile.decline_card = True
+            mobile.decline_card = False
             before = len(mobile.card.commands)
             with Assuan(a, 'scdaemon') as scd:
                 assert scd.command(b'SERIALNO')[-1] == b'OK'
                 scd.command(b'SETDATA '+b'01'*32)
+                mobile.decline_card = True
+                started = time.monotonic()
                 result = scd.command(b'PKSIGN --hash=sha256 OPENPGP.1', lambda _: (_ for _ in ()).throw(AssertionError('PIN requested before consent')))
-                assert result[-1].startswith(b'ERR'), result
+                assert result[-1].startswith(b'ERR 99 '), result
+                assert time.monotonic() - started < 3, 'rejection waited for the operation timeout'
+                refused_prompts = mobile.card_confirmations
+                assert scd.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR')
+                assert mobile.card_confirmations == refused_prompts, 'a refused operation prompted again'
+                mobile.decline_card = False
+                assert scd.command(b'RESET')[-1] == b'OK'
+                assert scd.command(b'SERIALNO')[-1] == b'OK'
+                assert scd.command(b'SETDATA '+b'01'*32)[-1] == b'OK'
+                mobile.decline_card = True
+                assert scd.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR 99 ')
+                assert mobile.card_confirmations > refused_prompts, 'explicit reset could not start new consent'
             assert len(mobile.card.commands) == before
             mobile.decline_card = False
             with Assuan(a, 'scdaemon') as scd:
@@ -302,6 +337,16 @@ def main():
             previous = mobile.card_confirmations
             a.gpg('--local-user', fpr, '--detach-sign', data=b'USB auto response')
             assert mobile.card_confirmations == previous
+            # With USB inserted, the PIN sheet's X cancels the whole operation,
+            # even while another device could still supply the correct PIN.
+            a.kill_agent(); a.services(pinentry=True); a.mode(delay=2); a.restart()
+            mobile.pin_action = 'dismiss_request'
+            previous_verify = len([c for c in mobile.card.commands if c[0] in (0x20, 0x2A)])
+            canceled = a.gpg('--local-user', fpr, '--detach-sign', data=b'cancel connected USB', ok=False)
+            assert b'cancel' in canceled.stderr.lower(), canceled.stderr
+            assert len([c for c in mobile.card.commands if c[0] in (0x20, 0x2A)]) == previous_verify
+            mobile.pin_action = None
+            a.services(); a.restart()
 
             # A USB-registered dual-interface key uses NFC when USB is absent.
             # Both signing and decryption must collect the PIN before opening NFC.
@@ -363,11 +408,26 @@ def main():
             with Assuan(a, 'scdaemon') as scd:
                 wait_for(lambda: mobile.card_confirmations >= previous + 2)
                 assert len(mobile.card.commands) == before, 'USB confirmation must not open NFC or send a PIN'
-            mobile.decline_card = True
+            # X without a card withdraws only this candidate, including across
+            # target refinement. Public metadata remains usable.
+            mobile.dismiss_card = True
+            previous = mobile.card_confirmations
+            with Assuan(a, 'scdaemon') as scd:
+                wait_for(lambda: mobile.card_confirmations > previous)
+                time.sleep(.2)
+                dismissed_prompts = mobile.card_confirmations
+                assert scd.command(('SERIALNO --demand='+card['serial']).encode())[-1] == b'OK'
+                assert scd.command(b'READKEY OPENPGP.1')[-1] == b'OK'
+                assert mobile.card_confirmations == dismissed_prompts
+            mobile.dismiss_card = False
+            mobile.decline_card = False
             before = len(mobile.card.commands)
             with Assuan(a, 'scdaemon') as scd:
                 scd.command(b'SERIALNO'); scd.command(b'SETDATA '+b'01'*32)
-                assert scd.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR')
+                mobile.decline_card = True
+                started = time.monotonic()
+                assert scd.command(b'PKSIGN --hash=sha256 OPENPGP.1')[-1].startswith(b'ERR 99 ')
+                assert time.monotonic() - started < 3
             assert mobile.card_confirmations >= previous + 1
             assert len(mobile.card.commands) == before
             mobile.decline_card = False
@@ -406,6 +466,24 @@ def main():
                 ciphertext = a.gpg('--trust-model', 'always', '--recipient', efpr, '--encrypt', data=b'ECC card decryption').stdout
                 assert a.gpg('--decrypt', data=ciphertext).stdout == b'ECC card decryption'
                 print('PASS: real GnuPG mobile %s signing + %s decryption' % (signing, decryption), flush=True)
+
+            # Explicit Cancel is global; X is global only while USB is inserted.
+            # A second input device must not override an explicit cancellation.
+            a.services(pinentry=True); a.mode(delay=2, password='desktop'); a.restart()
+            mobile.delay = .05
+            for present, action, canceled in [(False, 'dismiss_request', False), (True, 'dismiss_request', True), (False, 'cancel_request', True), (True, 'cancel_request', True)]:
+                mobile.send(action='usb_presence', present=present); mobile.wait('usb-presence')
+                mobile.pin_action = action
+                with Assuan(a, 'pinentry') as pin:
+                    result = pin.command(b'GETPIN')
+                    if canceled:
+                        assert result[-1].startswith(b'ERR 198 '), result
+                        assert not any(line.startswith(b'D ') for line in result)
+                    else: assert b'D desktop' in result, result
+                wait_for(a.idle)
+            mobile.pin_action = None
+            a.mode()
+            print('PASS: iOS Cancel and connected X terminate input races; disconnected X only withdraws mobile', flush=True)
 
             # A second desktop pinentry beats a delayed mobile UI and cancels its token.
             a.services(pinentry=True); a.restart(); mobile.delay = 2

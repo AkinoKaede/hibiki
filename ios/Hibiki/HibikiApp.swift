@@ -9,7 +9,7 @@ struct HibikiApp: App {
             RootView(model: model)
                 .task {
                     #if DEBUG
-                    if CommandLine.arguments.contains("--ui-members-fixture") { return }
+                    if CommandLine.arguments.contains("--ui-members-fixture") || CommandLine.arguments.contains("--ui-pin-fixture") { return }
                     #endif
                     await model.restore()
                 }
@@ -19,6 +19,12 @@ struct HibikiApp: App {
     @MainActor private static func initialModel() -> AppModel {
         #if DEBUG
         // UI-only fixture: no client, saved identity, network or service execution.
+        if CommandLine.arguments.contains("--ui-pin-fixture") {
+            let model = AppModel(defaults: UserDefaults(suiteName: "hibiki-ui-pin-fixture")!)
+            model.initialized = true
+            model.prompts = [PinPrompt(token: "ui-pin", session: "ui-session", request: 1, channel: "UI Test Channel", deviceName: "Work Mac", deviceId: String(repeating: "b", count: 64), kind: .pin, title: "Hibiki request", description: "Please enter the PIN for your security key.", label: "PIN", error: "", repeat: "", repeatError: "", ok: "OK", cancel: "", notOk: "", timeoutSeconds: 120)]
+            return model
+        }
         if CommandLine.arguments.contains("--ui-members-fixture") {
             let model = AppModel(defaults: UserDefaults(suiteName: "hibiki-ui-members-fixture")!)
             let words = (1...24).map { String(format: "word%02d", $0) }.joined(separator: " ")

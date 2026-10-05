@@ -9,7 +9,9 @@ pub enum MobileError {
 }
 impl From<anyhow::Error> for MobileError {
     fn from(value: anyhow::Error) -> Self {
-        if value.is::<crate::broker::RequestCancelled>() {
+        if value.is::<crate::broker::RequestCancelled>()
+            || value.is::<crate::broker::OperationCancelled>()
+        {
             return Self::Cancelled;
         }
         Self::Failed {

@@ -2,6 +2,22 @@ import XCTest
 
 @MainActor
 final class HibikiUITests: XCTestCase {
+    func testPINShowsExplicitCancelBelowOKAndKeepsCloseButton() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-pin-fixture"]
+        app.launch()
+        let ok = app.buttons["submitPIN"]
+        let cancel = app.buttons["cancelOperation"]
+        XCTAssertTrue(ok.waitForExistence(timeout: 10))
+        XCTAssertTrue(cancel.isHittable)
+        XCTAssertEqual(cancel.label, "Cancel")
+        XCTAssertGreaterThanOrEqual(cancel.frame.minY, ok.frame.maxY)
+        XCTAssertTrue(app.buttons["cancelPIN"].isHittable)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "PIN with destructive Cancel below OK"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+    }
     func testMembersOpenFullIdentityAndOfflinePingDetails() {
         let app = XCUIApplication()
         app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture"]

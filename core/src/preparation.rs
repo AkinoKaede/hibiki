@@ -1,7 +1,7 @@
 //! Card acquisition is distinct from both public metadata and private execution.
 use crate::{
     endpoint::Endpoint,
-    provider::{Provider, ProviderContext},
+    provider::{Preparation, PreparationDeclined, PreparationRejected, Provider, ProviderContext},
     storage::App,
 };
 use anyhow::{Context, Result, bail};
@@ -70,6 +70,44 @@ pub async fn probe(ep: &mut Endpoint, target: &CardTarget) -> Result<Option<Stri
     Ok(Some(serial))
 }
 
+struct Acquisition {
+    id: String,
+    target: CardTarget,
+    state: CardPreparation,
+    preparation: Option<Box<dyn Preparation>>,
+    retired: bool,
+    withdrawn: bool,
+}
+impl Acquisition {
+    async fn report(&mut self, outputs: &mpsc::Sender<SessionOutput>) -> Result<()> {
+        outputs
+            .send(SessionOutput::CardStatus {
+                id: self.id.clone(),
+                state: self.state.clone(),
+            })
+            .await?;
+        Ok(())
+    }
+    async fn complete(
+        &mut self,
+        result: Result<Option<String>>,
+        outputs: &mpsc::Sender<SessionOutput>,
+    ) -> Result<()> {
+        self.state = match result {
+            Ok(None) => return Ok(()), // Paused for a query; preserve the prompt.
+            Ok(Some(serial)) => CardPreparation::Ready { serial },
+            Err(error) if error.is::<PreparationRejected>() => CardPreparation::Rejected,
+            Err(error) if error.is::<PreparationDeclined>() => {
+                self.withdrawn = true;
+                CardPreparation::Unavailable
+            }
+            Err(_) => CardPreparation::Unavailable,
+        };
+        self.preparation = None;
+        self.report(outputs).await
+    }
+}
+
 /// Wrap a provider with a cancellable acquisition controller. The controller
 /// owns the child for the entire session, including after another device wins.
 pub fn wrap(
@@ -86,71 +124,87 @@ pub fn wrap(
     let (outputs, rx) = mpsc::channel(32);
     tokio::spawn(async move {
         let run = async {
-            let mut deferred = None;
             let mut last = 0;
-            let mut resume = None;
-            let mut ready = false;
+            let mut acquisition: Option<Acquisition> = None;
             loop {
-                let input = match deferred.take() {
-                    Some(input) => input,
-                    None => match inputs.recv().await {
-                        Some(i) => i,
+                let input = if let Some(current) = acquisition.as_mut()
+                    && let Some(preparation) = current.preparation.as_mut()
+                {
+                    let pause = CancellationToken::new();
+                    let (input, result) = {
+                        let polling = preparation.poll(&mut native, pause.clone());
+                        tokio::pin!(polling);
+                        tokio::select! {
+                            result = &mut polling => (None, result),
+                            input = inputs.recv() => {
+                                pause.cancel();
+                                // Complete an in-flight Assuan query before borrowing the
+                                // native endpoint. This does not cancel the prompt, and a
+                                // concurrent terminal preparation result must not be lost.
+                                (Some(input), polling.await)
+                            }
+                        }
+                    };
+                    current.complete(result, &outputs).await?;
+                    match input {
+                        None => continue,
+                        Some(None) => break,
+                        Some(Some(input)) => input,
+                    }
+                } else {
+                    match inputs.recv().await {
+                        Some(input) => input,
                         None => break,
-                    },
+                    }
                 };
                 match input {
                     SessionInput::PrepareCard { id, target } => {
-                        ready = false;
                         if !hibiki_lib::channel::valid_id(&id) {
                             bail!("invalid preparation ID");
                         }
                         target.validate()?;
-                        outputs
-                            .send(SessionOutput::CardStatus {
-                                id: id.clone(),
-                                state: CardPreparation::Waiting,
-                            })
-                            .await?;
-                        let preparation_stop = cancel.child_token();
-                        let preparation = provider.prepare(
-                            app.clone(),
-                            &mut native,
-                            target.clone(),
-                            preparation_stop.clone(),
-                            context.clone(),
-                        );
-                        tokio::pin!(preparation);
-                        let result = tokio::select! {
-                            result = &mut preparation => Some(result),
-                            input = inputs.recv() => {
-                                preparation_stop.cancel();
-                                // Finish a query already in flight; never leave stale responses.
-                                let _ = preparation.await;
-                                match input {
-                                    Some(SessionInput::CancelPreparation { id: canceled }) if canceled == id => {},
-                                    Some(input @ (SessionInput::Command { .. } | SessionInput::Execute { .. })) => {
-                                        resume = Some(SessionInput::PrepareCard { id: id.clone(), target: target.clone() });
-                                        deferred = Some(input);
-                                    },
-                                    other => deferred = other,
-                                }
-                                None
-                            }
-                        };
-                        preparation_stop.cancel();
-                        if resume.is_some() {
-                            continue;
+                        if let Some(current) = acquisition.as_mut()
+                            && ((current.target == target && !current.retired)
+                                || current.withdrawn
+                                || matches!(current.state, CardPreparation::Rejected))
+                        {
+                            // Repeated notifications do not dismiss an unanswered prompt
+                            // or resurrect a candidate the user already canceled.
+                            current.id = id;
+                            current.target = target;
+                        } else {
+                            drop(acquisition.take());
+                            let preparation = provider
+                                .prepare(app.clone(), target.clone(), context.clone())
+                                .ok();
+                            acquisition = Some(Acquisition {
+                                id,
+                                target,
+                                state: if preparation.is_some() {
+                                    CardPreparation::Waiting
+                                } else {
+                                    CardPreparation::Unavailable
+                                },
+                                preparation,
+                                retired: false,
+                                withdrawn: false,
+                            });
                         }
-                        ready = matches!(result, Some(Ok(_)));
-                        let state = match result {
-                            Some(Ok(serial)) => CardPreparation::Ready { serial },
-                            _ => CardPreparation::Unavailable,
-                        };
-                        outputs
-                            .send(SessionOutput::CardStatus { id, state })
-                            .await?;
+                        acquisition.as_mut().unwrap().report(&outputs).await?;
                     }
-                    SessionInput::CancelPreparation { .. } => {}
+                    SessionInput::CancelPreparation { id } => {
+                        if let Some(current) = acquisition.as_mut()
+                            && current.id == id
+                        {
+                            current.retired = true;
+                            if current.preparation.take().is_some() {
+                                current.state = CardPreparation::Unavailable;
+                                current.report(&outputs).await?;
+                            }
+                        }
+                        // A ready winner remains authorized to execute after the pool
+                        // closes all insertion prompts with CancelPreparation.
+                    }
                     input => {
                         let (request, line, preparation) = match input {
                             SessionInput::Command { request, line } => (request, line, Vec::new()),
@@ -179,7 +233,15 @@ pub fn wrap(
                                 bail!("preparation failed");
                             }
                         }
-                        if matches!(assuan::command(&line)?.0, "PKSIGN" | "PKDECRYPT") && !ready {
+                        let command = assuan::command(&line)?.0;
+                        if matches!(command, "RESET" | "RESTART") {
+                            drop(acquisition.take());
+                        }
+                        if matches!(command, "PKSIGN" | "PKDECRYPT")
+                            && !acquisition.as_ref().is_some_and(|current| {
+                                matches!(current.state, CardPreparation::Ready { .. })
+                            })
+                        {
                             bail!("card preparation required");
                         }
                         native.command(line).await?;
@@ -210,7 +272,6 @@ pub fn wrap(
                                 break;
                             }
                         }
-                        deferred = resume.take();
                     }
                 }
             }

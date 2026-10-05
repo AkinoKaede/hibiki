@@ -534,6 +534,11 @@ pub fn private_operation(
 }
 pub fn operation_error(error: &anyhow::Error) -> AssuanResult {
     use openpgp_card::{Error, ocard::StatusBytes};
+    if error.is::<crate::broker::RequestCancelled>()
+        || error.is::<crate::broker::OperationCancelled>()
+    {
+        return AssuanResult::error(assuan::CANCELED, "operation canceled by user");
+    }
     match error.downcast_ref::<Error>() {
         Some(Error::CardStatus(StatusBytes::PasswordNotChecked(left))) => {
             AssuanResult::error(87, &format!("Bad PIN; {left} attempts remaining"))

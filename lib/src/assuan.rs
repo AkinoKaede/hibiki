@@ -164,6 +164,11 @@ impl AssuanResult {
     pub fn canceled(&self) -> bool {
         self.lines.last().is_some_and(|l| matches!(parse_response(l), Ok(Response::Err(n)) if matches!(n & 0xffff, CANCELED | FULLY_CANCELED)))
     }
+    pub fn fully_canceled(&self) -> bool {
+        self.lines.last().is_some_and(
+            |l| matches!(parse_response(l), Ok(Response::Err(n)) if n & 0xffff == FULLY_CANCELED),
+        )
+    }
     pub fn validate(&self) -> Result<()> {
         if self.lines.is_empty()
             || self.lines.len() > MAX_LINES

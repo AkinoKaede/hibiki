@@ -29,11 +29,16 @@ struct Command {
 #[derive(Clone)]
 struct Candidate {
     tx: mpsc::Sender<Command>,
-    state: watch::Receiver<(Option<CardTarget>, CardPreparation)>,
+    state: watch::Receiver<(Option<Target>, CardPreparation)>,
+}
+#[derive(Clone, PartialEq, Eq)]
+struct Target {
+    generation: u64,
+    card: Option<CardTarget>,
 }
 pub struct Pool {
     candidates: Arc<Mutex<BTreeMap<String, Candidate>>>,
-    target: watch::Sender<Option<CardTarget>>,
+    target: watch::Sender<Target>,
     stop: CancellationToken,
     changed: Arc<tokio::sync::Notify>,
 }
@@ -45,7 +50,10 @@ impl Drop for Pool {
 impl Pool {
     pub fn start(hub: Arc<Hub>, open: LocalOpen, stop: CancellationToken) -> Self {
         let stop = stop.child_token();
-        let (target, _) = watch::channel(Some(CardTarget::default()));
+        let (target, _) = watch::channel(Target {
+            generation: 0,
+            card: Some(CardTarget::default()),
+        });
         let pool = Self {
             candidates: Arc::new(Mutex::new(BTreeMap::new())),
             target,
@@ -85,11 +93,20 @@ impl Pool {
         pool
     }
     pub fn prepare(&self, target: CardTarget) {
-        self.target.send_replace(Some(target));
-        // A new target invalidates every prior readiness observation.
+        self.set_target(Some(target));
     }
     pub fn cancel_prompts(&self) {
-        self.target.send_replace(None);
+        self.set_target(None);
+    }
+    fn set_target(&self, card: Option<CardTarget>) {
+        self.target.send_if_modified(|target| {
+            if target.card == card {
+                return false;
+            }
+            target.generation += 1;
+            target.card = card;
+            true
+        });
     }
     async fn send(&self, peer: &str, command: Command) -> Result<()> {
         let tx = self
@@ -104,6 +121,26 @@ impl Pool {
         Ok(())
     }
     pub async fn query_from(&self, peer: &str, line: Line) -> Result<AssuanResult> {
+        tokio::select! {
+            biased;
+            _ = self.rejected() => Err(hibiki_core::provider::PreparationRejected.into()),
+            result = self.query_from_candidate(peer, line) => result,
+        }
+    }
+    async fn rejected(&self) {
+        loop {
+            let changed = self.changed.notified();
+            if self.candidates.lock().unwrap().values().any(|candidate| {
+                let state = candidate.state.borrow();
+                state.0.as_ref() == Some(&*self.target.borrow())
+                    && matches!(state.1, CardPreparation::Rejected)
+            }) {
+                return;
+            }
+            tokio::select! { _ = changed => {}, _ = tokio::time::sleep(Duration::from_millis(100)) => {} }
+        }
+    }
+    async fn query_from_candidate(&self, peer: &str, line: Line) -> Result<AssuanResult> {
         let (reply, rx) = oneshot::channel();
         self.send(
             peer,
@@ -119,6 +156,13 @@ impl Pool {
         rx.await?
     }
     pub async fn query(&self, line: Line) -> Result<(String, AssuanResult)> {
+        tokio::select! {
+            biased;
+            _ = self.rejected() => Err(hibiki_core::provider::PreparationRejected.into()),
+            result = self.query_candidates(line) => result,
+        }
+    }
+    async fn query_candidates(&self, line: Line) -> Result<(String, AssuanResult)> {
         loop {
             let peers: Vec<_> = self.candidates.lock().unwrap().keys().cloned().collect();
             let mut queries = tokio::task::JoinSet::new();
@@ -136,8 +180,12 @@ impl Pool {
                             reply,
                         })
                         .await?;
-                        let result = rx.await??;
-                        if result.success() {
+                        // A candidate can reconnect while other cardless peers are
+                        // still waiting. Keep discovery alive for that candidate;
+                        // this retry path never carries private commands.
+                        if let Ok(Ok(result)) = rx.await
+                            && result.success()
+                        {
                             return Ok::<_, anyhow::Error>((peer, result));
                         }
                         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -157,11 +205,28 @@ impl Pool {
     pub async fn ready(&self) -> Result<String> {
         loop {
             let changed = self.changed.notified();
-            if let Some((peer, _)) = self.candidates.lock().unwrap().iter().find(|(_, c)| {
-                let state = c.state.borrow();
-                state.0 == *self.target.borrow() && matches!(state.1, CardPreparation::Ready { .. })
-            }) {
-                return Ok(peer.clone());
+            {
+                let candidates = self.candidates.lock().unwrap();
+                let target = self.target.borrow();
+                let mut ready = None;
+                for (peer, candidate) in candidates.iter() {
+                    let state = candidate.state.borrow();
+                    if state.0.as_ref() != Some(&*target) {
+                        continue;
+                    }
+                    match state.1 {
+                        CardPreparation::Rejected => {
+                            return Err(hibiki_core::provider::PreparationRejected.into());
+                        }
+                        CardPreparation::Ready { .. } if ready.is_none() => {
+                            ready = Some(peer.clone())
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(peer) = ready {
+                    return Ok(peer);
+                }
             }
             tokio::select! { _=self.stop.cancelled()=>bail!("card pool closed"), _=changed=>{}, _=tokio::time::sleep(Duration::from_millis(100))=>{} }
         }
@@ -209,8 +274,8 @@ async fn candidate(
     open: LocalOpen,
     peer: String,
     mut commands: mpsc::Receiver<Command>,
-    state: watch::Sender<(Option<CardTarget>, CardPreparation)>,
-    mut target: watch::Receiver<Option<CardTarget>>,
+    state: watch::Sender<(Option<Target>, CardPreparation)>,
+    mut target: watch::Receiver<Target>,
     stop: CancellationToken,
     changed: Arc<tokio::sync::Notify>,
 ) {
@@ -224,7 +289,7 @@ async fn candidate(
                 let mut id = random_id();
                 let mut preparing = false;
                 let mut current = target.borrow_and_update().clone();
-                if let Some(value) = current.clone() {
+                if let Some(value) = current.card.clone() {
                     ep.prepare(id.clone(), value).await?;
                     preparing = true;
                 }
@@ -238,11 +303,12 @@ async fn candidate(
                             state.send_replace((None, CardPreparation::Waiting));
                             current = target.borrow_and_update().clone();
                             id = random_id();
-                            preparing = current.is_some();
-                            if let Some(value) = current.clone() { ep.prepare(id.clone(), value).await?; }
+                            preparing = current.card.is_some();
+                            if let Some(value) = current.card.clone() { ep.prepare(id.clone(), value).await?; }
                         },
                         command=commands.recv()=>{
                             let Some(command) = command else { break; };
+                            let reset = matches!(&*command.line, b"RESET" | b"RESTART");
                             ep.bind_operation(command.operation);
                             let result = if let Some(preparation) = command.preparation {
                                 ep.execute(command.line, preparation).await?;
@@ -252,11 +318,20 @@ async fn candidate(
                             let failed = result.is_err();
                             let _ = command.reply.send(result);
                             if failed { bail!("candidate session ended"); }
+                            if reset {
+                                // A target update can overtake a queued RESET. Re-arm
+                                // acquisition after the reset at its new command boundary.
+                                state.send_replace((None, CardPreparation::Waiting));
+                                current = target.borrow_and_update().clone();
+                                id = random_id();
+                                preparing = current.card.is_some();
+                                if let Some(value) = current.card.clone() { ep.prepare(id.clone(), value).await?; }
+                            }
                         },
                         result=ep.prepared(&id), if preparing=>{
                             let result = result?;
                             preparing = matches!(result, CardPreparation::Waiting);
-                            state.send_replace((current.clone(), result));
+                            state.send_replace((Some(current.clone()), result));
                             changed.notify_waiters();
                         },
                     }
@@ -269,5 +344,81 @@ async fn candidate(
         state.send_replace((None, CardPreparation::Unavailable));
         changed.notify_waiters();
         tokio::select! { _=stop.cancelled()=>return, _=tokio::time::sleep(Duration::from_secs(2))=>{} }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn explicit_rejection_wins_over_ready_candidates_and_reset_invalidates_it() {
+        let target = Target {
+            generation: 0,
+            card: Some(CardTarget::default()),
+        };
+        let (target_tx, _) = watch::channel(target.clone());
+        let mut candidates = BTreeMap::new();
+        let mut statuses = Vec::new();
+        for (peer, status) in [
+            (
+                "first-ready",
+                CardPreparation::Ready {
+                    serial: "AABB".into(),
+                },
+            ),
+            ("last-rejected", CardPreparation::Rejected),
+        ] {
+            let (tx, _rx) = mpsc::channel(1);
+            let (state, rx) = watch::channel((Some(target.clone()), status));
+            statuses.push(state);
+            candidates.insert(peer.into(), Candidate { tx, state: rx });
+        }
+        let pool = Pool {
+            candidates: Arc::new(Mutex::new(candidates)),
+            target: target_tx,
+            stop: CancellationToken::new(),
+            changed: Arc::new(tokio::sync::Notify::new()),
+        };
+        assert!(
+            pool.ready()
+                .await
+                .unwrap_err()
+                .is::<hibiki_core::provider::PreparationRejected>()
+        );
+        assert!(
+            pool.query("SERIALNO".into())
+                .await
+                .unwrap_err()
+                .is::<hibiki_core::provider::PreparationRejected>()
+        );
+        assert!(
+            pool.query_from("first-ready", "SERIALNO".into())
+                .await
+                .unwrap_err()
+                .is::<hibiki_core::provider::PreparationRejected>()
+        );
+        pool.prepare(CardTarget::default());
+        assert!(
+            pool.ready()
+                .await
+                .unwrap_err()
+                .is::<hibiki_core::provider::PreparationRejected>()
+        );
+        pool.reset("RESET".into()).await;
+        pool.prepare(CardTarget::default());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), pool.ready())
+                .await
+                .is_err(),
+            "reset reused a stale ready/rejected observation"
+        );
+        statuses[0].send_replace((
+            Some(pool.target.borrow().clone()),
+            CardPreparation::Ready {
+                serial: "AABB".into(),
+            },
+        ));
+        assert_eq!(pool.ready().await.unwrap(), "first-ready");
     }
 }

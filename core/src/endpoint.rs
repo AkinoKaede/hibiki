@@ -22,6 +22,7 @@ pub struct Endpoint {
     active: bool,
     bytes: usize,
     lines: usize,
+    preparation_status: Option<(String, CardPreparation)>,
 }
 impl Drop for Endpoint {
     fn drop(&mut self) {
@@ -48,6 +49,7 @@ impl Endpoint {
             active: false,
             bytes: 0,
             lines: 0,
+            preparation_status: None,
         }
     }
     pub fn bind_operation(&self, id: Option<String>) {
@@ -65,6 +67,11 @@ impl Endpoint {
         Ok(())
     }
     pub async fn prepared(&mut self, id: &str) -> Result<CardPreparation> {
+        if let Some((current, state)) = self.preparation_status.take()
+            && current == id
+        {
+            return Ok(state);
+        }
         loop {
             match self.rx.recv().await {
                 Some(SessionOutput::CardStatus { id: current, state }) if current == id => {
@@ -114,7 +121,10 @@ impl Endpoint {
         let (request, line) = loop {
             match self.rx.recv().await {
                 Some(SessionOutput::Line { request, line }) => break (request, line),
-                Some(SessionOutput::CardStatus { .. }) => continue,
+                Some(SessionOutput::CardStatus { id, state }) => {
+                    self.preparation_status = Some((id, state));
+                    continue;
+                }
                 _ => bail!("service session ended"),
             }
         };

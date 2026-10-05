@@ -366,6 +366,14 @@ impl MobileClient {
             .respond(&token, data, accepted)
             .map_err(Into::into)
     }
+    pub fn cancel_request(&self, token: String, entire_operation: bool) -> MobileResult<()> {
+        self.broker
+            .cancel(&token, entire_operation)
+            .map_err(Into::into)
+    }
+    pub fn dismiss_request(&self, token: String) -> MobileResult<()> {
+        self.cancel_request(token, self.provider.usb_present.load(Ordering::Acquire))
+    }
     pub fn fail_native_request(
         &self,
         token: String,

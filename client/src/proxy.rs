@@ -180,6 +180,7 @@ async fn password_race(
                     let terminal = result.lines.pop().context("missing pinentry result")?;
                     result.lines.clear();
                     result.lines.push(terminal);
+                    if result.fully_canceled() { return Ok(result); }
                     if result.canceled() { canceled = Some(result); }
                     else { failed = Some(result); }
                 },
@@ -253,6 +254,14 @@ async fn password_remote(
                     running.remove(&peer);
                     match result {
                         Ok(Some(result)) if result.success()=>{ operation.finish(true).await?; return Ok(Some(result)); },
+                        Ok(Some(mut result)) if result.fully_canceled()=>{
+                            let terminal=result.lines.pop().context("missing pinentry cancellation")?;
+                            // Returning drops the remaining candidates immediately. Queue
+                            // cleanup must not delay cancellation behind relay traffic.
+                            let operation=operation.clone();
+                            tokio::spawn(async move { let _=operation.finish(false).await; });
+                            return Ok(Some(AssuanResult { lines: vec![terminal] }));
+                        },
                         Ok(Some(mut result)) if result.canceled()=>canceled=result.lines.pop(),
                         Ok(Some(mut result))=>{failures+=1;failed=result.lines.pop();},
                         Ok(None)=>{},
@@ -542,17 +551,31 @@ pub async fn serve(hub: Arc<Hub>, stream: UnixStream, open: LocalOpen) -> Result
             )
             .await;
             let unknown = matches!(&outcome, Ok(Err(error)) if error.to_string().contains("execution result unknown"));
+            let rejected = matches!(&outcome, Ok(Err(error)) if error.is::<hibiki_core::provider::PreparationRejected>());
             let result = match outcome {
                 Ok(Ok(result)) => result,
                 _ => {
+                    if let Some(pool) = &pool {
+                        // The command deadline also ends its acquisition UI, even
+                        // when no candidate has supplied public metadata yet.
+                        pool.cancel_prompts();
+                    }
                     if open.service == ServiceKind::Scdaemon
-                        && (!card_state.peer.is_empty() || !card_state.public_source.is_empty())
+                        && (rejected
+                            || !card_state.peer.is_empty()
+                            || !card_state.public_source.is_empty())
                     {
                         broken = true;
                     }
                     AssuanResult::error(
-                        assuan::GENERAL,
-                        if unknown {
+                        if rejected {
+                            assuan::CANCELED
+                        } else {
+                            assuan::GENERAL
+                        },
+                        if rejected {
+                            "card operation rejected by user"
+                        } else if unknown {
                             "execution result unknown; do not retry automatically"
                         } else {
                             "service unavailable, failed or timed out"

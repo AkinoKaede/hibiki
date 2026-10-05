@@ -378,6 +378,13 @@ The USB PIN description can read live Number, Holder, signature Counter and low
 remaining-attempt counts. NFC does not present stale counters before the tap.
 Neither confirmation nor a registered public key is proof of USB readiness.
 
+The request page has a **Cancel** button that cancels the whole operation and
+closes other input candidates. The **×** closes only this device's candidate when
+USB is absent; with USB inserted, it also cancels the whole operation. USB presence
+is refreshed when × is tapped. A canceled or dismissed card preparation is not
+reopened by metadata queries or target refinement; RESET/RESTART or a new request
+session permits another attempt.
+
 When replacing an unpublished Postcard build, upgrade all components to the
 Protobuf `hibiki/2` baseline once. Later same-major releases support separate
 upgrades through capability negotiation.

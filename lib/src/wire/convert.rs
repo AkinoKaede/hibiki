@@ -1048,7 +1048,10 @@ impl Wire for CardPreparation {
             Self::Ready { serial } => Kind::Ready(pb::CardPreparationReady {
                 serial: serial.clone(),
             }),
-            Self::Unavailable => Kind::Unavailable(pb::CardPreparationUnavailable {}),
+            Self::Unavailable => {
+                Kind::Unavailable(pb::CardPreparationUnavailable { rejected: false })
+            }
+            Self::Rejected => Kind::Unavailable(pb::CardPreparationUnavailable { rejected: true }),
         };
         pb::CardPreparation { kind: Some(kind) }
     }
@@ -1059,6 +1062,7 @@ impl Wire for CardPreparation {
             Kind::Ready(value) => Self::Ready {
                 serial: value.serial.clone(),
             },
+            Kind::Unavailable(value) if value.rejected => Self::Rejected,
             Kind::Unavailable(_) => Self::Unavailable,
         })
     }

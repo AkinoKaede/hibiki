@@ -161,6 +161,15 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
                 v["accepted"].as_bool().unwrap_or(true),
             );
         }
+        "cancel_request" => {
+            let _ = client.cancel_request(
+                text("token"),
+                v["entire_operation"].as_bool().unwrap_or(false),
+            );
+        }
+        "dismiss_request" => {
+            let _ = client.dismiss_request(text("token"));
+        }
         "services" => {
             client.set_services(
                 v["pin"].as_bool().unwrap_or(false),

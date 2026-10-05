@@ -319,6 +319,7 @@ pub enum CardPreparation {
     Waiting,
     Ready { serial: String },
     Unavailable,
+    Rejected,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

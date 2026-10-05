@@ -359,6 +359,19 @@ final class AppModel {
         do { try client.respond(token: prompt.token, data: Data(text.utf8), accepted: accepted) }
         catch { if client.requestIsPending(token: prompt.token) { show(error) } }
     }
+    func cancelPrompt(_ prompt: PinPrompt, entireOperation: Bool) {
+        guard let client else { return }
+        defer { prompts.removeAll { $0.token == prompt.token } }
+        do { try client.cancelRequest(token: prompt.token, entireOperation: entireOperation) }
+        catch { if client.requestIsPending(token: prompt.token) { show(error) } }
+    }
+    func dismissPrompt(_ prompt: PinPrompt) async {
+        await refreshUSBAvailability()
+        guard let client else { return }
+        defer { prompts.removeAll { $0.token == prompt.token } }
+        do { try client.dismissRequest(token: prompt.token) }
+        catch { if client.requestIsPending(token: prompt.token) { show(error) } }
+    }
     private func handle(_ event: NativeEvent, core: MobileClient) {
         switch event {
         case .connection(let state):

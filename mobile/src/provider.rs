@@ -47,6 +47,28 @@ impl MobileProvider {
         })
     }
 }
+// Mobile preparation does not borrow the native Assuan endpoint. Keep its
+// complete future (including broker reply tokens and NFC/USB state) across
+// public queries, polling it again when the controller resumes acquisition.
+struct MobilePreparation(
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>,
+);
+impl hibiki_core::provider::Preparation for MobilePreparation {
+    fn poll<'a>(
+        &'a mut self,
+        _endpoint: &'a mut Endpoint,
+        pause: CancellationToken,
+    ) -> hibiki_core::provider::PrepareFuture<'a> {
+        Box::pin(async move {
+            tokio::select! {
+                biased;
+                _ = pause.cancelled() => Ok(None),
+                result = &mut self.0 => result.map(Some),
+            }
+        })
+    }
+}
+
 impl Provider for MobileProvider {
     fn enabled(&self, kind: ServiceKind) -> bool {
         match kind {
@@ -54,19 +76,22 @@ impl Provider for MobileProvider {
             ServiceKind::Scdaemon => self.card_enabled.load(Ordering::Acquire),
         }
     }
-    fn prepare<'a>(
-        &'a self,
+    fn prepare(
+        &self,
         app: Arc<App>,
-        _endpoint: &'a mut Endpoint,
         target: hibiki_lib::protocol::CardTarget,
-        stop: CancellationToken,
         context: ProviderContext,
-    ) -> hibiki_core::provider::PrepareFuture<'a> {
-        Box::pin(async move {
+    ) -> Result<Box<dyn hibiki_core::provider::Preparation>> {
+        let card = self.card.clone();
+        let broker = self.broker.clone();
+        let usb_enabled = self.usb_enabled.clone();
+        let usb_present = self.usb_present.clone();
+        let prepared_transport = self.prepared_transport.clone();
+        Ok(Box::new(MobilePreparation(Box::pin(async move {
+            let stop = CancellationToken::new();
             target.validate()?;
-            *self.prepared_transport.lock().unwrap() = None;
-            let registered = self
-                .card
+            *prepared_transport.lock().unwrap() = None;
+            let registered = card
                 .lock()
                 .unwrap()
                 .clone()
@@ -77,9 +102,9 @@ impl Provider for MobileProvider {
             let state = app.proof(&context.channel)?.verify()?;
             let device = state.member(&context.peer)?;
             let prompt_stop = stop.child_token();
-            let _guard = CancelOnDrop(prompt_stop.clone());
+            let _guard = CancelOnDrop(stop.clone());
             let make_prompt = || {
-                self.broker.request(
+                broker.request(
                     |token| NativeEvent::Prompt {
                         prompt: PinPrompt {
                             token,
@@ -121,10 +146,8 @@ impl Provider for MobileProvider {
                 if stop.is_cancelled() {
                     bail!("card preparation canceled");
                 }
-                if self.usb_enabled.load(Ordering::Acquire)
-                    && self.usb_present.load(Ordering::Acquire)
-                {
-                    let broker = self.broker.clone();
+                if usb_enabled.load(Ordering::Acquire) && usb_present.load(Ordering::Acquire) {
+                    let broker = broker.clone();
                     let token = stop.child_token();
                     if let Ok(Ok(info)) = tokio::task::spawn_blocking(move || {
                         card::inspect(broker, token, CardTransport::Usb)
@@ -132,24 +155,34 @@ impl Provider for MobileProvider {
                     .await
                         && matches_target(&info, &target)
                     {
-                        *self.prepared_transport.lock().unwrap() = Some(CardTransport::Usb);
+                        *prepared_transport.lock().unwrap() = Some(CardTransport::Usb);
                         return Ok(info.serial);
                     }
                 }
                 if acknowledged && nfc {
-                    *self.prepared_transport.lock().unwrap() = Some(CardTransport::Nfc);
+                    *prepared_transport.lock().unwrap() = Some(CardTransport::Nfc);
                     return Ok(registered.as_ref().unwrap().serial.clone());
                 }
                 tokio::select! {
                     _=stop.cancelled()=>bail!("card preparation canceled"),
                     result=&mut prompt, if !acknowledged=>{
-                        result?;
+                        if let Err(error) = result {
+                            // The UI distinguishes leaving this device from explicitly
+                            // canceling the operation, even before a card is inserted.
+                            if error.is::<crate::broker::OperationCancelled>() {
+                                return Err(hibiki_core::provider::PreparationRejected.into());
+                            }
+                            if error.is::<crate::broker::RequestCancelled>() {
+                                return Err(hibiki_core::provider::PreparationDeclined.into());
+                            }
+                            return Err(error);
+                        }
                         if nfc { acknowledged = true; } else { prompt = Box::pin(make_prompt()); }
                     },
                     _=tokio::time::sleep(Duration::from_millis(300))=>{},
                 }
             }
-        })
+        }))))
     }
     fn open(
         &self,
@@ -342,7 +375,7 @@ async fn read_pin(
             return Ok(bytes);
         }
         if &*line == b"CAN" {
-            bail!("PIN inquiry canceled");
+            return Err(crate::broker::RequestCancelled.into());
         }
         let assuan::Response::Data(raw) = assuan::parse_response(&line)? else {
             bail!("invalid PIN inquiry response")

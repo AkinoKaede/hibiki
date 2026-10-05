@@ -125,6 +125,9 @@ impl Pinentry {
                         lines.push("OK".into());
                         AssuanResult { lines }
                     }
+                    Err(error) if error.is::<crate::broker::OperationCancelled>() => {
+                        AssuanResult::error(assuan::FULLY_CANCELED, "operation canceled by user")
+                    }
                     Err(_) => AssuanResult::error(assuan::CANCELED, "input canceled or timed out"),
                 });
             }
@@ -233,6 +236,30 @@ mod tests {
                 .respond(&prompt.token, b"again".to_vec(), true)
                 .is_err()
         );
+        for (inserted, explicit_cancel, expected) in [
+            (false, false, assuan::CANCELED),
+            (true, false, assuan::FULLY_CANCELED),
+            (false, true, assuan::FULLY_CANCELED),
+            (true, true, assuan::FULLY_CANCELED),
+        ] {
+            client.usb_present(inserted);
+            ep.command("GETPIN".into()).await.unwrap();
+            let token = loop {
+                if let Some(NativeEvent::Prompt { prompt }) = client.broker.next().await {
+                    break prompt.token;
+                }
+            };
+            if explicit_cancel {
+                client.cancel_request(token.clone(), true).unwrap();
+            } else {
+                client.dismiss_request(token.clone()).unwrap();
+            }
+            assert!(
+                matches!(assuan::parse_response(&ep.next().await.unwrap()).unwrap(), assuan::Response::Err(code) if code == expected)
+            );
+            assert!(!client.broker.pending(&token));
+            assert!(client.respond(token, b"late reply".to_vec(), true).is_err());
+        }
         ep.command("GETPIN".into()).await.unwrap();
         let token = loop {
             if let Some(NativeEvent::Prompt { prompt }) = client.broker.next().await {
