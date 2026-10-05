@@ -52,7 +52,12 @@ impl NativeCard {
                 &self.stop,
                 Duration::from_secs(120),
             ))
-            .map_err(|_| SmartcardError::Error("card exchange canceled or failed".into()))?;
+            .map_err(|error| {
+                if error.is::<crate::broker::RequestCancelled>() {
+                    self.stop.cancel();
+                }
+                SmartcardError::Error(format!("card exchange failed: {error}"))
+            })?;
         if response.len() < 2 || response.len() > 65538 {
             return Err(SmartcardError::Error("invalid card response size".into()));
         }

@@ -85,7 +85,7 @@ struct StatusView: View {
                 }
             }
             Section("Provide services") {
-                Toggle("Password entry", isOn: $model.pinEnabled).onChange(of: model.pinEnabled) { _, _ in model.updateServices() }
+                Toggle("PINEntry", isOn: $model.pinEnabled).onChange(of: model.pinEnabled) { _, _ in model.updateServices() }
                 Toggle("OpenPGP card", isOn: $model.cardEnabled).onChange(of: model.cardEnabled) { _, _ in model.updateServices() }
                 if model.cardEnabled, model.card == nil { Text("Register your security key in the Security Keys tab.").foregroundStyle(.secondary) }
                 if let card = model.card, model.cardEnabled {
@@ -368,10 +368,7 @@ struct CardView: View {
     @State private var registrationTransport: CardTransport?
     var body: some View {
         List {
-            Section {
-                Label(model.usbPresent ? "USB security key detected" : "No USB security key", systemImage: "cable.connector")
-                Text("USB and Lightning connectors are supported.").font(.caption).foregroundStyle(.secondary)
-            }
+            CardInspectionView(model: model)
             Section {
                 if model.registeredCards.isEmpty {
                     ContentUnavailableView(
@@ -401,21 +398,23 @@ struct CardView: View {
             }
         }
         .navigationTitle("Security Keys")
+        .onAppear { model.showCardInspection() }
+        .onDisappear { model.cardInspection.disappear() }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button { registrationTransport = .usb } label: {
-                        Label("Register USB security key", systemImage: "cable.connector")
+                        Label("Register via USB", systemImage: "cable.connector")
                     }
                     .accessibilityIdentifier("registerUSB")
                     Button { registrationTransport = .nfc } label: {
-                        Label("Register NFC security key", systemImage: "wave.3.right")
+                        Label("Register via NFC", systemImage: "wave.3.right")
                     }
                     .accessibilityIdentifier("registerNFC")
                 } label: {
                     Label("Register security key", systemImage: "plus").labelStyle(.iconOnly)
                 }
-                .disabled(model.busy)
+                .disabled(model.busy || model.cardInspection.isReading)
                 .accessibilityIdentifier("registerSecurityKey")
             }
         }
@@ -458,15 +457,15 @@ struct RegisteredCardView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var confirmRemoval = false
+    @State private var editing = false
     private var entry: RegisteredCard? { model.registeredCards.first { $0.id == serial } }
     var body: some View {
         List {
             if let entry {
                 Section("Security key") {
                     LabeledContent("Name", value: entry.name)
-                    LabeledContent("Serial number") { Text(verbatim: serial).font(.caption.monospaced()).textSelection(.enabled) }
+                    CardIdentityFields(info: entry.card)
                     LabeledContent("Supported connections", value: entry.connections)
-                    LabeledContent("Registration read using", value: entry.card.transport == .usb ? String(localized: "USB") : "NFC")
                     if model.card?.serial == serial {
                         Label("Selected security key", systemImage: "checkmark.circle.fill")
                     } else {
@@ -474,14 +473,7 @@ struct RegisteredCardView: View {
                     }
                 }
                 Section("OpenPGP keys") {
-                    if entry.card.keys.isEmpty { Text("No OpenPGP keys found on this key").foregroundStyle(.secondary) }
-                    ForEach(entry.card.keys) { key in
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text(key.slot == 1 ? "Signing" : (key.slot == 2 ? "Decryption" : "Authentication")).font(.headline)
-                            Text(verbatim: key.algorithm).foregroundStyle(.secondary)
-                            Text(verbatim: key.fingerprint).font(.caption.monospaced()).textSelection(.enabled)
-                        }.padding(.vertical, 4)
-                    }
+                    CardPublicKeyRows(keys: entry.card.keys)
                 }
                 Section {
                     Button("Remove registration", role: .destructive) { confirmRemoval = true }.disabled(model.busy)
@@ -489,6 +481,15 @@ struct RegisteredCardView: View {
             }
         }
         .navigationTitle(entry?.name ?? String(localized: "Security Key"))
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Edit") { editing = true }.disabled(model.busy || entry == nil)
+                    .accessibilityIdentifier("editSecurityKey")
+            }
+        }
+        .sheet(isPresented: $editing) {
+            if let entry { EditRegisteredCardView(entry: entry, model: model) }
+        }
         .confirmationDialog("Remove registration?", isPresented: $confirmRemoval, titleVisibility: .visible) {
             Button("Remove registration", role: .destructive) {
                 Task { await model.removeCard(serial); if entry == nil { dismiss() } }
@@ -516,7 +517,7 @@ struct SettingsView: View {
                 Button("Disconnect from server", role: .destructive) { confirmDisconnect = true }
                     .disabled(model.busy).accessibilityIdentifier("disconnectServer")
             }
-            Section("About") { Text("Hibiki"); Text("PINs are never saved. Private keys stay on your security key or computer.").foregroundStyle(.secondary) }
+            Section("About") { LabeledContent("Hibiki", value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—"); Text("PINs are never saved. Private keys stay on your security key or computer.").foregroundStyle(.secondary) }
         }.navigationTitle("Settings")
         .confirmationDialog("Disconnect from this server?", isPresented: $confirmDisconnect, titleVisibility: .visible) {
             Button("Disconnect", role: .destructive) { Task { await model.disconnectRelay() } }
@@ -563,10 +564,10 @@ struct PinView: View {
                             .focused($focused)
                             .accessibilityIdentifier("pinInput")
                     }
-                    Button(prompt.ok.isEmpty ? String(localized: "Continue") : prompt.ok) { submit() }
+                    Button(prompt.ok.isEmpty ? String(localized: "Continue") : PinentryLabel.display(prompt.ok)) { submit() }
                         .disabled(submitting)
                         .accessibilityIdentifier("submitPIN")
-                    if !prompt.notOk.isEmpty, !asksPin { Button(prompt.notOk) { model.answer(prompt, accepted: false) } }
+                    if !prompt.notOk.isEmpty, !asksPin { Button(PinentryLabel.display(prompt.notOk)) { model.answer(prompt, accepted: false) } }
                 }
             }
             .navigationTitle(prompt.title.isEmpty ? String(localized: "Hibiki request") : prompt.title)
@@ -575,7 +576,7 @@ struct PinView: View {
                     Button { pin = ""; model.answer(prompt, accepted: false) } label: {
                         Image(systemName: "xmark")
                     }
-                    .accessibilityLabel(prompt.cancel.isEmpty ? String(localized: "Cancel") : prompt.cancel)
+                    .accessibilityLabel(prompt.cancel.isEmpty ? String(localized: "Cancel") : PinentryLabel.display(prompt.cancel))
                     .accessibilityIdentifier("cancelPIN")
                 }
             }

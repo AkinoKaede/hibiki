@@ -58,7 +58,8 @@ for name,files,ptype in [('Hibiki',appfiles+[binding],'application'),('HibikiTes
         extra.update({'INFOPLIST_FILE':'Hibiki/Info.plist','CODE_SIGN_ENTITLEMENTS':'Hibiki/Hibiki.entitlements','ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon',
         'SWIFT_INCLUDE_PATHS':'$(SRCROOT)/Generated','HEADER_SEARCH_PATHS':'$(SRCROOT)/Generated','OTHER_SWIFT_FLAGS':['$(inherited)','-Xcc','-fmodule-map-file=$(SRCROOT)/Generated/hibiki_mobileFFI.modulemap'],
         'OTHER_LDFLAGS':['$(inherited)','-liconv','-framework','Security','-framework','SystemConfiguration'], 'INFOPLIST_KEY_UILaunchScreen_Generation':'YES'})
-    elif name=='HibikiTests':extra.update({'TEST_HOST':'$(BUILT_PRODUCTS_DIR)/Hibiki.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Hibiki','BUNDLE_LOADER':'$(TEST_HOST)'})
+    elif name=='HibikiTests':extra.update({'TEST_HOST':'$(BUILT_PRODUCTS_DIR)/Hibiki.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Hibiki','BUNDLE_LOADER':'$(TEST_HOST)',
+        'SWIFT_INCLUDE_PATHS':'$(SRCROOT)/Generated','HEADER_SEARCH_PATHS':'$(SRCROOT)/Generated','OTHER_SWIFT_FLAGS':['$(inherited)','-Xcc','-fmodule-map-file=$(SRCROOT)/Generated/hibiki_mobileFFI.modulemap']})
     else:extra['TEST_TARGET_NAME']='Hibiki'
     phases=[sources,frameworks,resourcephase]
     if app:

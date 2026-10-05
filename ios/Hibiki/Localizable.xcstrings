@@ -540,16 +540,6 @@
         }
       }
     },
-    "Password entry": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "口令输入"
-          }
-        }
-      }
-    },
     "Pending requests": {
       "localizations": {
         "zh-Hans": {
@@ -650,32 +640,12 @@
         }
       }
     },
-    "Register NFC security key": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "注册NFC安全密钥"
-          }
-        }
-      }
-    },
     "Register security key": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "注册安全密钥"
-          }
-        }
-      }
-    },
-    "Register USB security key": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "注册USB安全密钥"
           }
         }
       }
@@ -707,16 +677,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "已注册的安全密钥"
-          }
-        }
-      }
-    },
-    "Registration read using": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "注册读取方式"
           }
         }
       }
@@ -1553,6 +1513,256 @@
           "stringUnit": {
             "state": "translated",
             "value": "请妥善保管预共享密钥，并与邀请分开提供。Hibiki不会保存此密钥。"
+          }
+        }
+      }
+    },
+    "PINEntry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PINEntry"
+          }
+        }
+      }
+    },
+    "Register via USB": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通过USB注册"
+          }
+        }
+      }
+    },
+    "Register via NFC": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通过NFC注册"
+          }
+        }
+      }
+    },
+    "Security key reader": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全密钥读取器"
+          }
+        }
+      }
+    },
+    "Security key information": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全密钥信息"
+          }
+        }
+      }
+    },
+    "Refresh USB information": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新USB信息"
+          }
+        }
+      }
+    },
+    "Read NFC information": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取NFC信息"
+          }
+        }
+      }
+    },
+    "Tap to read public information using NFC.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "点击后通过NFC读取公开信息。"
+          }
+        }
+      }
+    },
+    "Reading public information does not register or select this security key. No PIN needed.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "读取公开信息不会注册或选中此安全密钥，无需PIN。"
+          }
+        }
+      }
+    },
+    "NFC snapshot from the last read. The key is not continuously connected.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这是上次NFC读取的信息快照，密钥并未持续连接。"
+          }
+        }
+      }
+    },
+    "OpenPGP AID": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenPGP AID"
+          }
+        }
+      }
+    },
+    "OpenPGP version": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OpenPGP版本"
+          }
+        }
+      }
+    },
+    "Manufacturer ID": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "厂商标识"
+          }
+        }
+      }
+    },
+    "Algorithm": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "算法"
+          }
+        }
+      }
+    },
+    "Fingerprint": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "指纹"
+          }
+        }
+      }
+    },
+    "Keygrip": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keygrip"
+          }
+        }
+      }
+    },
+    "Created": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建时间"
+          }
+        }
+      }
+    },
+    "Edit": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "编辑"
+          }
+        }
+      }
+    },
+    "Save": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存"
+          }
+        }
+      }
+    },
+    "Edit security key": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "编辑安全密钥"
+          }
+        }
+      }
+    },
+    "Enter a security key name.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请输入安全密钥名称。"
+          }
+        }
+      }
+    },
+    "Enable at least one connection.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请至少启用一种连接方式。"
+          }
+        }
+      }
+    },
+    "Choose the connections this key supports. Saving does not read or change the physical key.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请选择密钥支持的连接方式。保存不会读取或修改实体密钥。"
+          }
+        }
+      }
+    },
+    "Security key is in use. Try again when the operation finishes.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全密钥正在使用中，请在操作完成后重试。"
+          }
+        }
+      }
+    },
+    "NFC": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "NFC"
           }
         }
       }

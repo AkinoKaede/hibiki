@@ -1,6 +1,6 @@
 //! Public card registrations, committed atomically as one snapshot.
 use crate::{CardInfo, CardTransport, RegisteredCard};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -43,6 +43,20 @@ impl Registry {
             .find(|c| c.card.serial == serial)
             .context("card not registered")?;
         self.selected = Some(serial.into());
+        Ok(())
+    }
+    pub fn update(&mut self, serial: &str, name: String, usb: bool, nfc: bool) -> Result<()> {
+        let name = name.trim();
+        ensure!(!name.is_empty(), "enter a security key name");
+        ensure!(usb || nfc, "select at least one supported connection");
+        let entry = self
+            .cards
+            .iter_mut()
+            .find(|c| c.card.serial == serial)
+            .context("card not registered")?;
+        entry.name = name.into();
+        entry.usb_enabled = usb;
+        entry.nfc_enabled = nfc;
         Ok(())
     }
     pub fn remove(&mut self, serial: &str) {

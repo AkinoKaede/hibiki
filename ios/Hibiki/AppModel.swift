@@ -14,6 +14,7 @@ final class AppModel {
     var busy = false
     var prompts: [PinPrompt] = []
     var usbPresent = false
+    let cardInspection = CardInspection()
     var foreground = true
     var server: String
     var name: String
@@ -210,6 +211,7 @@ final class AppModel {
         // NFC and system sheets can make the scene inactive without backgrounding it.
         guard phase != .inactive else { return }
         foreground = phase == .active
+        if !foreground { cardInspection.setActive(false) }
         guard !disconnecting else { return }
         let previous = lifecycleTask
         lifecycleTask = Task {
@@ -222,6 +224,7 @@ final class AppModel {
         guard foreground, !disconnecting, let client else { return }
         do { try await client.start() } catch { show(error) }
         guard foreground, !disconnecting, self.client === client else { return }
+        cardInspection.setActive(true)
         pollingTask?.cancel()
         pollingTask = Task {
             while !Task.isCancelled {
@@ -236,9 +239,11 @@ final class AppModel {
         let present = await hardware.usbAvailable()
         guard self.client === client, !Task.isCancelled else { return }
         usbPresent = present
+        cardInspection.usbChanged(present)
         client.usbPresent(present: present)
     }
     func deactivate() async {
+        cardInspection.setActive(false)
         pollingTask?.cancel(); pollingTask = nil
         prompts.removeAll()
         nativeTasks.values.forEach { $0.cancel() }; nativeTasks.removeAll()
@@ -304,6 +309,24 @@ final class AppModel {
             return true
         } catch { show(error); return false }
     }
+    func showCardInspection() {
+        cardInspection.appear(usbPresent: usbPresent, active: foreground) { [weak self] transport in
+            guard let core = self?.client else { throw CancellationError() }
+            let cancellation = CardReadCancellation()
+            return try await withTaskCancellationHandler {
+                try Task.checkCancellation()
+                return try await core.inspectCard(transport: transport, cancellation: cancellation)
+            } onCancel: { cancellation.cancel() }
+        }
+    }
+    func updateCard(_ serial: String, name: String, usbSupported: Bool, nfcSupported: Bool) async throws {
+        guard !busy, let client else { throw CancellationError() }
+        busy = true
+        defer { busy = false }
+        try await client.updateCard(serial: serial, name: name, usbSupported: usbSupported, nfcSupported: nfcSupported)
+        card = client.selectedCard()
+        registeredCards = client.registeredCards()
+    }
     func selectCard(_ serial: String) async {
         await perform {
             try await self.client?.selectCard(serial: serial)
@@ -352,9 +375,11 @@ final class AppModel {
                 try core.respond(token: token, data: response, accepted: true)
             } catch {
                 if core.requestIsPending(token: token) {
-                    if case HardwareError.unavailable = error { show(error) }
-                    if case HardwareError.multipleCards = error { show(error) }
-                    try? core.respond(token: token, data: Data(), accepted: false)
+                    if !cardInspection.isReading {
+                        if case HardwareError.unavailable = error { show(error) }
+                        if case HardwareError.multipleCards = error { show(error) }
+                    }
+                    try? core.failNativeRequest(token: token, message: error.localizedDescription, canceled: CardHardware.isUserCancellation(error))
                 }
             }
         }

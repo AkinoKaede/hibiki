@@ -174,7 +174,7 @@ actionlint .github/workflows/build.yml
 3. For member invitations, compare **all 24 public-key words and the request ID**
    on an existing member before approving. The words are public identity data,
    not a recovery phrase. Pending requests remain until approved or invalidated; they have no time limit.
-4. Enable Password Entry and/or OpenPGP Card. Both start disabled. On the
+4. Enable PINEntry and/or OpenPGP Card. Both start disabled. On the
    requesting computer, configure the Hibiki adapters as described in the
    [desktop usage guide](../USAGE.md#4-connect-the-requesting-devices-agent).
    The app can approve members, share invitations, rotate PSKs, revoke
@@ -202,14 +202,28 @@ capability, not a claim that the other transport was physically tested.
 
 The Security Keys list stores one named entry per OpenPGP card serial, with its
 supported transports and a checkmark on the selected key. Details show public
-keys, fingerprints, and the transport used for registration. Re-registering the
-same serial updates its record. You can explicitly select another card or remove
-a registration; removing the selected card does not automatically select another.
+keys, fingerprints, keygrips, creation dates and OpenPGP identity details. Registration
+transport history is not displayed or tracked separately. Re-registering the same
+serial updates its record. **Edit** changes the saved name and the independent
+**USB** and **NFC** support switches without reading the physical key. A nonempty
+name and at least one enabled connection are required; Save commits them together,
+and Cancel discards edits. You can explicitly select another card or remove a
+registration; removing the selected card does not automatically select another.
 Only the selected card participates in discovery, and registrations cannot change
 during a card session. Public records and the selection are saved atomically.
 
+The reader at the top of Security Keys defaults to **USB**. Entering the page,
+inserting a USB key, or switching back to USB reads its public information once;
+**Refresh USB information** retries on demand. In **NFC** mode, tap **Read NFC
+information** to open the system scanner. NFC results are labeled as snapshots,
+not a persistent connection. Switch back to USB at any time. Leaving the page,
+switching modes or backgrounding cancels an unfinished read. USB removal clears
+its displayed information. Reads never request a PIN, register a key or change
+the selected service key; a busy card reports contention instead of interrupting
+an operation.
+
 **USB (including Lightning):** connect the key, then open the **+** menu in Security Keys
-and choose **Register USB security key**. Connect
+and choose **Register via USB**. Connect
 only one smart card recognized by the system. When USB support is enabled, the USB connection takes precedence even for a key registered over NFC;
 the card identity must still match. If USB is initially absent, you can insert the
 key while confirming the request or entering its PIN. The app checks USB again
@@ -221,7 +235,7 @@ When already connected, private operations proceed without
 an extra availability prompt. Otherwise, the app asks you to insert it and continue
 or cancel. The actual card and key are checked before sending the PIN.
 
-**NFC:** open the **+** menu and choose **Register NFC security key** and tap once to read public information;
+**NFC:** open the **+** menu and choose **Register via NFC** and tap once to read public information;
 registration does not require a PIN or change the key. Registered public data can
 answer discovery while the card service is enabled. Every private operation asks
 whether you want to use the key; there is no persistent readiness switch. Canceling
@@ -247,7 +261,9 @@ The key's firmware and configured OpenPGP algorithms determine what it can use.
 Password input still follows the desktop agent: it may be supplied by the iPhone,
 the requesting computer, or another enabled participant.
 The iPhone form collects the password once, with an X to cancel and an in-form
-Continue button to submit. Any confirmation required when setting a new passphrase
+Continue button to submit. Labels supplied by Pinentry have desktop mnemonic
+markers removed for iOS (for example, `_OK` appears as `OK`; `__` remains `_`).
+Settings shows the installed app version beside Hibiki in About. Any confirmation required when setting a new passphrase
 remains the requesting agent's responsibility; Hibiki does not report `PIN_REPEATED`.
 
 ## Lifecycle and storage
@@ -289,7 +305,7 @@ python3 tests/mobile.py
 python3 tests/mobile_tls.py
 xcodebuild -project ios/Hibiki.xcodeproj -scheme Hibiki \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
-  CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= test
+  ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- DEVELOPMENT_TEAM= test
 ```
 
 `tests/mobile.py` uses the production mobile core against a real server and GnuPG,
@@ -310,6 +326,10 @@ end-to-end app pairing and Keychain validation.
 Hardware release checklist (must run on an actual iPhone and YubiKey):
 
 - NFC entitlement and permission handling; USB detection and reader contention.
+- Inspect USB information on entry/insertion, cancel an NFC read and switch back
+  to USB, unplug during inspection, and confirm the selected registration is unchanged.
+- Edit names and USB/NFC support, relaunch to verify persistence, and confirm private
+  operations only use enabled connections; reject saving with both switches off.
 - Register, learn public keys, sign/verify, encrypt/decrypt using the installed key
   algorithms over both USB and NFC.
 - PIN from the phone, computer, and third device; cancellation and competing inputs.

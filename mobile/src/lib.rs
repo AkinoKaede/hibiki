@@ -3,6 +3,8 @@ mod broker;
 mod card;
 mod card_backend;
 mod curves;
+#[cfg(test)]
+mod inspection_tests;
 mod keycodec;
 mod pinentry;
 mod provider;
@@ -36,6 +38,22 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 uniffi::setup_scaffolding!();
+
+/// A request-scoped handle because Swift task cancellation is not forwarded by UniFFI.
+#[derive(uniffi::Object, Default)]
+pub struct CardReadCancellation {
+    stop: CancellationToken,
+}
+#[uniffi::export]
+impl CardReadCancellation {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    pub fn cancel(&self) {
+        self.stop.cancel();
+    }
+}
 
 #[uniffi::export]
 pub fn create_identity(name: String) -> MobileResult<Vec<u8>> {
@@ -308,6 +326,16 @@ impl MobileClient {
             .respond(&token, data, accepted)
             .map_err(Into::into)
     }
+    pub fn fail_native_request(
+        &self,
+        token: String,
+        message: String,
+        canceled: bool,
+    ) -> MobileResult<()> {
+        self.broker
+            .fail(&token, message, canceled)
+            .map_err(Into::into)
+    }
     pub fn set_services(&self, pinentry: bool, card: bool) {
         let old_pin = self.provider.pin_enabled.swap(pinentry, Ordering::AcqRel);
         let old_card = self.provider.card_enabled.swap(card, Ordering::AcqRel);
@@ -328,6 +356,47 @@ impl MobileClient {
     }
     pub fn selected_card(&self) -> Option<CardInfo> {
         self.provider.card.lock().unwrap().clone()
+    }
+    /// Read public information without registering or selecting a card.
+    pub async fn inspect_card(
+        &self,
+        transport: CardTransport,
+        cancellation: Arc<CardReadCancellation>,
+    ) -> MobileResult<CardInfo> {
+        let result: Result<CardInfo> = async {
+            if cancellation.stop.is_cancelled() {
+                return Err(broker::RequestCancelled.into());
+            }
+            let permit = self
+                .slots
+                .clone()
+                .try_acquire_owned()
+                .context("card is in use")?;
+            let stop = cancellation.stop.child_token();
+            let _guard = provider::CancelOnDrop(stop.clone());
+            let lifecycle_stop = self.stop.lock().unwrap().clone();
+            let broker = self.broker.clone();
+            let read_stop = stop.clone();
+            let mut read = tokio::task::spawn_blocking(move || {
+                // Keep the hardware slot until the blocking reader has actually unwound.
+                let _permit = permit;
+                card::inspect(broker, read_stop, transport)
+            });
+            let result = tokio::select! {
+                result = &mut read => result?,
+                _ = lifecycle_stop.cancelled() => {
+                    stop.cancel();
+                    read.await?
+                }
+            };
+            if stop.is_cancelled() || lifecycle_stop.is_cancelled() {
+                Err(broker::RequestCancelled.into())
+            } else {
+                result
+            }
+        }
+        .await;
+        result.map_err(Into::into)
     }
     pub async fn register_card(
         &self,
@@ -366,6 +435,30 @@ impl MobileClient {
     }
     pub fn registered_cards(&self) -> Vec<RegisteredCard> {
         self.registry.lock().unwrap().cards.clone()
+    }
+    pub async fn update_card(
+        &self,
+        serial: String,
+        name: String,
+        usb_supported: bool,
+        nfc_supported: bool,
+    ) -> MobileResult<()> {
+        let result: Result<()> = async {
+            let _permit = self
+                .slots
+                .clone()
+                .try_acquire_owned()
+                .context("card is in use")?;
+            let mut registry = self.registry.lock().unwrap().clone();
+            registry.update(&serial, name, usb_supported, nfc_supported)?;
+            self.save_registry(registry)?;
+            if let Ok(hub) = self.connected() {
+                let _ = announce(&hub).await;
+            }
+            Ok(())
+        }
+        .await;
+        result.map_err(Into::into)
     }
     pub async fn select_card(&self, serial: String) -> MobileResult<()> {
         let _permit = self

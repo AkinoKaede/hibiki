@@ -17,6 +17,10 @@ enum HardwareError: LocalizedError {
 
 /// Native card objects never leave this actor. Rust owns the OpenPGP protocol.
 actor CardHardware {
+    nonisolated static func isUserCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        return (error as? NFCReaderError)?.code == .readerSessionInvalidationErrorUserCanceled
+    }
     private var connection: String?
     private var operation: String?
     private var usb: TKSmartCard?

@@ -10,7 +10,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
-type Answer = Option<Zeroizing<Vec<u8>>>;
+#[derive(Debug, thiserror::Error)]
+#[error("request canceled")]
+pub struct RequestCancelled;
+
+type Answer = Result<Zeroizing<Vec<u8>>>;
 pub struct Broker {
     tx: mpsc::Sender<NativeEvent>,
     rx: tokio::sync::Mutex<mpsc::Receiver<NativeEvent>>,
@@ -38,13 +42,33 @@ impl Broker {
     }
     pub fn respond(&self, token: &str, bytes: Vec<u8>, accepted: bool) -> Result<()> {
         let bytes = Zeroizing::new(bytes);
+        self.answer(
+            token,
+            if accepted {
+                Ok(bytes)
+            } else {
+                Err(RequestCancelled.into())
+            },
+        )
+    }
+    pub fn fail(&self, token: &str, message: String, canceled: bool) -> Result<()> {
+        self.answer(
+            token,
+            Err(if canceled {
+                RequestCancelled.into()
+            } else {
+                anyhow::anyhow!(message)
+            }),
+        )
+    }
+    fn answer(&self, token: &str, answer: Answer) -> Result<()> {
         let tx = self
             .pending
             .lock()
             .unwrap()
             .remove(token)
             .ok_or_else(|| anyhow::anyhow!("request expired or already answered"))?;
-        tx.send(accepted.then_some(bytes))
+        tx.send(answer)
             .map_err(|_| anyhow::anyhow!("request expired"))
     }
     pub fn cancel_all(&self) {
@@ -60,7 +84,7 @@ impl Broker {
         timeout: Duration,
     ) -> Result<Zeroizing<Vec<u8>>> {
         if stop.is_cancelled() {
-            bail!("request canceled");
+            return Err(RequestCancelled.into());
         }
         let token = hibiki_lib::random_id();
         let (tx, rx) = oneshot::channel();
@@ -78,8 +102,8 @@ impl Broker {
         self.emit(make(token))?;
         tokio::select! {
             biased;
-            _ = stop.cancelled() => bail!("request canceled"),
-            result = tokio::time::timeout(timeout, rx) => result??.ok_or_else(|| anyhow::anyhow!("request canceled")),
+            _ = stop.cancelled() => Err(RequestCancelled.into()),
+            result = tokio::time::timeout(timeout, rx) => result??,
         }
     }
 }

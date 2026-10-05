@@ -2,11 +2,16 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MobileError {
+    #[error("request canceled")]
+    Cancelled,
     #[error("{message}")]
     Failed { message: String },
 }
 impl From<anyhow::Error> for MobileError {
     fn from(value: anyhow::Error) -> Self {
+        if value.is::<crate::broker::RequestCancelled>() {
+            return Self::Cancelled;
+        }
         Self::Failed {
             message: value.to_string(),
         }
