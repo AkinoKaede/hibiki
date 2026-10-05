@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 use anyhow::{Result, bail};
 use hibiki_lib::assuan::{self, AssuanResult, Line};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};

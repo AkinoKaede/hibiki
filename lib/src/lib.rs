@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Shared wire formats and pure verification logic. No sockets, processes or databases.
 pub mod assuan;
 pub mod channel;

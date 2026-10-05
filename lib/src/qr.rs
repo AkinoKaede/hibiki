@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Shared QR payload rendering. The quiet zone is never cropped.
 use crate::{Error, Result};
 use qrcode::{Color, EcLevel, QrCode};

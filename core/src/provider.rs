@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 use crate::{endpoint::Endpoint, storage::App};
 use anyhow::Result;
 use hibiki_lib::protocol::{CardTarget, ServiceKind};

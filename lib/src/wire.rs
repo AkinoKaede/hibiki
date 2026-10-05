@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Protobuf network codec. Do not use these bytes as a signing or hash preimage.
 //! Postcard storage, invitations and v1 signed objects remain independently stable.
 use crate::{Error, Result, assuan, e2ee, protocol::*};

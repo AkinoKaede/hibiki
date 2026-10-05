@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Pixel-perfect QR images, with an unscaled text fallback.
 use base64::{Engine, engine::general_purpose::STANDARD};
 use hibiki_lib::qr::Matrix;

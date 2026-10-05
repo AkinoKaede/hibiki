@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Terminal text is a presentation of typed management data, never a machine API.
 use crate::management::{ChannelRow, DeviceRow, PendingRow};
 use chrono::{Local, TimeZone};

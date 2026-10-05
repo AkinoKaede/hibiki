@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 // Standard mathematical parameters serialized for GnuPG keygrips.
 pub fn parameters(name: &str) -> Option<[&'static str; 5]> {
     match name {

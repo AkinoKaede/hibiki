@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Typed management shared by the CLI and TUI. Never registers as an executor.
 use crate::{
     diagnostics,

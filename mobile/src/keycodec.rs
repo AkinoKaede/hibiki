@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! GnuPG canonical public-key expressions and libgcrypt-compatible SHA-1 keygrips.
 use crate::types::CardKey;
 use anyhow::{Result, bail};

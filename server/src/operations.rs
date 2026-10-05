@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Durable metadata only. Service's channel authority locks exclude membership
 //! changes during execution claims, operation locks serialize state transitions,
 //! and its admission lock protects global queue limits. No Assuan plaintext is stored.

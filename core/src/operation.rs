@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Operation identities survive a transport reconnect, never a vanished caller.
 use crate::{
     session::Hub,

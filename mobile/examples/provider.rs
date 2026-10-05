@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! TEST ONLY: a line-oriented bridge for the isolated APDU emulator in tests/mobile.py.
 //! Never connect this diagnostic harness to real cards or production channels.
 use hibiki_mobile::{

@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! The agent owns the ciphertext. Only wrapping keys and validity live here.
 use crate::types::{CardInfo, CardKey};
 use anyhow::{Context, Result, bail};

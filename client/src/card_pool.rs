@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! One persistent scdaemon candidate per eligible device and adapter session.
 use crate::{
     daemon::Hub,

@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Cancel-safe Unix stdio. Tokio's blocking stdin worker cannot be interrupted
 //! when a remote session closes while the caller keeps its input pipe open.
 use std::{

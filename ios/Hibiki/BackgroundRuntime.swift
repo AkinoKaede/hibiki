@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 import UIKit
 
 /// UIKit calls expiration handlers on the main thread. Keep cancellation synchronous.

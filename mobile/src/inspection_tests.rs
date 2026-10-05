@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 use super::*;
 
 fn client(root: &std::path::Path) -> Arc<MobileClient> {

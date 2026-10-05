@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 import Foundation
 @preconcurrency import CryptoTokenKit
 @preconcurrency import CoreNFC

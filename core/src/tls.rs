@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Explicit opt-in certificate bypass. Handshake signatures remain verified.
 use rustls::{
     DigitallySignedStruct, Error, SignatureScheme,

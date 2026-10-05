@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Bounded Assuan framing shared by both stdio services. Payloads are never logged.
 use crate::{Error, Result, protocol::ServiceKind};
 use serde::{Deserialize, Serialize};

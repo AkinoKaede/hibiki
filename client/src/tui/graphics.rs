@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Startup-only capability query. All reads are bounded and finish before EventStream starts.
 use super::qr::CellSize;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};

@@ -6,6 +6,7 @@ resolver = "2"
 version = "0.4.2"
 edition = "2024"
 rust-version = "1.96"
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 hibiki-lib = { path = "lib" }

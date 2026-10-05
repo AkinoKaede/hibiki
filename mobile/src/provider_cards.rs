@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Per-session routing over public registrations. No persistent active card.
 use crate::{CardInfo, CardTransport, card::CardSession};
 use anyhow::{Context, Result, bail};

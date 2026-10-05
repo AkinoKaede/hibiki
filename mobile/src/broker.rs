@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! One-shot, bounded native requests. A dropped request invalidates its reply token.
 use crate::types::NativeEvent;
 use anyhow::{Result, bail};

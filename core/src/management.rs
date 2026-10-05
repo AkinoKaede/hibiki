@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Shared signed channel management. Presentation and approval UI live in clients.
 use crate::{network::Connection, storage::App};
 use anyhow::{Result, bail};

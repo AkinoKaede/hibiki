@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Native stdio children. No agent socket or user-owned process is used.
 use crate::{
     assuan_io::{read_line, write_line},

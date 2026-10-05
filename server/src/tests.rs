@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 use super::db::Database;
 use hibiki_lib::{channel::*, identity::Identity, invitation::*, now, random_id};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};

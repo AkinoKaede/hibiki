@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! A session handle. Dropping any handle cancels its actor and owned child process.
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{

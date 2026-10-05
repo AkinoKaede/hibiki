@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! GnuPG agent/findkey.c prompt_for_card formatting (STABLE-BRANCH-2-4).
 /// Human card number as displayed by GnuPG, retaining the full AID elsewhere.
 pub fn card_number(serial: &str) -> String {

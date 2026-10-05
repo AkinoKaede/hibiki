@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Typed hibiki/4 conversions. Persistent and signed formats use the separate Postcard codec.
 use super::{Wire, array32, invalid, pb, required, signature64};
 use crate::e2ee::Fragment;

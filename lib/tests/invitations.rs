@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 use hibiki_lib::{channel::*, identity::Identity, invitation::*, *};
 mod common;
 use common::*;

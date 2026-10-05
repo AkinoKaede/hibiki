@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 use hibiki_lib::{assuan::*, protocol::ServiceKind::*};
 #[test]
 fn binary_framing_and_full_inquiries() {

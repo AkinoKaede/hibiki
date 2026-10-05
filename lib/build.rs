@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 fn main() {
     println!("cargo:rerun-if-changed=proto");
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());

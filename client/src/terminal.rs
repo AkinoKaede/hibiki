@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Styles for human-readable output. Render through anstream so redirected
 //! output and NO_COLOR remain plain text; never use these in Assuan messages.
 use anstyle::{AnsiColor, Color, Style};

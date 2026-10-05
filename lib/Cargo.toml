@@ -3,6 +3,7 @@ name = "hibiki-lib"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
 
 [dependencies]
 qrcode = { version = "0.14", default-features = false }

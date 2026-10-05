@@ -85,3 +85,8 @@ Emulation does not replace hardware testing. Validate PIN retries, touch require
 
 For package builds, CI workflows, and release publishing, see
 [Build and publish releases](USAGE.md#build-and-publish-releases).
+
+## License
+
+Hibiki is licensed under the GNU Affero General Public License version 3 only
+(`AGPL-3.0-only`). See [LICENSE](LICENSE) for the full license text.

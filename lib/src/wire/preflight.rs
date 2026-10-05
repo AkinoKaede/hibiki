@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Validate framing and allocation bounds using borrowed bytes before decoding secrets.
 use super::{Result, invalid};
 struct Shape {

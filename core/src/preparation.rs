@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Card acquisition is distinct from both public metadata and private execution.
 use crate::{
     endpoint::Endpoint,

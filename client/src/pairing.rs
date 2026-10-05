@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-only
+ * Copyright (C) 2026 Kaede Akino
+ */
+
 //! Local, fail-closed presentation of a signed admission request.
 use crate::terminal::{HEADING, WARNING};
 use anstream::{
