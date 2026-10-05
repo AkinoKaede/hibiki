@@ -13,6 +13,10 @@ hibiki-core = { path = "core" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
 postcard = { version = "1", features = ["alloc"] }
 toml = "1.1"
 tokio = { version = "1", features = ["full", "test-util"] }

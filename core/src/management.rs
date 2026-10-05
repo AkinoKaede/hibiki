@@ -95,3 +95,78 @@ pub fn validate_pending(request: &JoinRequest, state: &VerifiedChannelState) -> 
     }
     Ok(())
 }
+
+/// Publish a self-signed name in each active channel. Rerunning is idempotent
+/// when a connection drops partway through a multi-channel update.
+pub async fn rename(
+    app: &App,
+    conn: &Connection,
+    name: String,
+) -> Result<hibiki_lib::identity::Identity> {
+    let identity = app.identity.renamed(name)?;
+    for proof in app.proofs()? {
+        let id = proof.genesis.body.id;
+        let state = refresh(app, conn, &id).await?.verify()?;
+        if let Ok(member) = state.member(&identity.device.id())
+            && member != &identity.device
+        {
+            append(
+                app,
+                conn,
+                &id,
+                MembershipAction::Rename {
+                    device: identity.device.clone(),
+                },
+                None,
+            )
+            .await?;
+        }
+    }
+    Ok(identity)
+}
+
+/// Revocation never retries across a changed approval tree after UI confirmation.
+pub async fn revoke(
+    app: &App,
+    conn: &Connection,
+    id: &str,
+    device: &str,
+    subtree: bool,
+    revision: u64,
+) -> Result<Vec<String>> {
+    let mut proof = refresh(app, conn, id).await?;
+    let state = proof.verify()?;
+    if state.sequence != revision {
+        bail!("channel changed; refresh and review revocation again");
+    }
+    let action = if subtree {
+        MembershipAction::RevokeSubtree {
+            device_id: device.into(),
+        }
+    } else {
+        MembershipAction::Revoke {
+            device_id: device.into(),
+        }
+    };
+    let affected = if subtree {
+        state.revocation_subtree(device)
+    } else {
+        vec![device.into()]
+    };
+    let event = MembershipEvent::create(&app.identity, &state, action)?;
+    proof.events.push(event.clone());
+    proof.verify()?;
+    match conn
+        .request(Control::Append {
+            event,
+            verifier: None,
+        })
+        .await?
+    {
+        Reply::Proof(proof) => {
+            app.merge(proof)?;
+            Ok(affected)
+        }
+        _ => bail!("invalid revocation response"),
+    }
+}

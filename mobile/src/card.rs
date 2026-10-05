@@ -64,6 +64,85 @@ pub fn inspect(
         OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
     snapshot(&mut card.transaction()?, transport)
 }
+/// Cardholder name is optional public OpenPGP data (5B), not a key UID.
+pub fn inspect_named(
+    broker: Arc<Broker>,
+    stop: CancellationToken,
+    transport: CardTransport,
+) -> Result<(CardInfo, String)> {
+    let backend = NativeCard::open(broker, stop, transport.clone())?;
+    let mut card =
+        OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
+    let mut tx = card.transaction()?;
+    let info = snapshot(&mut tx, transport)?;
+    let name = tx
+        .cardholder_related_data()
+        .ok()
+        .and_then(|data| {
+            data.name()
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+        })
+        .unwrap_or_default();
+    Ok((info, cardholder_name(&name)))
+}
+fn cardholder_name(raw: &str) -> String {
+    // OpenPGP encodes surname<<given names with '<' in place of spaces.
+    let raw: String = raw.chars().filter(|c| !c.is_control()).collect();
+    let formatted = if let Some((surname, given)) = raw.split_once("<<") {
+        format!("{} {}", given.replace('<', " "), surname.replace('<', " "))
+    } else {
+        raw.replace('<', " ")
+    };
+    formatted.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Read live USB prompt metadata without verifying a PIN. NFC is deliberately
+/// not opened before PIN entry and must not display stale counters or retries.
+pub fn pin_description(
+    broker: Arc<Broker>,
+    stop: CancellationToken,
+    info: &CardInfo,
+    key: &CardKey,
+    signing: bool,
+) -> Result<String> {
+    let mut description = format!(
+        "Please enter the PIN\n\nNumber: {}",
+        hibiki_lib::card_prompt::card_number(&info.serial)
+    );
+    if info.transport == CardTransport::Usb {
+        let backend = NativeCard::open(broker, stop, CardTransport::Usb)?;
+        let mut card =
+            OpenPGP::new(Box::new(backend) as Box<dyn card_backend::CardBackend + Send + Sync>)?;
+        let mut tx = card.transaction()?;
+        let current = snapshot(&mut tx, CardTransport::Usb)?;
+        if current.serial != info.serial
+            || !current.keys.iter().any(|k| {
+                k.slot == key.slot && k.keygrip == key.keygrip && k.fingerprint == key.fingerprint
+            })
+        {
+            bail!("different card or key; operation canceled");
+        }
+        if let Ok(holder) = tx.cardholder_related_data() {
+            let name = holder
+                .name()
+                .map(|n| cardholder_name(&String::from_utf8_lossy(n)))
+                .unwrap_or_default();
+            description.push_str(&format!("\nHolder: {name}"));
+        }
+        if signing
+            && key.slot == 1
+            && let Ok(counter) = tx.security_support_template()
+        {
+            description.push_str(&format!("\nCounter: {}", counter.signature_count()));
+        }
+        if let Ok(status) = tx.application_related_data()?.pw_status_bytes()
+            && status.err_count_pw1() < 3
+        {
+            description.push_str(&format!("\nRemaining attempts: {}", status.err_count_pw1()));
+        }
+    }
+    Ok(description)
+}
 fn ok_data(data: &[u8]) -> AssuanResult {
     let mut lines = assuan::data_lines(data);
     lines.push("OK".into());
@@ -463,5 +542,15 @@ pub fn operation_error(error: &anyhow::Error) -> AssuanResult {
             AssuanResult::error(130, "PIN blocked")
         }
         _ => AssuanResult::error(assuan::GENERAL, "card operation failed or canceled"),
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    #[test]
+    fn cardholder_names_are_readable_and_optional() {
+        assert_eq!(super::cardholder_name("DOE<<JANE<ANN"), "JANE ANN DOE");
+        assert_eq!(super::cardholder_name("小明"), "小明");
+        assert_eq!(super::cardholder_name("\0\r\n"), "");
     }
 }

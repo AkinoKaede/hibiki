@@ -70,6 +70,19 @@ async fn main() -> anyhow::Result<()> {
 async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
     let text = |name: &str| v[name].as_str().unwrap_or_default().to_string();
     match text("action").as_str() {
+        "ping" => {
+            let report = client
+                .ping_device(
+                    text("channel"),
+                    text("device"),
+                    4,
+                    hibiki_mobile::PingCancellation::new(),
+                )
+                .await?;
+            emit(
+                json!({"kind":"ping","setup_micros":report.setup_micros,"round_trips_micros":report.round_trips_micros}),
+            );
+        }
         "policy" => {
             emit(json!({"kind":"policy","allow_creation":client.allows_channel_creation().await?}));
         }
@@ -130,14 +143,16 @@ async fn command(client: Arc<MobileClient>, v: Value) -> anyhow::Result<()> {
             let card = client
                 .register_card(
                     transport,
-                    "Test key".into(),
+                    v["name"].as_str().unwrap_or("Test key").into(),
                     v["usb_supported"].as_bool().unwrap_or(true),
                     v["nfc_supported"].as_bool().unwrap_or(true),
                 )
                 .await?;
             client.usb_present(v["present"].as_bool().unwrap_or(false));
             client.set_services(true, true);
-            emit(json!({"kind":"registered","serial":card.serial,"keys":card.keys.len()}));
+            emit(
+                json!({"kind":"registered","serial":card.serial,"keys":card.keys.len(),"name":client.registered_cards().iter().find(|c|c.card.serial == card.serial).map(|c|c.name.clone())}),
+            );
         }
         "reply" => {
             let _ = client.respond(

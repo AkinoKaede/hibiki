@@ -85,6 +85,21 @@ impl Identity {
         })
     }
 
+    /// Re-sign the display name without changing either key or the stable ID.
+    pub fn renamed(&self, name: String) -> Result<Self> {
+        let mut device = self.device.clone();
+        device.name = name;
+        device.binding = self.sign(
+            "device/v1",
+            &(&device.name, device.signing_key, device.noise_key),
+        )?;
+        device.verify()?;
+        Ok(Self {
+            signing_secret: self.signing_secret,
+            noise_secret: self.noise_secret,
+            device,
+        })
+    }
     pub fn validate(&self) -> Result<()> {
         self.device.verify()?;
         if SigningKey::from_bytes(&self.signing_secret)

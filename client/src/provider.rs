@@ -22,6 +22,50 @@ impl hibiki_core::provider::Provider for NativeProvider {
     fn enabled(&self, service: ServiceKind) -> bool {
         self.0.service(service).enabled
     }
+    fn prepare<'a>(
+        &'a self,
+        app: Arc<App>,
+        endpoint: &'a mut Endpoint,
+        target: hibiki_lib::protocol::CardTarget,
+        stop: CancellationToken,
+        context: hibiki_core::provider::ProviderContext,
+    ) -> hibiki_core::provider::PrepareFuture<'a> {
+        Box::pin(async move {
+            let prompt_stop = stop.child_token();
+            let _guard = PromptGuard(prompt_stop.clone());
+            let mut prompt = None;
+            loop {
+                if stop.is_cancelled() {
+                    bail!("card preparation canceled");
+                }
+                if let Some(serial) = hibiki_core::preparation::probe(endpoint, &target).await? {
+                    return Ok(serial);
+                }
+                if prompt.is_none() {
+                    let app = app.clone();
+                    let target = target.clone();
+                    // Closing one confirmed dialog must not cancel the next prompt.
+                    let token = prompt_stop.child_token();
+                    let local = context.local.clone();
+                    prompt = Some(tokio::spawn(async move {
+                        insertion_prompt(app, target, token, local).await
+                    }));
+                }
+                tokio::select! {
+                    _=stop.cancelled()=>bail!("card preparation canceled"),
+                    result=prompt.as_mut().unwrap()=>{
+                        match result {
+                            Ok(Ok(true)) => { prompt = None; },
+                            Ok(Ok(false)) => bail!("card preparation canceled"),
+                            // A missing graphical pinentry must not prevent card detection.
+                            _ => { let token = prompt_stop.clone(); prompt = Some(tokio::spawn(async move { { token.cancelled().await; Ok(false) } })); }
+                        }
+                    },
+                    _=tokio::time::sleep(Duration::from_millis(250))=>{},
+                }
+            }
+        })
+    }
     fn open(
         &self,
         app: Arc<App>,
@@ -522,5 +566,140 @@ mod tests {
             ));
         }
         ep.close().await;
+    }
+}
+
+struct PromptGuard(CancellationToken);
+impl Drop for PromptGuard {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+async fn insertion_prompt(
+    app: Arc<App>,
+    target: hibiki_lib::protocol::CardTarget,
+    stop: CancellationToken,
+    local: Option<LocalContext>,
+) -> Result<bool> {
+    // This UI belongs to the card service, regardless of exported password service.
+    let mut prompt_app = (*app).clone();
+    prompt_app.config.pinentry.enabled = true;
+    let mut ep = open(
+        Arc::new(prompt_app),
+        ServiceKind::Pinentry,
+        Arc::new(Semaphore::new(1)),
+        stop,
+        local,
+    )
+    .await?;
+    let description = hibiki_lib::card_prompt::description(target.serial.as_deref(), None)
+        .replace('%', "%25")
+        .replace('\r', "%0D")
+        .replace('\n', "%0A");
+    for command in [
+        "SETTITLE GnuPG".to_owned(),
+        format!("SETDESC {description}"),
+        "SETOK _OK".into(),
+        "SETCANCEL _Cancel".into(),
+    ] {
+        if !hibiki_core::preparation::query(&mut ep, command.as_str().into())
+            .await?
+            .success()
+        {
+            bail!("insertion prompt setup failed");
+        }
+    }
+    let result = hibiki_core::preparation::query(&mut ep, "CONFIRM".into()).await?;
+    ep.close().await;
+    Ok(result.success())
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+    use hibiki_core::provider::{Provider, ProviderContext};
+    use hibiki_lib::{identity::Identity, paths::AppPaths, protocol::CardTarget};
+    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt};
+    #[tokio::test]
+    async fn insertion_prompt_works_with_password_service_disabled_and_requires_matching_card() {
+        let root = tempfile::tempdir().unwrap();
+        let program = root.path().join("test-native");
+        let card = root.path().join("inserted");
+        let prompt = root.path().join("prompted");
+        let script = format!(
+            r#"#!/bin/sh
+printf 'OK\n'
+while IFS= read -r line; do
+ case "$line" in
+ SERIALNO*) if [ -f '{card}' ]; then printf 'S SERIALNO '; cat '{card}'; printf '\nOK\n'; else printf 'ERR 108 no-card\n'; fi ;;
+ CONFIRM*) printf 'confirmed\n' >> '{prompt}'; printf 'OK\n' ;;
+ *) printf 'OK\n' ;;
+ esac
+done
+"#,
+            card = card.display(),
+            prompt = prompt.display()
+        );
+        std::fs::write(&program, script).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let app = Arc::new(App {
+            config: crate::storage::Config {
+                scdaemon: crate::storage::ServiceConfig {
+                    enabled: true,
+                    program: Some(program.clone()),
+                },
+                pinentry: crate::storage::ServiceConfig {
+                    enabled: false,
+                    program: Some(program),
+                },
+                ..Default::default()
+            },
+            config_file: root.path().join("client.toml"),
+            paths: AppPaths::resolve(&BTreeMap::new(), root.path(), root.path(), unsafe {
+                libc::geteuid()
+            }),
+            identity: Arc::new(Identity::generate("test".into()).unwrap()),
+        });
+        let provider = NativeProvider(app.config.clone());
+        let mut ep = open(
+            app.clone(),
+            ServiceKind::Scdaemon,
+            Arc::new(Semaphore::new(1)),
+            CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let stop = CancellationToken::new();
+        let context = ProviderContext {
+            local: None,
+            channel: String::new(),
+            peer: String::new(),
+            session: String::new(),
+        };
+        let prepare = provider.prepare(
+            app,
+            &mut ep,
+            CardTarget {
+                serial: Some("AABB".into()),
+                key: None,
+            },
+            stop,
+            context,
+        );
+        tokio::pin!(prepare);
+        tokio::select! { result=&mut prepare=>panic!("confirmation won without a card: {result:?}"), _=tokio::time::sleep(Duration::from_millis(150))=>{} }
+        assert!(prompt.exists());
+        assert!(std::fs::read_to_string(&prompt).unwrap().lines().count() > 1);
+        std::fs::write(&card, "CCDD").unwrap();
+        tokio::select! { result=&mut prepare=>panic!("wrong card won: {result:?}"), _=tokio::time::sleep(Duration::from_millis(150))=>{} }
+        std::fs::write(&card, "AABB").unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), &mut prepare)
+                .await
+                .unwrap()
+                .unwrap(),
+            "AABB"
+        );
     }
 }

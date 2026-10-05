@@ -4,7 +4,7 @@ use crate::{
     provider::{LocalContext, Provider, ProviderContext},
     storage::App,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use hibiki_lib::{
     channel::MembershipProof,
     decode,
@@ -48,11 +48,35 @@ pub struct PeerSession {
     id: String,
     rx: mpsc::Receiver<Packet>,
     pub stop: CancellationToken,
+    sent_messages: std::sync::atomic::AtomicU64,
+    opened_at: std::time::Instant,
 }
 impl Drop for PeerSession {
     fn drop(&mut self) {
+        tracing::debug!(
+            messages = self
+                .sent_messages
+                .load(std::sync::atomic::Ordering::Relaxed),
+            elapsed_ms = self.opened_at.elapsed().as_millis(),
+            "session closed"
+        );
         self.hub.sessions.lock().unwrap().remove(&self.id);
         self.hub.sessions_changed.notify_waiters();
+        // A canceled handshake may have already opened a remote child. An empty
+        // authenticated relay frame closes only this exact peer/channel/session.
+        if self.peer != self.hub.app.identity.device.id() && !self.connection.closed.is_cancelled()
+        {
+            let connection = self.connection.clone();
+            let message = Envelope::Relay {
+                channel: self.channel.clone(),
+                peer: self.peer.clone(),
+                session: self.id.clone(),
+                data: Vec::new(),
+            };
+            tokio::spawn(async move {
+                let _ = connection.send(message).await;
+            });
+        }
     }
 }
 impl PeerSession {
@@ -81,6 +105,21 @@ impl PeerSession {
         transport: &mut Transport,
         message: &PrivateMessage,
     ) -> Result<()> {
+        let kind = match message {
+            PrivateMessage::Input(SessionInput::Command { .. }) => "query",
+            PrivateMessage::Execute { .. } => "execute",
+            PrivateMessage::Input(SessionInput::PrepareCard { .. }) => "prepare",
+            PrivateMessage::Input(SessionInput::CancelPreparation { .. }) => "cancel_preparation",
+            PrivateMessage::OutputBatch { .. } => "result",
+            PrivateMessage::OpenService { .. } => "open",
+            PrivateMessage::ServiceOpened { .. } => "opened",
+            _ => "control",
+        };
+        let sequence = self
+            .sent_messages
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        tracing::trace!(kind, sequence, "session message sent");
         let plain = encode_secret(message)?;
         for packet in transport.encrypt(&plain)? {
             self.send(packet).await?;
@@ -170,6 +209,8 @@ impl Hub {
             id,
             rx,
             stop,
+            sent_messages: std::sync::atomic::AtomicU64::new(0),
+            opened_at: std::time::Instant::now(),
         })
     }
     pub async fn refresh(&self, channel: &str) -> Result<MembershipProof> {
@@ -280,7 +321,7 @@ impl Hub {
     }
     async fn check_command(
         &self,
-        session: &PeerSession,
+        _session: &PeerSession,
         input: &SessionInput,
         operation: Option<&str>,
         service: ServiceKind,
@@ -289,35 +330,30 @@ impl Hub {
         if !self.provider.enabled(service) {
             bail!("service disabled");
         }
-        if matches!(input, SessionInput::Command { .. })
-            && let Some(id) = operation
-        {
-            let Reply::Operation(op) = session
-                .connection
-                .request(Control::OperationStatus { id: id.into() })
-                .await?
-            else {
-                bail!("invalid operation status");
-            };
-            if op.state != OperationState::Pending {
-                bail!("operation ended before execution");
-            }
-        }
         Ok(())
     }
     pub async fn peers(&self, channel: &str) -> Result<Vec<String>> {
-        let state = self.refresh(channel).await?.verify()?;
-        state.member(&self.app.identity.device.id())?;
-        let Reply::Peers(mut peers) = self
+        let Reply::ChannelSnapshot {
+            proof,
+            online: mut peers,
+            revoked,
+        } = self
             .connection()
-            .request(Control::Peers {
+            .request(Control::ChannelSnapshot {
                 channel: channel.into(),
             })
             .await?
         else {
-            bail!("invalid peer response");
+            bail!("invalid channel snapshot");
         };
-        peers.retain(|p| state.member(p).is_ok() && *p != self.app.identity.device.id());
+        if proof.genesis.body.id != channel {
+            bail!("snapshot channel mismatch");
+        }
+        let state = self.app.merge(proof)?.verify()?;
+        state.member(&self.app.identity.device.id())?;
+        peers.retain(|p| {
+            state.member(p).is_ok() && !revoked.contains(p) && *p != self.app.identity.device.id()
+        });
         Ok(peers)
     }
 
@@ -353,6 +389,103 @@ impl Hub {
         peers.sort();
         Ok(peers)
     }
+    /// Diagnostic session: no card lease, provider process, or password prompt.
+    pub async fn ping(
+        self: &Arc<Self>,
+        channel: &str,
+        peer: &str,
+        count: u16,
+    ) -> Result<PingReport> {
+        if !(1..=20).contains(&count) {
+            bail!("ping count must be 1..20");
+        }
+        let start = std::time::Instant::now();
+        self.refresh(channel).await?;
+        let state = self.app.proof(channel)?.verify()?;
+        let full_id =
+            hibiki_lib::selection::resolve_id(peer, state.members().keys().map(String::as_str))?;
+        let peer = full_id.as_str();
+        self.authorized(channel, peer)?;
+        if peer == self.app.identity.device.id() {
+            bail!("choose another device");
+        }
+        let mut session = self.register(channel.into(), peer.into(), random_id())?;
+        let mut transport = tokio::time::timeout(Duration::from_secs(15), async {
+            let proof = self.app.proof(channel)?;
+            let expected = proof.verify()?.member(peer)?.noise_key;
+            let mut hs = Handshake::new(
+                &self.app.identity,
+                channel,
+                &self.app.identity.device.id(),
+                peer,
+                &session.id,
+                expected,
+                true,
+            )?;
+            session.send(hs.write()?).await?;
+            hs.read(&session.packet().await?)?;
+            session.send(hs.write()?).await?;
+            let mut transport = hs.finish()?;
+            session
+                .send_private(&mut transport, &PrivateMessage::PingOpen { proof })
+                .await?;
+            let PrivateMessage::PingOpened { proof } =
+                session.receive_private(&mut transport).await?
+            else {
+                bail!("ping handshake failed");
+            };
+            if proof.genesis.body.id != channel {
+                bail!("ping channel mismatch");
+            }
+            self.app.merge(proof)?;
+            self.authorized(channel, peer)?;
+            Ok::<_, anyhow::Error>(transport)
+        })
+        .await
+        .context("ping connection timed out")??;
+        let mut report = PingReport {
+            peer: peer.into(),
+            setup_micros: start.elapsed().as_micros() as u64,
+            round_trips_micros: Vec::new(),
+        };
+        for _ in 0..count {
+            let nonce = random_id();
+            let start = std::time::Instant::now();
+            session
+                .send_private(
+                    &mut transport,
+                    &PrivateMessage::Ping {
+                        nonce: nonce.clone(),
+                    },
+                )
+                .await?;
+            let pong = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match session.receive_private(&mut transport).await? {
+                        PrivateMessage::Pong { nonce: received } if received == nonce => {
+                            return Ok::<_, anyhow::Error>(());
+                        }
+                        PrivateMessage::Pong { .. } => {}
+                        _ => bail!("unexpected ping response"),
+                    }
+                }
+            })
+            .await;
+            match pong {
+                Ok(result) => {
+                    result?;
+                    report
+                        .round_trips_micros
+                        .push(Some(start.elapsed().as_micros() as u64));
+                }
+                Err(_) => report.round_trips_micros.push(None),
+            }
+        }
+        session
+            .send_private(&mut transport, &PrivateMessage::Close)
+            .await?;
+        Ok(report)
+    }
     pub async fn open(
         self: &Arc<Self>,
         channel: &str,
@@ -371,13 +504,26 @@ impl Hub {
                     self.card_slot.clone(),
                     cancel,
                     ProviderContext {
-                        local: Some(local),
+                        local: Some(local.clone()),
                         channel: channel.into(),
                         peer: peer.into(),
                         session: random_id(),
                     },
                 )
                 .await?;
+            if service == ServiceKind::Scdaemon {
+                endpoint = crate::preparation::wrap(
+                    endpoint,
+                    self.provider.clone(),
+                    self.app.clone(),
+                    ProviderContext {
+                        local: Some(local),
+                        channel: channel.into(),
+                        peer: peer.into(),
+                        session: random_id(),
+                    },
+                );
+            }
             endpoint.peer = peer.into();
             return Ok(Some(endpoint));
         }
@@ -399,45 +545,23 @@ impl Hub {
             session.send(hs.write()?).await?;
             let mut transport = hs.finish()?;
             session
-                .send_private(&mut transport, &PrivateMessage::Trust(proof))
+                .send_private(
+                    &mut transport,
+                    &PrivateMessage::OpenService { proof, service },
+                )
                 .await?;
-            let PrivateMessage::Trust(proof) = session.receive_private(&mut transport).await?
+            let PrivateMessage::ServiceOpened { proof, enabled } =
+                session.receive_private(&mut transport).await?
             else {
-                bail!("trust proof required");
+                bail!("service open response required");
             };
             if proof.genesis.body.id != channel {
                 bail!("trust channel mismatch");
             }
-            let proof = self.app.merge(proof)?;
+            self.app.merge(proof)?;
             self.authorized(channel, peer)?;
-            session
-                .send_private(&mut transport, &PrivateMessage::Trust(proof))
-                .await?;
-            session
-                .send_private(&mut transport, &PrivateMessage::Discover)
-                .await?;
-            let PrivateMessage::Capabilities { scdaemon, pinentry } =
-                session.receive_private(&mut transport).await?
-            else {
-                bail!("missing capabilities");
-            };
-            if !match service {
-                ServiceKind::Scdaemon => scdaemon,
-                ServiceKind::Pinentry => pinentry,
-            } {
-                session
-                    .send_private(&mut transport, &PrivateMessage::Close)
-                    .await?;
+            if !enabled {
                 return Ok(None);
-            }
-            session
-                .send_private(&mut transport, &PrivateMessage::Open { service })
-                .await?;
-            if !matches!(
-                session.receive_private(&mut transport).await?,
-                PrivateMessage::Opened
-            ) {
-                bail!("service unavailable or busy");
             }
             Ok::<_, anyhow::Error>(Some(transport))
         };
@@ -462,19 +586,26 @@ impl Hub {
                     tokio::select! {
                         input=inputs.recv()=>match input {
                             Some(input)=>{
-                                if matches!(input, SessionInput::Command { .. }) {
-                                    let operation = binding.lock().unwrap().clone();
-                                    if let Some(id) = operation {
-                                        hub.bind_session(&session.id, Some(id.clone()));
-                                        session.send_private(&mut transport, &PrivateMessage::BeginOperation { id }).await?;
-                                        if !matches!(session.receive_private(&mut transport).await?, PrivateMessage::OperationBegun) { bail!("operation claim rejected"); }
-                                    }
+                                let operation = if matches!(input, SessionInput::Command { .. } | SessionInput::Execute { .. }) { binding.lock().unwrap().clone() } else { None };
+                                if let Some(id) = operation {
+                                    hub.bind_session(&session.id, Some(id.clone()));
+                                    session.send_private(&mut transport, &PrivateMessage::Execute { id, input }).await?;
+                                } else {
+                                    session.send_private(&mut transport,&PrivateMessage::Input(input)).await?;
                                 }
-                                session.send_private(&mut transport,&PrivateMessage::Input(input)).await?;
                             },
                             None=>break,
                         },
                         output=session.receive_private(&mut transport)=>match output? {
+                            PrivateMessage::OutputBatch { request, lines } => {
+                                hub.authorized(&session.channel,&session.peer)?;
+                                if lines.len() > hibiki_lib::assuan::MAX_LINES || lines.iter().map(|l|l.len()).sum::<usize>() > hibiki_lib::assuan::MAX_DATA { bail!("response limit"); }
+                                for line in lines {
+                                    hibiki_lib::assuan::framing(&line)?;
+                                    if matches!(hibiki_lib::assuan::parse_response(&line)?, hibiki_lib::assuan::Response::Ok | hibiki_lib::assuan::Response::Err(_)) { hub.bind_session(&session.id, None); }
+                                    outputs.send(SessionOutput::Line { request, line }).await?;
+                                }
+                            },
                             PrivateMessage::Output(output)=>{
                                 hub.authorized(&session.channel,&session.peer)?;
                                 if let SessionOutput::Line { line, .. } = &output
@@ -511,7 +642,7 @@ impl Hub {
     }
     async fn incoming(self: Arc<Self>, mut session: PeerSession) -> Result<()> {
         let setup = async {
-            let proof = self.refresh(&session.channel).await?;
+            let proof = self.app.proof(&session.channel)?;
             self.authorized(&session.channel, &session.peer)?;
             let expected = proof.verify()?.member(&session.peer)?.noise_key;
             let mut hs = Handshake::new(
@@ -527,81 +658,62 @@ impl Hub {
             session.send(hs.write()?).await?;
             hs.read(&session.packet().await?)?;
             let mut transport = hs.finish()?;
-            let PrivateMessage::Trust(proof) = session.receive_private(&mut transport).await?
-            else {
-                bail!("trust proof required");
-            };
-            if proof.genesis.body.id != session.channel {
-                bail!("trust channel mismatch");
-            }
-            let proof = self.app.merge(proof)?;
-            self.authorized(&session.channel, &session.peer)?;
-            session
-                .send_private(&mut transport, &PrivateMessage::Trust(proof))
-                .await?;
-            let PrivateMessage::Trust(proof) = session.receive_private(&mut transport).await?
-            else {
-                bail!("trust acknowledgement required");
+            let (proof, service) = match session.receive_private(&mut transport).await? {
+                PrivateMessage::OpenService { proof, service } => (proof, Some(service)),
+                PrivateMessage::PingOpen { proof } => (proof, None),
+                _ => bail!("service or ping open required"),
             };
             if proof.genesis.body.id != session.channel {
                 bail!("trust channel mismatch");
             }
             self.app.merge(proof)?;
             self.authorized(&session.channel, &session.peer)?;
-            if !matches!(
-                session.receive_private(&mut transport).await?,
-                PrivateMessage::Discover
-            ) {
-                bail!("service discovery required");
-            }
-            session
-                .send_private(
-                    &mut transport,
-                    &PrivateMessage::Capabilities {
-                        scdaemon: self.provider.enabled(ServiceKind::Scdaemon),
-                        pinentry: self.provider.enabled(ServiceKind::Pinentry),
-                    },
-                )
-                .await?;
-            let PrivateMessage::Open { service } = session.receive_private(&mut transport).await?
-            else {
-                bail!("service open required");
-            };
             Ok::<_, anyhow::Error>((transport, service))
         };
         let (mut transport, service) =
             tokio::time::timeout(Duration::from_secs(25), setup).await??;
-        if !self.provider.enabled(service) {
+        let Some(service) = service else {
             session
-                .send_private(&mut transport, &PrivateMessage::Failure)
+                .send_private(
+                    &mut transport,
+                    &PrivateMessage::PingOpened {
+                        proof: self.app.proof(&session.channel)?,
+                    },
+                )
                 .await?;
-            return Ok(());
-        }
-        session
-            .send_private(&mut transport, &PrivateMessage::Opened)
-            .await?;
-        // Do not acquire a card or launch a UI for abandoned Open handshakes.
-        let mut first = tokio::time::timeout(
-            Duration::from_secs(20),
-            session.receive_private(&mut transport),
-        )
-        .await??;
-        let mut operation = None;
-        if let PrivateMessage::BeginOperation { id } = first {
-            self.claim(&session, &id, service).await?;
-            operation = Some(id);
-            session
-                .send_private(&mut transport, &PrivateMessage::OperationBegun)
-                .await?;
-            first = session.receive_private(&mut transport).await?;
-        }
-        let PrivateMessage::Input(first @ SessionInput::Command { request: 1, .. }) = first else {
-            session
-                .send_private(&mut transport, &PrivateMessage::Closed)
-                .await?;
+            for _ in 0..21 {
+                self.authorized(&session.channel, &session.peer)?;
+                match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    session.receive_private(&mut transport),
+                )
+                .await??
+                {
+                    PrivateMessage::Ping { nonce } if hibiki_lib::channel::valid_id(&nonce) => {
+                        session
+                            .send_private(&mut transport, &PrivateMessage::Pong { nonce })
+                            .await?
+                    }
+                    PrivateMessage::Close => return Ok(()),
+                    _ => bail!("invalid ping request"),
+                }
+            }
             return Ok(());
         };
-        self.authorized(&session.channel, &session.peer)?;
+        let enabled = self.provider.enabled(service);
+        if !enabled {
+            session
+                .send_private(
+                    &mut transport,
+                    &PrivateMessage::ServiceOpened {
+                        proof: self.app.proof(&session.channel)?,
+                        enabled: false,
+                    },
+                )
+                .await?;
+            return Ok(());
+        }
+        let mut operation = None;
         let endpoint = self
             .provider
             .open(
@@ -626,25 +738,73 @@ impl Hub {
                 return Ok(());
             }
         };
+        if service == ServiceKind::Scdaemon {
+            endpoint = crate::preparation::wrap(
+                endpoint,
+                self.provider.clone(),
+                self.app.clone(),
+                ProviderContext {
+                    local: None,
+                    channel: session.channel.clone(),
+                    peer: session.peer.clone(),
+                    session: session.id.clone(),
+                },
+            );
+        }
+        session
+            .send_private(
+                &mut transport,
+                &PrivateMessage::ServiceOpened {
+                    proof: self.app.proof(&session.channel)?,
+                    enabled: true,
+                },
+            )
+            .await?;
+        let (monitor_tx, mut monitor_rx) = tokio::sync::watch::channel::<Option<String>>(None);
+        let monitor_stop = session.stop.child_token();
+        let monitor_token = monitor_stop.clone();
+        let connection = session.connection.clone();
+        let session_cancel = session.stop.clone();
+        let monitor = tokio::spawn(async move {
+            loop {
+                tokio::select! { _=monitor_token.cancelled()=>break, _=tokio::time::sleep(Duration::from_millis(500))=>{} }
+                let id = monitor_rx.borrow_and_update().clone();
+                if let Some(id) = id {
+                    let result = tokio::select! {
+                        _=monitor_token.cancelled()=>break,
+                        _=monitor_rx.changed()=>continue,
+                        result=connection.request(Control::OperationStatus { id: id.clone() })=>result,
+                    };
+                    if monitor_rx.borrow().as_ref() == Some(&id)
+                        && !matches!(
+                            result,
+                            Ok(Reply::Operation(Operation {
+                                state: OperationState::Pending,
+                                ..
+                            }))
+                        )
+                    {
+                        session_cancel.cancel();
+                        break;
+                    }
+                }
+            }
+        });
         let result=async {
-            self.check_command(&session, &first, operation.as_deref(), service).await?;
-            endpoint.tx.send(first).await?;
+            let mut collected = Vec::new();
             let session_stop=session.stop.clone();
-            let mut tick = tokio::time::interval(Duration::from_millis(500));
             loop {
                 tokio::select! {
                     _=session_stop.cancelled()=>bail!("operation canceled"),
-                    _=tick.tick(), if operation.is_some()=>{
-                        if !self.provider.enabled(service) { bail!("service disabled"); }
-                        let Reply::Operation(op)=session.connection.request(Control::OperationStatus { id: operation.clone().unwrap() }).await? else { bail!("invalid operation status"); };
-                        if op.state != OperationState::Pending { bail!("operation ended"); }
-                    },
                     message=session.receive_private(&mut transport)=>match message? {
-                        PrivateMessage::BeginOperation { id }=>{
-                            if operation.is_some() { bail!("operation already active"); }
+                        PrivateMessage::Execute { id, input }=>{
+                            if operation.is_some() || !matches!(input, SessionInput::Command { .. } | SessionInput::Execute { .. }) { bail!("invalid execution request"); }
+                            self.authorized(&session.channel,&session.peer)?;
                             self.claim(&session, &id, service).await?;
-                            operation=Some(id);
-                            session.send_private(&mut transport, &PrivateMessage::OperationBegun).await?;
+                            operation=Some(id.clone());
+                            monitor_tx.send_replace(Some(id));
+                            self.check_command(&session, &input, operation.as_deref(), service).await?;
+                            endpoint.tx.send(input).await?;
                         },
                         PrivateMessage::Input(input)=>{self.authorized(&session.channel,&session.peer)?; self.check_command(&session,&input,operation.as_deref(),service).await?; endpoint.tx.send(input).await?;},
                         PrivateMessage::Close=>return Ok::<_,anyhow::Error>(()),
@@ -657,17 +817,29 @@ impl Hub {
                                 let response=hibiki_lib::assuan::parse_response(line)?;
                                 if matches!(response, hibiki_lib::assuan::Response::Ok | hibiki_lib::assuan::Response::Err(_))
                                     && let Some(id)=operation.take() {
+                                    monitor_tx.send_replace(None);
                                     session.connection.request(Control::TargetDone { id, success: matches!(response, hibiki_lib::assuan::Response::Ok) }).await?;
                                     self.bind_session(&session.id, None);
                                 }
                             }
-                            session.send_private(&mut transport,&PrivateMessage::Output(output)).await?;
+                            match output {
+                                SessionOutput::Line { request, line } => {
+                                    let response = hibiki_lib::assuan::parse_response(&line)?;
+                                    let flush = matches!(response, hibiki_lib::assuan::Response::Ok | hibiki_lib::assuan::Response::Err(_) | hibiki_lib::assuan::Response::Inquire(_));
+                                    collected.push(line);
+                                    if collected.len() > hibiki_lib::assuan::MAX_LINES || collected.iter().map(|l|l.len()).sum::<usize>() > hibiki_lib::assuan::MAX_DATA { bail!("response limit"); }
+                                    if flush { session.send_private(&mut transport, &PrivateMessage::OutputBatch { request, lines: std::mem::take(&mut collected) }).await?; }
+                                },
+                                output => session.send_private(&mut transport,&PrivateMessage::Output(output)).await?,
+                            }
                         },
                         None=>bail!("native service ended"),
                     }
                 }
             }
         }.await;
+        monitor_stop.cancel();
+        monitor.abort();
         endpoint.close().await;
         let _ = session
             .send_private(&mut transport, &PrivateMessage::Closed)
@@ -686,6 +858,10 @@ impl Hub {
             if let Some(entry) = sessions.get(&id) {
                 if entry.peer != peer || entry.channel != channel {
                     bail!("session routing identity mismatch");
+                }
+                if data.is_empty() {
+                    entry.stop.cancel();
+                    return Ok(());
                 }
                 if entry.tx.try_send(Packet::Data(data)).is_err() {
                     entry.stop.cancel();
@@ -714,7 +890,7 @@ impl Hub {
 }
 
 fn require_operation(input: &SessionInput, operation: Option<&str>) -> Result<()> {
-    if let SessionInput::Command { line, .. } = input {
+    if let SessionInput::Command { line, .. } | SessionInput::Execute { line, .. } = input {
         let (cmd, _) = hibiki_lib::assuan::command(line)?;
         if matches!(
             cmd,

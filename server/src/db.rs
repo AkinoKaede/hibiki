@@ -1,4 +1,4 @@
-use crate::entities::{channel, deleted, device, empty, pending, registry};
+use crate::entities::{channel, deleted, device, empty, pending, registry, revoked};
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{channel::*, decode, digest, encode, identity::Device, now, random_id};
 use sea_orm::{
@@ -41,6 +41,7 @@ impl Database {
             schema.create_table_from_entity(registry::Entity),
             schema.create_table_from_entity(empty::Entity),
             schema.create_table_from_entity(deleted::Entity),
+            schema.create_table_from_entity(revoked::Entity),
             schema.create_table_from_entity(crate::entities::operation::Entity),
         ] {
             tx.execute(statement.if_not_exists()).await?;
@@ -154,12 +155,16 @@ impl Database {
             .filter(registry::Column::Name.eq(name))
             .exec(&tx)
             .await?;
-        let row = registry::Entity::find()
-            .filter(registry::Column::Name.eq(name))
-            .one(&tx)
-            .await?
-            .context("channel not found")?;
-        let id = row.id;
+        let rows = registry::Entity::find().all(&tx).await?;
+        let id = if let Some(row) = rows
+            .iter()
+            .find(|r| r.id == name)
+            .or_else(|| rows.iter().find(|r| r.name == name))
+        {
+            row.id.clone()
+        } else {
+            hibiki_lib::selection::resolve_id(name, rows.iter().map(|r| r.id.as_str()))?
+        };
         deleted::ActiveModel {
             id: Set(id.clone()),
             deleted_at: Set(now() as i64),
@@ -175,6 +180,109 @@ impl Database {
         registry::Entity::delete_by_id(&id).exec(&tx).await?;
         tx.commit().await?;
         Ok(id)
+    }
+    pub async fn revoked(&self, channel: &str) -> Result<Vec<String>> {
+        Ok(revoked::Entity::find()
+            .filter(revoked::Column::Channel.eq(channel))
+            .all(&self.connection)
+            .await?
+            .into_iter()
+            .map(|r| r.device)
+            .collect())
+    }
+    pub async fn require_access(&self, channel: &str, device: &str) -> Result<()> {
+        if revoked::Entity::find_by_id((channel.to_owned(), device.to_owned()))
+            .one(&self.connection)
+            .await?
+            .is_some()
+        {
+            bail!("device access revoked by server administrator");
+        }
+        Ok(())
+    }
+    /// Local administrator access revocation. Does not forge member-signed history.
+    pub async fn admin_revoke(
+        &self,
+        name: &str,
+        device: &str,
+        subtree: bool,
+    ) -> Result<(String, Vec<String>)> {
+        use crate::entities::operation;
+        use hibiki_lib::protocol::{Operation, OperationState};
+        let tx = self.connection.begin().await?;
+        registry::Entity::update_many()
+            .col_expr(registry::Column::Name, Expr::col(registry::Column::Name))
+            .exec(&tx)
+            .await?;
+        let rows = registry::Entity::find().all(&tx).await?;
+        let id = rows
+            .iter()
+            .find(|r| r.id == name)
+            .or_else(|| rows.iter().find(|r| r.name == name))
+            .map(|r| r.id.clone())
+            .map(Ok)
+            .unwrap_or_else(|| {
+                hibiki_lib::selection::resolve_id(name, rows.iter().map(|r| r.id.as_str()))
+            })?;
+        let row = channel::Entity::find_by_id(&id)
+            .one(&tx)
+            .await?
+            .context("channel has no members")?;
+        let proof: MembershipProof = decode(&row.proof)?;
+        let state = proof.verify()?;
+        let target =
+            hibiki_lib::selection::resolve_id(device, state.members().keys().map(String::as_str))?;
+        let affected = if subtree {
+            state.revocation_subtree(&target)
+        } else {
+            vec![target]
+        };
+        for device in &affected {
+            revoked::Entity::insert(revoked::ActiveModel {
+                channel: Set(id.clone()),
+                device: Set(device.clone()),
+                revoked_at: Set(now() as i64),
+            })
+            .on_conflict(
+                OnConflict::columns([revoked::Column::Channel, revoked::Column::Device])
+                    .do_nothing()
+                    .to_owned(),
+            )
+            .try_insert()
+            .exec(&tx)
+            .await?;
+        }
+        for row in pending::Entity::find()
+            .filter(pending::Column::Channel.eq(&id))
+            .all(&tx)
+            .await?
+        {
+            let request: JoinRequest = decode(&row.request)?;
+            if affected.contains(&request.body.device.id()) {
+                pending::Entity::delete_by_id(row.id).exec(&tx).await?;
+            }
+        }
+        for row in operation::Entity::find()
+            .filter(operation::Column::Channel.eq(&id))
+            .filter(operation::Column::Active.eq(true))
+            .all(&tx)
+            .await?
+        {
+            let mut op: Operation = decode(&row.data)?;
+            if affected.contains(&op.initiator)
+                || op.targets.iter().any(|t| affected.contains(&t.device))
+            {
+                op.state = OperationState::Canceled;
+                operation::Entity::update_many()
+                    .col_expr(operation::Column::Active, Expr::value(false))
+                    .col_expr(operation::Column::Data, Expr::value(encode(&op)?))
+                    .filter(operation::Column::Id.eq(row.id))
+                    .exec(&tx)
+                    .await?;
+            }
+        }
+        tx.commit().await?;
+        Ok((id, affected))
     }
     pub async fn exists(&self, id: &str) -> Result<bool> {
         Ok(channel::Entity::find_by_id(id)
@@ -201,7 +309,8 @@ impl Database {
             .one(&self.connection)
             .await?
             .context("device not found")?;
-        if existing.bundle != bytes {
+        let old: Device = hibiki_lib::decode(&existing.bundle)?;
+        if old.signing_key != device.signing_key || old.noise_key != device.noise_key {
             bail!("device key binding changed; create a new identity");
         }
         Ok(())
@@ -267,6 +376,8 @@ impl Database {
     }
     pub async fn join(&self, caller: &str, request: JoinRequest, psk: String) -> Result<()> {
         request.verify()?;
+        self.require_access(&request.body.channel_id, caller)
+            .await?;
         let body = &request.body;
         let state = self.get(&body.channel_id).await?.verify()?;
         if body.device.id() != caller
@@ -274,6 +385,7 @@ impl Database {
             || body.psk_epoch != state.psk_epoch
             || body.created_at > now() + 30
             || state.member(caller).is_ok()
+            || state.is_revoked(caller)
         {
             bail!("invalid admission request");
         }
@@ -297,6 +409,13 @@ impl Database {
         if unchanged.rows_affected != 1 {
             bail!("CONFLICT: channel changed; retry admission");
         }
+        if revoked::Entity::find_by_id((state.id.clone(), caller.to_owned()))
+            .one(&tx)
+            .await?
+            .is_some()
+        {
+            bail!("device access revoked by server administrator");
+        }
         pending::Entity::insert(pending::ActiveModel {
             id: Set(request.id()?),
             channel: Set(state.id),
@@ -315,17 +434,23 @@ impl Database {
         Ok(())
     }
     pub async fn pending(&self, caller: &str, id: &str) -> Result<Vec<JoinRequest>> {
+        self.require_access(id, caller).await?;
         let state = self.get(id).await?.verify()?;
-        state.member(caller)?;
+        let member = state.member(caller).is_ok();
         let rows = pending::Entity::find()
             .filter(pending::Column::Channel.eq(id))
             .filter(pending::Column::Epoch.eq(state.psk_epoch as i64))
             .order_by_asc(pending::Column::Id)
             .all(&self.connection)
             .await?;
-        rows.into_iter()
-            .map(|row| decode(&row.request).map_err(Into::into))
-            .collect()
+        let requests: Vec<JoinRequest> = rows
+            .into_iter()
+            .map(|row| decode(&row.request).map_err(anyhow::Error::from))
+            .collect::<Result<_>>()?;
+        Ok(requests
+            .into_iter()
+            .filter(|request| member || request.body.device.id() == caller)
+            .collect())
     }
     /// Remove exactly one request. The channel CAS serializes this with approval,
     /// rotation, revocation and deletion, including other database connections.
@@ -338,6 +463,7 @@ impl Database {
     ) -> Result<()> {
         let state = self.get(id).await?.verify()?;
         if !withdraw {
+            self.require_access(id, caller).await?;
             state.member(caller)?;
         }
         let tx = self.connection.begin().await?;
@@ -407,6 +533,13 @@ impl Database {
         };
         let proof: MembershipProof = decode(&channel.proof)?;
         let state = proof.verify()?;
+        if revoked::Entity::find_by_id((id.to_owned(), caller.to_owned()))
+            .one(&tx)
+            .await?
+            .is_some()
+        {
+            return Ok(JoinState::Absent);
+        }
         if state.member(caller).is_ok() {
             return Ok(JoinState::Member);
         }
@@ -434,11 +567,26 @@ impl Database {
         if event.body.issuer_device_id != caller || event.body.issued_at > now() + 30 {
             bail!("invalid issuer or timestamp");
         }
+        self.require_access(&event.body.channel_id, caller).await?;
+        if matches!(event.body.action, MembershipAction::Admit(_))
+            && event.body.issued_at < now().saturating_sub(30)
+        {
+            bail!("admission timestamp must be current");
+        }
+        if let MembershipAction::Admit(request) = &event.body.action {
+            self.require_access(&event.body.channel_id, &request.body.device.id())
+                .await?;
+        }
         let mut proof = self.get(&event.body.channel_id).await?;
         let old = proof.verify()?;
         old.member(caller)?;
         if event.body.previous_event_hash != old.head {
             bail!("CONFLICT: channel head changed");
+        }
+        if let MembershipAction::Revoke { device_id } = &event.body.action
+            && !old.can_revoke_at(caller, device_id, now())
+        {
+            bail!("revocation is not yet permitted");
         }
         proof.events.push(event.clone());
         let state = proof.verify()?;
@@ -458,6 +606,21 @@ impl Database {
         }
         if update.exec(&tx).await?.rows_affected != 1 {
             bail!("CONFLICT: channel head changed");
+        }
+        if revoked::Entity::find_by_id((state.id.clone(), caller.to_owned()))
+            .one(&tx)
+            .await?
+            .is_some()
+        {
+            bail!("device access revoked by server administrator");
+        }
+        if let MembershipAction::Admit(request) = &event.body.action
+            && revoked::Entity::find_by_id((state.id.clone(), request.body.device.id()))
+                .one(&tx)
+                .await?
+                .is_some()
+        {
+            bail!("device access revoked by server administrator");
         }
         match &event.body.action {
             MembershipAction::Admit(request) => {
@@ -487,10 +650,28 @@ impl Database {
                     .exec(&tx)
                     .await?;
             }
-            MembershipAction::Revoke { .. } | MembershipAction::Leave => {
+            MembershipAction::Revoke { .. }
+            | MembershipAction::RevokeSubtree { .. }
+            | MembershipAction::Leave
+            | MembershipAction::Rename { .. } => {
                 if new_verifier.is_some() {
                     bail!("unexpected PSK verifier");
                 }
+            }
+        }
+        for row in pending::Entity::find()
+            .filter(pending::Column::Channel.eq(&state.id))
+            .all(&tx)
+            .await?
+        {
+            let request: JoinRequest = decode(&row.request)?;
+            // Subtree revocation also invalidates requests from departed identities in that branch.
+            if matches!(
+                event.body.action,
+                MembershipAction::Revoke { .. } | MembershipAction::RevokeSubtree { .. }
+            ) && state.is_revoked(&request.body.device.id())
+            {
+                pending::Entity::delete_by_id(row.id).exec(&tx).await?;
             }
         }
         tx.commit().await?;

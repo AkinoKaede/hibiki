@@ -25,6 +25,11 @@ pub struct LocalOpen {
 pub enum LocalRequest {
     Open(LocalOpen),
     Status,
+    Ping {
+        channel: String,
+        peer: String,
+        count: u16,
+    },
 }
 
 #[derive(Serialize, Deserialize)]

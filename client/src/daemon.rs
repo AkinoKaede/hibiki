@@ -46,6 +46,20 @@ async fn local_connection(
             .await??;
             return Ok(());
         }
+        LocalRequest::Ping {
+            channel,
+            peer,
+            count,
+        } => {
+            let result = hub
+                .ping(&channel, &peer, count)
+                .await
+                .map_err(|e| e.to_string());
+            let bytes = hibiki_lib::encode(&result)?;
+            stream.write_u32(bytes.len() as u32).await?;
+            stream.write_all(&bytes).await?;
+            return Ok(());
+        }
         LocalRequest::Open(open) => open,
     };
     crate::proxy::serve(hub, stream, open).await
@@ -159,6 +173,7 @@ pub async fn run(app: App) -> Result<()> {
                         hub.stop_session(&session, &peer);
                     },
                     Some(Event::Message(Envelope::OperationChanged {id}))=>hub.stop_operation(&id),
+                    Some(Event::Message(Envelope::PeerOnline { .. }))=>hub.changed.notify_waiters(),
                     Some(Event::Message(Envelope::PeerOffline {peer}))=>hub.stop_peer(&peer),
                     Some(Event::Message(Envelope::ChannelChanged {channel}))=>{
                         let h=hub.clone();jobs.spawn(async move {if h.refresh(&channel).await.is_err(){h.stop_channel(&channel);}});

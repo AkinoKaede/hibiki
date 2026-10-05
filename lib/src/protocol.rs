@@ -2,7 +2,7 @@ use crate::{assuan::Line, channel::*, identity::Device};
 use serde::{Deserialize, Serialize};
 
 /// Hibiki wire protocol identifier, authenticated by the device and bound into Noise.
-pub const VERSION: &str = "hibiki/1";
+pub const VERSION: &str = "hibiki/2";
 pub const WS_PATH: &str = "/hibiki";
 pub const MAX_WIRE: usize = 4 * 1024 * 1024;
 /// An hour of caller time plus less than a second of wire timestamp rounding.
@@ -65,6 +65,9 @@ pub enum Control {
         channel: String,
     },
     ListChannels,
+    ChannelSnapshot {
+        channel: String,
+    },
     Join {
         request: JoinRequest,
         psk: String,
@@ -111,9 +114,16 @@ pub enum Reply {
     Ok,
     Proof(MembershipProof),
     Proofs(Vec<MembershipProof>),
+    ChannelSnapshot {
+        proof: MembershipProof,
+        online: Vec<String>,
+        revoked: Vec<String>,
+    },
     Requests(Vec<JoinRequest>),
     Peers(Vec<String>),
-    Policy { allow_client_channel_creation: bool },
+    Policy {
+        allow_client_channel_creation: bool,
+    },
     JoinStatus(JoinState),
 }
 
@@ -164,6 +174,9 @@ pub enum Envelope {
     ChannelChanged {
         channel: String,
     },
+    PeerOnline {
+        peer: String,
+    },
     PeerOffline {
         peer: String,
     },
@@ -177,26 +190,66 @@ pub enum ServiceKind {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SessionInput {
-    Command { request: u64, line: Line },
-    InquiryReply { request: u64, line: Line },
+    PrepareCard {
+        id: String,
+        target: CardTarget,
+    },
+    CancelPreparation {
+        id: String,
+    },
+    Execute {
+        request: u64,
+        preparation: Vec<Line>,
+        line: Line,
+    },
+    Command {
+        request: u64,
+        line: Line,
+    },
+    InquiryReply {
+        request: u64,
+        line: Line,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SessionOutput {
+    CardStatus { id: String, state: CardPreparation },
     Line { request: u64, line: Line },
     Failure,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(clippy::large_enum_variant)] // The trust proof is bounded and exchanged only at setup.
 pub enum PrivateMessage {
-    BeginOperation { id: String },
-    OperationBegun,
-    Trust(MembershipProof),
-    Discover,
-    Capabilities { scdaemon: bool, pinentry: bool },
-    Open { service: ServiceKind },
-    Opened,
+    PingOpen {
+        proof: MembershipProof,
+    },
+    PingOpened {
+        proof: MembershipProof,
+    },
+    Ping {
+        nonce: String,
+    },
+    Pong {
+        nonce: String,
+    },
+    OpenService {
+        proof: MembershipProof,
+        service: ServiceKind,
+    },
+    ServiceOpened {
+        proof: MembershipProof,
+        enabled: bool,
+    },
+    Execute {
+        id: String,
+        input: SessionInput,
+    },
     Input(SessionInput),
     Output(SessionOutput),
+    OutputBatch {
+        request: u64,
+        lines: Vec<Line>,
+    },
     Close,
     Closed,
     Failure,
@@ -230,4 +283,39 @@ pub struct Operation {
     pub deadline: u64,
     pub state: OperationState,
     pub targets: Vec<OperationTarget>,
+}
+
+/// Selection identity, never private command data or a PIN.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CardTarget {
+    pub serial: Option<String>,
+    pub key: Option<String>,
+}
+impl CardTarget {
+    pub fn validate(&self) -> crate::Result<()> {
+        for value in [&self.serial, &self.key].into_iter().flatten() {
+            if value.is_empty()
+                || value.len() > 256
+                || !value
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"./".contains(&c))
+            {
+                return Err(crate::Error::Invalid("invalid card identity".into()));
+            }
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum CardPreparation {
+    Waiting,
+    Ready { serial: String },
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PingReport {
+    pub peer: String,
+    pub setup_micros: u64,
+    pub round_trips_micros: Vec<Option<u64>>,
 }

@@ -123,6 +123,13 @@ pub enum MembershipAction {
     },
     /// A member leaves voluntarily; readmission requires a fresh signed request.
     Leave,
+    Rename {
+        device: Device,
+    },
+    /// Explicit cascading removal; ordinary Revoke remains target-only.
+    RevokeSubtree {
+        device_id: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventBody {
@@ -187,6 +194,9 @@ pub struct VerifiedChannelState {
     seen: BTreeSet<String>,
     known: BTreeMap<String, Device>,
     admissions: BTreeSet<String>,
+    // Keep departed intermediaries so ancestor authority does not disappear.
+    approved_by: BTreeMap<String, String>,
+    admitted_at: BTreeMap<String, u64>,
 }
 impl VerifiedChannelState {
     pub fn members(&self) -> &BTreeMap<String, Device> {
@@ -194,6 +204,66 @@ impl VerifiedChannelState {
     }
     pub fn member(&self, id: &str) -> Result<&Device> {
         self.members.get(id).ok_or(Error::NotMember)
+    }
+    pub fn approved_by(&self, id: &str) -> Option<&Device> {
+        self.approved_by
+            .get(id)
+            .and_then(|parent| self.known.get(parent))
+    }
+    fn descends_from(&self, target: &str, ancestor: &str) -> bool {
+        let mut current = target;
+        for _ in 0..self.approved_by.len() {
+            let Some(parent) = self.approved_by.get(current) else {
+                return false;
+            };
+            if parent == ancestor {
+                return true;
+            }
+            current = parent;
+        }
+        false
+    }
+    pub fn can_revoke(&self, issuer: &str, target: &str) -> bool {
+        self.can_revoke_at(issuer, target, now())
+    }
+    pub fn can_revoke_at(&self, issuer: &str, target: &str, at: u64) -> bool {
+        issuer != target
+            && self.members.contains_key(issuer)
+            && self.members.contains_key(target)
+            && (self.descends_from(target, issuer)
+                || (self.descends_from(issuer, target)
+                    && self
+                        .admitted_at
+                        .get(issuer)
+                        .is_some_and(|joined| at >= joined.saturating_add(30 * 24 * 60 * 60))))
+    }
+    pub fn reverse_revoke_available_at(&self, issuer: &str, target: &str) -> Option<u64> {
+        (issuer != target
+            && self.members.contains_key(issuer)
+            && self.members.contains_key(target)
+            && self.descends_from(issuer, target))
+        .then(|| {
+            self.admitted_at
+                .get(issuer)
+                .map(|joined| joined.saturating_add(30 * 24 * 60 * 60))
+        })
+        .flatten()
+    }
+    pub fn can_revoke_subtree(&self, issuer: &str, target: &str) -> bool {
+        issuer != target
+            && self.members.contains_key(issuer)
+            && self.members.contains_key(target)
+            && self.descends_from(target, issuer)
+    }
+    pub fn revocation_subtree(&self, target: &str) -> Vec<String> {
+        self.members
+            .keys()
+            .filter(|id| id.as_str() == target || self.descends_from(id, target))
+            .cloned()
+            .collect()
+    }
+    pub fn is_revoked(&self, id: &str) -> bool {
+        self.seen.contains(id) && !self.members.contains_key(id)
     }
     pub fn checkpoint(&self) -> TrustCheckpoint {
         TrustCheckpoint {
@@ -223,6 +293,8 @@ impl MembershipProof {
             seen: BTreeSet::from([g.founder.id()]),
             known: BTreeMap::from([(g.founder.id(), g.founder.clone())]),
             admissions: BTreeSet::new(),
+            approved_by: BTreeMap::new(),
+            admitted_at: BTreeMap::new(),
         };
         for event in &self.events {
             let b = &event.body;
@@ -238,21 +310,45 @@ impl MembershipProof {
                 MembershipAction::Admit(request) => {
                     request.verify()?;
                     let r = &request.body;
+                    if r.device.id() == g.founder.id()
+                        || state.descends_from(&b.issuer_device_id, &r.device.id())
+                    {
+                        return Err(Error::Invalid(
+                            "admission would reverse the approval chain".into(),
+                        ));
+                    }
                     if r.channel_id != state.id
                         || r.genesis_hash != gh
                         || r.psk_epoch != state.psk_epoch
                         || b.issued_at < r.created_at
                         || !state.seen.insert(r.device.id())
                         || !state.admissions.insert(request.id()?)
-                        || state
-                            .known
-                            .get(&r.device.id())
-                            .is_some_and(|old| old != &r.device)
+                        || state.known.get(&r.device.id()).is_some_and(|old| {
+                            old.signing_key != r.device.signing_key
+                                || old.noise_key != r.device.noise_key
+                        })
                     {
                         return Err(Error::Invalid("invalid or reused admission".into()));
                     }
                     state.known.insert(r.device.id(), r.device.clone());
+                    state
+                        .approved_by
+                        .insert(r.device.id(), b.issuer_device_id.clone());
+                    state.admitted_at.insert(r.device.id(), b.issued_at);
                     state.members.insert(r.device.id(), r.device.clone());
+                }
+                MembershipAction::Rename { device } => {
+                    device.verify()?;
+                    if device.id() != b.issuer_device_id
+                        || device.signing_key != issuer.signing_key
+                        || device.noise_key != issuer.noise_key
+                    {
+                        return Err(Error::Invalid(
+                            "rename must preserve the issuer identity".into(),
+                        ));
+                    }
+                    state.known.insert(device.id(), device.clone());
+                    state.members.insert(device.id(), device.clone());
                 }
                 MembershipAction::Leave => {
                     state
@@ -262,8 +358,29 @@ impl MembershipProof {
                     state.seen.remove(&b.issuer_device_id);
                 }
                 MembershipAction::Revoke { device_id } => {
+                    if !state.can_revoke_at(&b.issuer_device_id, device_id, b.issued_at) {
+                        return Err(Error::Invalid("revocation requires a descendant target, or an ancestor target after 30 days of current membership; use Leave to remove yourself".into()));
+                    }
                     if state.members.remove(device_id).is_none() {
                         return Err(Error::NotMember);
+                    }
+                }
+                MembershipAction::RevokeSubtree { device_id } => {
+                    if !state.can_revoke_subtree(&b.issuer_device_id, device_id) {
+                        return Err(Error::Invalid(
+                            "subtree revocation requires a descendant target".into(),
+                        ));
+                    }
+                    // Also permanently bar departed intermediaries from rejoining the removed branch.
+                    let removed: Vec<_> = state
+                        .known
+                        .keys()
+                        .filter(|id| id.as_str() == device_id || state.descends_from(id, device_id))
+                        .cloned()
+                        .collect();
+                    for id in removed {
+                        state.members.remove(&id);
+                        state.seen.insert(id);
                     }
                 }
                 MembershipAction::ChangePsk {

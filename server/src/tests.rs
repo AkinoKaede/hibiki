@@ -137,7 +137,8 @@ async fn admission_requires_psk_pending_and_one_authorized_signature() {
     assert!(
         f.db.pending(&f.b.device.id(), &f.proof.genesis.body.id)
             .await
-            .is_err()
+            .unwrap()
+            .is_empty()
     );
     let event = MembershipEvent::create(
         &f.a,
@@ -219,7 +220,7 @@ async fn pending_requests_do_not_expire_and_approval_is_atomic() {
     );
 }
 #[tokio::test]
-async fn any_member_rotates_and_revokes_and_old_requests_cannot_return() {
+async fn members_rotate_but_only_ancestors_revoke_and_old_requests_cannot_return() {
     let mut f = Fixture::new().await;
     f.admit().await;
     let c = Identity::generate("c".into()).unwrap();
@@ -273,8 +274,7 @@ async fn any_member_rotates_and_revokes_and_old_requests_cannot_return() {
         },
     )
     .unwrap();
-    f.proof = f.db.append(&f.b.device.id(), revoke, None).await.unwrap();
-    assert!(f.db.pending(&f.a.device.id(), &state.id).await.is_err());
+    assert!(f.db.append(&f.b.device.id(), revoke, None).await.is_err());
     assert!(
         f.db.get(&state.id)
             .await
@@ -282,7 +282,23 @@ async fn any_member_rotates_and_revokes_and_old_requests_cannot_return() {
             .verify()
             .unwrap()
             .member(&f.a.device.id())
-            .is_err()
+            .is_ok()
+    );
+    let allowed = MembershipEvent::create(
+        &f.a,
+        &state,
+        MembershipAction::Revoke {
+            device_id: f.b.device.id(),
+        },
+    )
+    .unwrap();
+    f.proof = f.db.append(&f.a.device.id(), allowed, None).await.unwrap();
+    assert!(f.proof.verify().unwrap().member(&f.b.device.id()).is_err());
+    assert!(
+        f.db.pending(&f.b.device.id(), &state.id)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }
 #[tokio::test]
@@ -441,7 +457,11 @@ async fn delete_cleans_pending_preserves_other_channels_and_never_reuses_id() {
         )
         .await
         .unwrap();
-    assert_eq!(f.db.delete("Empty").await.unwrap(), invitation.id);
+    assert!(f.db.delete(&invitation.id[..5]).await.is_err());
+    assert_eq!(
+        f.db.delete(&invitation.id[..6]).await.unwrap(),
+        invitation.id
+    );
     assert!(
         f.db.claim(
             &f.a.device.id(),
@@ -564,7 +584,8 @@ async fn member_can_leave_and_rejoin_only_after_new_approval() {
     assert!(
         f.db.pending(&f.b.device.id(), &f.proof.genesis.body.id)
             .await
-            .is_err()
+            .unwrap()
+            .is_empty()
     );
     f.admit().await;
     assert!(f.proof.verify().unwrap().member(&f.b.device.id()).is_ok());
@@ -604,6 +625,20 @@ async fn pending_removal_checks_ownership_and_blocks_stale_approval() {
     f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
         .await
         .unwrap();
+    assert_eq!(
+        f.db.pending(&f.b.device.id(), channel).await.unwrap().len(),
+        1
+    );
+    assert!(
+        f.db.pending(&outsider.device.id(), channel)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        f.db.pending(&f.a.device.id(), channel).await.unwrap().len(),
+        1
+    );
     assert_eq!(
         f.db.join_status(&f.b.device.id(), channel, &id)
             .await
@@ -829,4 +864,86 @@ async fn withdraw_all_racing_approval_returns_a_consistent_membership_snapshot()
     };
     assert_eq!(proof.verify().unwrap().member(&b).is_ok(), approved.is_ok());
     assert!(f.db.pending(&a, channel).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn admin_subtree_is_opt_in_and_member_subtree_removes_descendants() {
+    let mut f = Fixture::new().await;
+    f.admit().await;
+    let c = Identity::generate("C".into()).unwrap();
+    f.db.register(&c.device).await.unwrap();
+    let request = JoinRequest::create(&c, &f.proof.verify().unwrap()).unwrap();
+    f.db.join(&c.device.id(), request.clone(), "test-secret".into())
+        .await
+        .unwrap();
+    let event = MembershipEvent::create(
+        &f.b,
+        &f.proof.verify().unwrap(),
+        MembershipAction::Admit(request),
+    )
+    .unwrap();
+    f.proof = f.db.append(&f.b.device.id(), event, None).await.unwrap();
+    let (_, affected) =
+        f.db.admin_revoke("Team", &f.b.device.id(), true)
+            .await
+            .unwrap();
+    assert_eq!(affected.len(), 2);
+    assert!(
+        f.db.require_access(&f.proof.genesis.body.id, &f.a.device.id())
+            .await
+            .is_ok()
+    );
+    assert!(
+        f.db.require_access(&f.proof.genesis.body.id, &c.device.id())
+            .await
+            .is_err()
+    );
+    let event =
+        MembershipEvent::create(&c, &f.proof.verify().unwrap(), MembershipAction::Leave).unwrap();
+    assert!(f.db.append(&c.device.id(), event, None).await.is_err());
+    let event = MembershipEvent::create(
+        &f.a,
+        &f.proof.verify().unwrap(),
+        MembershipAction::RevokeSubtree {
+            device_id: f.b.device.id(),
+        },
+    )
+    .unwrap();
+    let state =
+        f.db.append(&f.a.device.id(), event, None)
+            .await
+            .unwrap()
+            .verify()
+            .unwrap();
+    assert_eq!(state.members().len(), 1);
+}
+
+#[tokio::test]
+async fn reverse_revocation_cannot_use_future_event_time_or_backdated_admission() {
+    let mut f = Fixture::new().await;
+    let request = f.request();
+    f.db.join(&f.b.device.id(), request.clone(), "test-secret".into())
+        .await
+        .unwrap();
+    let mut event = MembershipEvent::create(
+        &f.a,
+        &f.proof.verify().unwrap(),
+        MembershipAction::Admit(request),
+    )
+    .unwrap();
+    event.body.issued_at = now() - 31 * 86400;
+    event.signature = f.a.sign("membership/v1", &event.body).unwrap();
+    assert!(f.db.append(&f.a.device.id(), event, None).await.is_err());
+    f.admit().await;
+    let mut event = MembershipEvent::create(
+        &f.b,
+        &f.proof.verify().unwrap(),
+        MembershipAction::Revoke {
+            device_id: f.a.device.id(),
+        },
+    )
+    .unwrap();
+    event.body.issued_at = now() + 30 * 86400;
+    event.signature = f.b.sign("membership/v1", &event.body).unwrap();
+    assert!(f.db.append(&f.b.device.id(), event, None).await.is_err());
 }

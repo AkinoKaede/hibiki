@@ -5,6 +5,7 @@ pub mod e2ee;
 pub mod identity;
 pub mod paths;
 pub mod protocol;
+pub mod selection;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -61,3 +62,5 @@ pub fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+pub mod card_prompt;

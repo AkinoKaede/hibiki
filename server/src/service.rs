@@ -83,9 +83,15 @@ impl Service {
             .flat_map(|e| e.channels.iter().cloned())
             .collect();
         for channel in channels {
-            if !self.db.exists(&channel).await? {
-                for executor in self.executors.lock().unwrap().values_mut() {
-                    if executor.channels.remove(&channel)
+            let exists = self.db.exists(&channel).await?;
+            let revoked = self.db.revoked(&channel).await?;
+            if !exists || !revoked.is_empty() {
+                for (id, executor) in self.executors.lock().unwrap().iter_mut() {
+                    if revoked.contains(id) {
+                        executor.stop.cancel();
+                    }
+                    if (!exists || revoked.contains(id))
+                        && executor.channels.remove(&channel)
                         && executor
                             .tx
                             .try_send(Envelope::ChannelChanged {
@@ -270,7 +276,10 @@ impl Service {
             Control::Claim { genesis, psk } => {
                 Ok(Reply::Proof(self.db.claim(device, genesis, psk).await?))
             }
-            Control::GetChannel { channel } => Ok(Reply::Proof(self.channel(&channel).await?)),
+            Control::GetChannel { channel } => {
+                self.db.require_access(&channel, device).await?;
+                Ok(Reply::Proof(self.channel(&channel).await?))
+            }
             Control::ListChannels => Ok(Reply::Proofs(self.db.list(device).await?)),
             Control::Join { request, psk } => {
                 self.channel(&request.body.channel_id).await?;
@@ -314,6 +323,7 @@ impl Service {
             Control::Announce { channels } => {
                 let mut authorized = HashSet::new();
                 for channel in channels {
+                    self.db.require_access(&channel, device).await?;
                     self.channel(&channel).await?.verify()?.member(device)?;
                     authorized.insert(channel);
                 }
@@ -335,12 +345,46 @@ impl Service {
                         },
                     );
                 }
+                for (id, executor) in self.executors.lock().unwrap().iter() {
+                    if id != device {
+                        let _ = executor.tx.try_send(Envelope::PeerOnline {
+                            peer: device.into(),
+                        });
+                    }
+                }
                 self.notify_ready(device).await?;
                 Ok(Reply::Ok)
+            }
+            Control::ChannelSnapshot { channel } => {
+                let proof = self.channel(&channel).await?;
+                let state = proof.verify()?;
+                state.member(device)?;
+                self.db.require_access(&channel, device).await?;
+                let revoked = self.db.revoked(&channel).await?;
+                let mut online: Vec<_> = self
+                    .executors
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(id, e)| {
+                        e.channels.contains(&channel)
+                            && state.member(id).is_ok()
+                            && !revoked.contains(id)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                online.sort();
+                Ok(Reply::ChannelSnapshot {
+                    proof,
+                    online,
+                    revoked,
+                })
             }
             Control::Peers { channel } => {
                 let state = self.channel(&channel).await?.verify()?;
                 state.member(device)?;
+                self.db.require_access(&channel, device).await?;
+                let revoked = self.db.revoked(&channel).await?;
                 let executors = self.executors.lock().unwrap();
                 let mut peers: Vec<_> = executors
                     .iter()
@@ -348,6 +392,7 @@ impl Service {
                         id.as_str() != device
                             && e.channels.contains(&channel)
                             && state.member(id).is_ok()
+                            && !revoked.contains(id)
                     })
                     .map(|(id, _)| id.clone())
                     .collect();
@@ -370,6 +415,8 @@ impl Service {
             bail!("invalid relay frame");
         }
         let state = self.channel(&channel).await?.verify()?;
+        self.db.require_access(&channel, sender).await?;
+        self.db.require_access(&channel, &peer).await?;
         state.member(sender)?;
         state.member(&peer)?;
         let target = {
@@ -658,6 +705,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_admin_can_revoke_founder_and_cancels_queued_work() {
+        let f = QueueFixture::new().await;
+        let op = f.operation();
+        f.command(
+            &f.a,
+            "a",
+            Control::Queue {
+                operation: op.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        let external = Database::open(&f.dir.path().join("db")).await.unwrap();
+        let (_, affected) = external
+            .admin_revoke(&f.channel[..6], &f.a.device.id()[..6], false)
+            .await
+            .unwrap();
+        assert_eq!(affected, vec![f.a.device.id()]);
+        assert!(
+            external
+                .require_access(&f.channel, &f.b.device.id())
+                .await
+                .is_ok()
+        );
+        assert!(f.command(&f.b, "b", f.claim(&op.id)).await.is_err());
+        assert!(
+            f.command(
+                &f.a,
+                "a",
+                Control::Queue {
+                    operation: f.operation()
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            f.command(
+                &f.a,
+                "a",
+                Control::Announce {
+                    channels: vec![f.channel.clone()]
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            f.service
+                .relay(
+                    &f.b.device.id(),
+                    "b",
+                    f.channel.clone(),
+                    f.a.device.id(),
+                    random_id(),
+                    vec![1]
+                )
+                .await
+                .is_err()
+        );
+        let (saved, _) = external.operation(&f.a.device.id(), &op.id).await.unwrap();
+        assert_eq!(saved.state, OperationState::Canceled);
+        let Reply::ChannelSnapshot { revoked, .. } = f
+            .command(
+                &f.b,
+                "b",
+                Control::ChannelSnapshot {
+                    channel: f.channel.clone(),
+                },
+            )
+            .await
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(revoked, vec![f.a.device.id()]);
+        f.service.notify_deleted().await.unwrap();
+        assert!(f.stop.is_cancelled());
+        // Signed membership history is retained, not rewritten by the administrator.
+        assert!(
+            external
+                .get(&f.channel)
+                .await
+                .unwrap()
+                .verify()
+                .unwrap()
+                .member(&f.a.device.id())
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
     async fn independent_database_writers_cannot_claim_the_same_target() {
         let f = QueueFixture::new().await;
         let op = f.operation();
@@ -704,10 +843,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(f._rx.try_recv().is_err());
+        while let Ok(event) = f._rx.try_recv() {
+            assert!(matches!(event, Envelope::PeerOnline { .. }));
+        }
         f.announce(&f.b, "b").await;
         assert!(
-            matches!(f._rx.try_recv().unwrap(),Envelope::OperationReady {id,..} if id == op.id)
+            matches!({ let mut event = f._rx.try_recv().unwrap(); while matches!(event, Envelope::PeerOnline { .. }) { event = f._rx.try_recv().unwrap(); } event },Envelope::OperationReady {id,..} if id == op.id)
         );
         f.command(
             &f.a,
@@ -721,7 +862,9 @@ mod tests {
         .unwrap();
         while f._rx.try_recv().is_ok() {}
         f.announce(&f.b, "b").await;
-        assert!(f._rx.try_recv().is_err());
+        while let Ok(event) = f._rx.try_recv() {
+            assert!(matches!(event, Envelope::PeerOnline { .. }));
+        }
         for _ in 0..128 {
             f.command(
                 &f.a,
@@ -1148,7 +1291,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(rx.recv().await.unwrap(), Envelope::Relay { .. }));
+        let mut event = rx.recv().await.unwrap();
+        while matches!(event, Envelope::PeerOnline { .. }) {
+            event = rx.recv().await.unwrap();
+        }
+        assert!(matches!(event, Envelope::Relay { .. }));
         db.delete("arbitrary-name").await.unwrap();
         assert!(
             service

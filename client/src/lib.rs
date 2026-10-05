@@ -10,3 +10,5 @@ pub mod proxy;
 pub mod stdio;
 pub mod storage;
 pub mod terminal;
+
+mod card_pool;

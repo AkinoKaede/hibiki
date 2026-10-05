@@ -5,3 +5,4 @@ pub mod empty;
 pub mod operation;
 pub mod pending;
 pub mod registry;
+pub mod revoked;

@@ -66,10 +66,18 @@ enum ChannelCommand {
         prompt_psk: bool,
     },
     /// Permanently delete channel records and stop routing (local administrator only).
-    Delete {
+    Delete { name: String },
+    /// Revoke relay access to any device, independently of member approval authority.
+    Revoke {
         name: String,
+        device_id: String,
+        #[arg(long)]
+        subtree: bool,
     },
-    List,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
 }
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -186,7 +194,7 @@ async fn main() -> Result<()> {
                 {
                     bail!("expected ws:// or wss:// server URL without credentials");
                 }
-                let (secret, generated) = if let Some(path) = psk_file {
+                let (secret, _) = if let Some(path) = psk_file {
                     (
                         fs::read_to_string(path)?
                             .trim_end_matches(['\r', '\n'])
@@ -200,18 +208,50 @@ async fn main() -> Result<()> {
                 };
                 let invite = db.reserve(server, name, hash_psk(&secret)?).await?;
                 println!("channel {}", invite.id);
-                println!("invite {}", invite.export()?);
-                if generated {
-                    println!("PSK {secret}");
-                }
+                let text = hibiki_lib::channel::invitation_with_psk(
+                    hibiki_lib::channel::InvitationKind::Initialization(invite),
+                    secret,
+                )?;
+                println!("invite {text}");
             }
             ChannelCommand::Delete { name } => {
                 let id = db.delete(&name).await?;
                 println!("deleted {name} {id}");
             }
-            ChannelCommand::List => {
-                for (id, name, empty) in db.admin_list().await? {
-                    println!("{id} {} {name}", if empty { "empty" } else { "active" });
+            ChannelCommand::Revoke {
+                name,
+                device_id,
+                subtree,
+            } => {
+                let (id, affected) = db.admin_revoke(&name, &device_id, subtree).await?;
+                println!(
+                    "Server revoked {} device(s) in channel {id}:\n{}",
+                    affected.len(),
+                    affected.join("\n")
+                );
+            }
+            ChannelCommand::List { json } => {
+                let rows = db.admin_list().await?;
+                if json {
+                    let rows: Vec<_> = rows.into_iter().map(|(id,name,empty)|serde_json::json!({"id":id,"name":name,"state":if empty {"awaiting_founder"} else {"active"}})).collect();
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &serde_json::json!({"schema_version":1,"channels":rows})
+                        )?
+                    );
+                } else {
+                    println!("CHANNEL / CHANNEL ID                     STATE");
+                    for (id, name, empty) in rows {
+                        println!(
+                            "{name:?} — {}\n  Channel ID: {id}",
+                            if empty {
+                                "Awaiting first member"
+                            } else {
+                                "Active"
+                            }
+                        );
+                    }
                 }
             }
         }

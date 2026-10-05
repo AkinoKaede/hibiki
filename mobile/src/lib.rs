@@ -39,6 +39,28 @@ use zeroize::Zeroizing;
 
 uniffi::setup_scaffolding!();
 
+#[derive(uniffi::Record)]
+pub struct DevicePingReport {
+    pub setup_micros: u64,
+    pub round_trips_micros: Vec<Option<u64>>,
+}
+
+/// UniFFI does not forward Swift task cancellation; explicitly close the ping session.
+#[derive(uniffi::Object, Default)]
+pub struct PingCancellation {
+    stop: CancellationToken,
+}
+#[uniffi::export]
+impl PingCancellation {
+    #[uniffi::constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+    pub fn cancel(&self) {
+        self.stop.cancel();
+    }
+}
+
 /// A request-scoped handle because Swift task cancellation is not forwarded by UniFFI.
 #[derive(uniffi::Object, Default)]
 pub struct CardReadCancellation {
@@ -94,6 +116,12 @@ fn device_info(device: &hibiki_lib::identity::Device, online: bool) -> Result<De
         name: device.name.clone(),
         words: device.public_key_words()?,
         online,
+        approved_by: None,
+        approver_name: None,
+        can_revoke: false,
+        revoked_by_server: false,
+        reverse_revoke_available_at: None,
+        revocation_subtree: vec![],
     })
 }
 #[derive(uniffi::Object)]
@@ -141,7 +169,18 @@ impl MobileClient {
             members: state
                 .members()
                 .values()
-                .map(|d| device_info(d, online.contains(&d.id())))
+                .map(|d| {
+                    let mut info = device_info(d, online.contains(&d.id()))?;
+                    info.approved_by = state.approved_by(&info.id).map(|d| d.id());
+                    info.approver_name = state.approved_by(&info.id).map(|d| d.name.clone());
+                    info.reverse_revoke_available_at =
+                        state.reverse_revoke_available_at(&self.app.identity.device.id(), &info.id);
+                    info.can_revoke = state.can_revoke(&self.app.identity.device.id(), &info.id);
+                    if state.can_revoke_subtree(&self.app.identity.device.id(), &info.id) {
+                        info.revocation_subtree = state.revocation_subtree(&info.id);
+                    }
+                    Ok(info)
+                })
                 .collect::<Result<_>>()?,
         })
     }
@@ -176,22 +215,23 @@ impl MobileClient {
                     let mut jobs = tokio::task::JoinSet::new();
                     loop {
                         tokio::select! {
-                            biased;
-                            _=stop.cancelled()=>break,
-                            _=connection.closed.cancelled()=>break,
-                            _=refresh.tick()=>{let h=hub.clone();jobs.spawn(async move{let _=announce(&h).await;});},
-                            Some(_)=jobs.join_next(),if !jobs.is_empty()=>{},
-                            event=events.recv()=>match event {
-                                Some(Event::Message(Envelope::OperationReady {..}))=>hub.changed.notify_waiters(),
-                                Some(Event::Message(Envelope::Relay{channel,peer,session,data}))=>{let _=hub.route(channel,peer,session,data).await;},
-                                Some(Event::Message(Envelope::RelayFailure{session,peer,..}))=>hub.stop_session(&session,&peer),
-                                Some(Event::Message(Envelope::OperationChanged{id}))=>hub.stop_operation(&id),
-                                Some(Event::Message(Envelope::PeerOffline{peer}))=>hub.stop_peer(&peer),
-                                Some(Event::Message(Envelope::ChannelChanged{channel}))=>{let h=hub.clone();jobs.spawn(async move{if h.refresh(&channel).await.is_err(){h.stop_channel(&channel);}});},
-                                Some(Event::Disconnected)|None=>break,
-                                _=>{},
+                                biased;
+                                _=stop.cancelled()=>break,
+                                _=connection.closed.cancelled()=>break,
+                                _=refresh.tick()=>{let h=hub.clone();jobs.spawn(async move{let _=announce(&h).await;});},
+                                Some(_)=jobs.join_next(),if !jobs.is_empty()=>{},
+                                event=events.recv()=>match event {
+                                    Some(Event::Message(Envelope::OperationReady {..}))=>hub.changed.notify_waiters(),
+                                    Some(Event::Message(Envelope::Relay{channel,peer,session,data}))=>{let _=hub.route(channel,peer,session,data).await;},
+                                    Some(Event::Message(Envelope::RelayFailure{session,peer,..}))=>hub.stop_session(&session,&peer),
+                                    Some(Event::Message(Envelope::OperationChanged{id}))=>hub.stop_operation(&id),
+                        Some(Event::Message(Envelope::PeerOnline { .. }))=>hub.changed.notify_waiters(),
+                                    Some(Event::Message(Envelope::PeerOffline{peer}))=>hub.stop_peer(&peer),
+                                    Some(Event::Message(Envelope::ChannelChanged{channel}))=>{let h=hub.clone();jobs.spawn(async move{if h.refresh(&channel).await.is_err(){h.stop_channel(&channel);}});},
+                                    Some(Event::Disconnected)|None=>break,
+                                    _=>{},
+                                }
                             }
-                        }
                     }
                     // Finish cancellation before stop() permits local trust data to be reset.
                     jobs.shutdown().await;
@@ -346,13 +386,7 @@ impl MobileClient {
         }
     }
     pub fn usb_present(&self, present: bool) {
-        let was_present = self.provider.usb_present.swap(present, Ordering::AcqRel);
-        if was_present
-            && !present
-            && let Some(hub) = self.hub.lock().unwrap().as_ref()
-        {
-            hub.stop_all();
-        }
+        self.provider.usb_present.store(present, Ordering::Release);
     }
     pub fn selected_card(&self) -> Option<CardInfo> {
         self.provider.card.lock().unwrap().clone()
@@ -417,8 +451,14 @@ impl MobileClient {
             let stop = self.stop.lock().unwrap().child_token();
             let broker = self.broker.clone();
             let _guard = provider::CancelOnDrop(stop.clone());
-            let info = tokio::task::spawn_blocking(move || card::inspect(broker, stop, transport))
-                .await??;
+            let (info, detected_name) =
+                tokio::task::spawn_blocking(move || card::inspect_named(broker, stop, transport))
+                    .await??;
+            let name = if name.trim().is_empty() {
+                detected_name
+            } else {
+                name
+            };
             let mut registry = self.registry.lock().unwrap().clone();
             registry.upsert(info.clone(), name, usb_supported, nfc_supported);
             self.save_registry(registry)?;
@@ -503,20 +543,79 @@ impl MobileClient {
                 } else {
                     proof
                 };
-                let mut peers = if let Some(h) = &hub {
-                    h.peers(&id).await.unwrap_or_default()
+                let (peers, revoked) = if let Some(h) = &hub {
+                    match h
+                        .connection()
+                        .request(Control::ChannelSnapshot {
+                            channel: id.clone(),
+                        })
+                        .await
+                    {
+                        Ok(Reply::ChannelSnapshot {
+                            proof,
+                            online,
+                            revoked,
+                        }) => {
+                            if proof.genesis.body.id != id {
+                                bail!("snapshot channel mismatch");
+                            }
+                            self.app.merge(proof)?;
+                            (online, revoked)
+                        }
+                        _ => (vec![], vec![]),
+                    }
                 } else {
-                    vec![]
+                    (vec![], vec![])
                 };
-                if hub.is_some() {
-                    peers.push(self.app.identity.device.id());
+                let mut info = self.channel_info(self.app.proof(&id).unwrap_or(current), &peers)?;
+                for device in &mut info.members {
+                    device.revoked_by_server = revoked.contains(&device.id);
+                    if device.revoked_by_server {
+                        device.can_revoke = false;
+                        device.revocation_subtree.clear();
+                    }
                 }
-                out.push(self.channel_info(current, &peers)?);
+                out.push(info);
             }
             Ok(out)
         }
         .await;
         result.map_err(|e: anyhow::Error| e.into())
+    }
+    pub async fn ping_device(
+        &self,
+        channel: String,
+        device: String,
+        count: u16,
+        cancellation: Arc<PingCancellation>,
+    ) -> MobileResult<DevicePingReport> {
+        let result: Result<DevicePingReport> = async {
+            let hub = self.connected()?;
+            let report = tokio::select! {
+                biased;
+                _ = cancellation.stop.cancelled() => bail!("ping canceled"),
+                report = async {
+                    // Admission may have completed before the periodic announcement.
+                    announce(&hub).await?;
+                    hub.ping(&channel, &device, count).await
+                } => report?,
+            };
+            Ok(DevicePingReport {
+                setup_micros: report.setup_micros,
+                round_trips_micros: report.round_trips_micros,
+            })
+        }
+        .await;
+        result.map_err(Into::into)
+    }
+    pub async fn rename_device(&self, name: String) -> MobileResult<Vec<u8>> {
+        let result: Result<Vec<u8>> = async {
+            let hub = self.connected()?;
+            let identity = management::rename(&self.app, &hub.connection(), name).await?;
+            Ok(encode(&identity)?)
+        }
+        .await;
+        result.map_err(Into::into)
     }
     pub async fn create_channel(&self, name: String) -> MobileResult<Invitation> {
         let result = async {
@@ -537,18 +636,20 @@ impl MobileClient {
             }
             let proof = self.app.bootstrap(proof, None)?;
             let state = proof.verify()?;
-            let invite = Invite {
-                version: 1,
-                server: self.app.config.server.clone(),
-                genesis: proof.genesis,
-                checkpoint: state.checkpoint(),
-            }
-            .export()?;
+            let invite = hibiki_lib::channel::invitation_with_psk(
+                InvitationKind::Member(Invite {
+                    version: 1,
+                    server: self.app.config.server.clone(),
+                    genesis: proof.genesis,
+                    checkpoint: state.checkpoint(),
+                }),
+                psk.to_string(),
+            )?;
             announce(&hub).await?;
             Ok(Invitation {
                 channel: state.id,
                 invite,
-                psk: psk.to_string(),
+                psk: String::new(),
             })
         }
         .await;
@@ -571,12 +672,25 @@ impl MobileClient {
         .await;
         result.map_err(|e: anyhow::Error| e.into())
     }
+    pub async fn invitation_with_psk(&self, channel: String, psk: String) -> MobileResult<String> {
+        let psk = Zeroizing::new(psk);
+        let text = self.invitation(channel).await?;
+        hibiki_lib::channel::invitation_with_psk(
+            InvitationKind::import(&text).map_err(anyhow::Error::from)?,
+            psk.to_string(),
+        )
+        .map_err(anyhow::Error::from)
+        .map_err(Into::into)
+    }
+
     pub async fn join(&self, invitation: String, psk: String) -> MobileResult<JoinInfo> {
         let result = async {
-            let psk = Zeroizing::new(psk);
+            let invitation = Zeroizing::new(invitation);
+            let parsed = ParsedInvitation::import(&invitation)?;
+            let (kind, psk) = parsed.secret((!psk.is_empty()).then_some(psk))?;
+            let psk = psk.context("a channel PSK is required")?;
             let hub = self.connected()?;
-            if invitation.starts_with("hibiki-init-v1:") {
-                let invite = EmptyChannelInvite::import(&invitation)?;
+            if let InvitationKind::Initialization(invite) = &kind {
                 if invite.server != self.app.config.server {
                     bail!("invitation relay differs from configured relay");
                 }
@@ -609,11 +723,13 @@ impl MobileClient {
                 self.app.bootstrap(proof, None)?;
                 announce(&hub).await?;
                 return Ok(JoinInfo {
-                    channel: invite.id,
+                    channel: invite.id.clone(),
                     request: String::new(),
                 });
             }
-            let invite = Invite::import(&invitation)?;
+            let InvitationKind::Member(invite) = kind else {
+                unreachable!()
+            };
             if invite.server != self.app.config.server {
                 bail!("invitation relay differs from configured relay");
             }
@@ -794,14 +910,32 @@ impl MobileClient {
         result.map_err(Into::into)
     }
     pub async fn revoke(&self, channel: String, device: String) -> MobileResult<()> {
+        let hub = self.connected().map_err(MobileError::from)?;
+        let state = hub
+            .refresh(&channel)
+            .await
+            .map_err(MobileError::from)?
+            .verify()
+            .map_err(anyhow::Error::from)?;
+        self.revoke_selected(channel, device, false, state.sequence)
+            .await
+    }
+    pub async fn revoke_selected(
+        &self,
+        channel: String,
+        device: String,
+        subtree: bool,
+        revision: u64,
+    ) -> MobileResult<()> {
         let result = async {
             let hub = self.connected()?;
-            management::append(
+            management::revoke(
                 &self.app,
                 &hub.connection(),
                 &channel,
-                MembershipAction::Revoke { device_id: device },
-                None,
+                &device,
+                subtree,
+                revision,
             )
             .await?;
             hub.refresh(&channel).await?;

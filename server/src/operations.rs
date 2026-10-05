@@ -3,7 +3,9 @@
 use crate::{db::Database, entities::operation};
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{channel::valid_id, decode, encode, now, protocol::*};
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter, Set, TransactionTrait,
+};
 
 impl Database {
     pub async fn queued_for(&self, device: &str) -> Result<Vec<(Operation, String)>> {
@@ -44,9 +46,11 @@ impl Database {
         }
         let state = self.get(&op.channel).await?.verify()?;
         state.member(caller)?;
+        self.require_access(&op.channel, caller).await?;
         let mut devices = std::collections::HashSet::new();
         for target in &op.targets {
             state.member(&target.device)?;
+            self.require_access(&op.channel, &target.device).await?;
             if !devices.insert(&target.device) {
                 bail!("duplicate operation target");
             }
@@ -97,6 +101,25 @@ impl Database {
                 bail!("target operation queue full");
             }
         }
+        let tx = self.connection.begin().await?;
+        // Serialize with local administrator revocation in another process.
+        crate::entities::channel::Entity::update_many()
+            .col_expr(
+                crate::entities::channel::Column::Head,
+                sea_orm::sea_query::Expr::col(crate::entities::channel::Column::Head),
+            )
+            .filter(crate::entities::channel::Column::Id.eq(&op.channel))
+            .exec(&tx)
+            .await?;
+        for device in std::iter::once(&op.initiator).chain(op.targets.iter().map(|t| &t.device)) {
+            if crate::entities::revoked::Entity::find_by_id((op.channel.clone(), device.clone()))
+                .one(&tx)
+                .await?
+                .is_some()
+            {
+                bail!("device access revoked by server administrator");
+            }
+        }
         operation::ActiveModel {
             id: Set(op.id.clone()),
             initiator: Set(caller.into()),
@@ -106,8 +129,9 @@ impl Database {
             connection: Set(connection.into()),
             data: Set(encode(&op)?),
         }
-        .insert(&self.connection)
+        .insert(&tx)
         .await?;
+        tx.commit().await?;
         Ok(op)
     }
     pub async fn operation(&self, caller: &str, id: &str) -> Result<(Operation, String)> {
@@ -121,7 +145,13 @@ impl Database {
         }
         let authorized = if self.exists(&op.channel).await? {
             let state = self.get(&op.channel).await?.verify()?;
-            state.member(caller).is_ok() && state.member(&op.initiator).is_ok()
+            state.member(caller).is_ok()
+                && state.member(&op.initiator).is_ok()
+                && self.require_access(&op.channel, caller).await.is_ok()
+                && self
+                    .require_access(&op.channel, &op.initiator)
+                    .await
+                    .is_ok()
         } else {
             false
         };

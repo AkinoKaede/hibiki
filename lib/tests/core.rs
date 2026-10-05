@@ -27,33 +27,95 @@ fn multilevel_chain_revocation_and_historical_authority() {
     admit(&mut p, &a, &b);
     admit(&mut p, &b, &c);
     let checkpoint = p.verify().unwrap().checkpoint();
-    let event = MembershipEvent::create(
-        &c,
-        &p.verify().unwrap(),
-        MembershipAction::Revoke {
-            device_id: a.device.id(),
-        },
-    )
-    .unwrap();
-    p.events.push(event);
+    let d = Identity::generate("Other branch".into()).unwrap();
+    admit(&mut p, &a, &d);
+    let state = p.verify().unwrap();
+    assert_eq!(
+        state.approved_by(&c.device.id()).unwrap().id(),
+        b.device.id()
+    );
+    assert!(state.can_revoke(&a.device.id(), &c.device.id()));
+    assert!(state.can_revoke(&b.device.id(), &c.device.id()));
+    for (issuer, target) in [(&c, &a), (&b, &a), (&b, &d), (&b, &b)] {
+        assert!(!state.can_revoke(&issuer.device.id(), &target.device.id()));
+        let mut invalid = p.clone();
+        invalid.events.push(
+            MembershipEvent::create(
+                issuer,
+                &state,
+                MembershipAction::Revoke {
+                    device_id: target.device.id(),
+                },
+            )
+            .unwrap(),
+        );
+        assert!(invalid.verify().is_err());
+    }
+    p.events.push(
+        MembershipEvent::create(
+            &a,
+            &state,
+            MembershipAction::Revoke {
+                device_id: b.device.id(),
+            },
+        )
+        .unwrap(),
+    );
     let state = p
         .verify_from(&p.genesis.hash().unwrap(), &checkpoint)
         .unwrap();
-    assert!(state.member(&a.device.id()).is_err());
-    assert!(state.member(&b.device.id()).is_ok());
-    assert!(state.member(&c.device.id()).is_ok());
-    // A valid historical certificate does not let a revoked founder sign new events.
-    let illegal = MembershipEvent::create(
-        &a,
-        &state,
-        MembershipAction::Revoke {
-            device_id: b.device.id(),
-        },
-    )
-    .unwrap();
-    p.events.push(illegal);
-    assert!(p.verify().is_err());
+    assert!(state.member(&b.device.id()).is_err());
+    assert!(state.member(&c.device.id()).is_ok()); // Revocation is not cascading.
+    assert!(state.can_revoke(&a.device.id(), &c.device.id()));
+    let mut forged = p.clone();
+    forged.events.push(
+        MembershipEvent::create(
+            &b,
+            &state,
+            MembershipAction::Revoke {
+                device_id: c.device.id(),
+            },
+        )
+        .unwrap(),
+    );
+    assert!(forged.verify().is_err()); // Historical parent certificate is not active authority.
+    p.events.push(
+        MembershipEvent::create(
+            &a,
+            &state,
+            MembershipAction::Revoke {
+                device_id: c.device.id(),
+            },
+        )
+        .unwrap(),
+    );
+    assert!(p.verify().unwrap().member(&c.device.id()).is_err());
 }
+
+#[test]
+fn readmission_cannot_reverse_approval_ancestry() {
+    let (a, mut p) = root();
+    let b = Identity::generate("B".into()).unwrap();
+    let c = Identity::generate("C".into()).unwrap();
+    admit(&mut p, &a, &b);
+    admit(&mut p, &b, &c);
+    p.events
+        .push(MembershipEvent::create(&b, &p.verify().unwrap(), MembershipAction::Leave).unwrap());
+    let state = p.verify().unwrap();
+    let request = JoinRequest::create(&b, &state).unwrap();
+    let mut reversed = p.clone();
+    reversed
+        .events
+        .push(MembershipEvent::create(&c, &state, MembershipAction::Admit(request)).unwrap());
+    assert!(reversed.verify().is_err());
+    admit(&mut p, &a, &b);
+    assert!(
+        p.verify()
+            .unwrap()
+            .can_revoke(&b.device.id(), &c.device.id())
+    );
+}
+
 #[test]
 fn key_substitution_signature_tampering_and_cross_channel_fail() {
     let (a, mut p) = root();
@@ -428,4 +490,144 @@ fn embedded_psk_invites_preserve_identity_and_redact_credentials() {
         ParsedInvitation::import(&text).unwrap().invitation,
         InvitationKind::Initialization(_)
     ));
+}
+#[test]
+fn renaming_preserves_keys_and_cannot_change_another_member() {
+    let (a, mut proof) = root();
+    let b = Identity::generate("B".into()).unwrap();
+    admit(&mut proof, &a, &b);
+    let renamed = b.renamed("New 名称".into()).unwrap();
+    assert_eq!(renamed.device.id(), b.device.id());
+    assert_eq!(renamed.noise_secret(), b.noise_secret());
+    assert_eq!(
+        renamed.device.public_key_words().unwrap(),
+        b.device.public_key_words().unwrap()
+    );
+    let action = MembershipAction::Rename {
+        device: renamed.device.clone(),
+    };
+    let mut bad = proof.clone();
+    bad.events
+        .push(MembershipEvent::create(&a, &bad.verify().unwrap(), action.clone()).unwrap());
+    assert!(bad.verify().is_err());
+    proof
+        .events
+        .push(MembershipEvent::create(&b, &proof.verify().unwrap(), action).unwrap());
+    assert_eq!(
+        proof.verify().unwrap().member(&b.device.id()).unwrap().name,
+        "New 名称"
+    );
+    proof.events.push(
+        MembershipEvent::create(&renamed, &proof.verify().unwrap(), MembershipAction::Leave)
+            .unwrap(),
+    );
+    admit(&mut proof, &a, &renamed);
+    assert!(proof.verify().is_ok());
+    assert!(a.renamed("".into()).is_err());
+    assert!(a.renamed("x".repeat(129)).is_err());
+}
+
+#[test]
+fn subtree_revocation_is_explicit_and_preserves_other_branches() {
+    let (a, mut p) = root();
+    let b = Identity::generate("B".into()).unwrap();
+    let c = Identity::generate("C".into()).unwrap();
+    let d = Identity::generate("Sibling".into()).unwrap();
+    admit(&mut p, &a, &b);
+    admit(&mut p, &b, &c);
+    admit(&mut p, &a, &d);
+    let state = p.verify().unwrap();
+    let mut ids = vec![b.device.id(), c.device.id()];
+    ids.sort();
+    assert_eq!(state.revocation_subtree(&b.device.id()), ids);
+    for (issuer, target) in [(&c, &a), (&b, &b), (&b, &d)] {
+        let mut invalid = p.clone();
+        invalid.events.push(
+            MembershipEvent::create(
+                issuer,
+                &state,
+                MembershipAction::RevokeSubtree {
+                    device_id: target.device.id(),
+                },
+            )
+            .unwrap(),
+        );
+        assert!(invalid.verify().is_err());
+    }
+    p.events.push(
+        MembershipEvent::create(
+            &a,
+            &state,
+            MembershipAction::RevokeSubtree {
+                device_id: b.device.id(),
+            },
+        )
+        .unwrap(),
+    );
+    let state = p.verify().unwrap();
+    assert!(state.member(&a.device.id()).is_ok());
+    assert!(state.member(&d.device.id()).is_ok());
+    for identity in [&b, &c] {
+        assert!(state.is_revoked(&identity.device.id()));
+        let mut invalid = p.clone();
+        let request = JoinRequest::create(identity, &state).unwrap();
+        invalid
+            .events
+            .push(MembershipEvent::create(&a, &state, MembershipAction::Admit(request)).unwrap());
+        assert!(invalid.verify().is_err());
+    }
+}
+
+#[test]
+fn reverse_revocation_uses_current_admission_and_exact_thirty_day_boundary() {
+    let (a, mut p) = root();
+    let b = Identity::generate("B".into()).unwrap();
+    let c = Identity::generate("C".into()).unwrap();
+    let d = Identity::generate("Sibling".into()).unwrap();
+    admit(&mut p, &a, &b);
+    admit(&mut p, &b, &c);
+    admit(&mut p, &a, &d);
+    let state = p.verify().unwrap();
+    let available = state
+        .reverse_revoke_available_at(&c.device.id(), &a.device.id())
+        .unwrap();
+    for target in [&a, &b] {
+        assert!(!state.can_revoke_at(&c.device.id(), &target.device.id(), available - 1));
+        assert!(state.can_revoke_at(&c.device.id(), &target.device.id(), available));
+        let mut changed = p.clone();
+        let mut event = MembershipEvent::create(
+            &c,
+            &state,
+            MembershipAction::Revoke {
+                device_id: target.device.id(),
+            },
+        )
+        .unwrap();
+        event.body.issued_at = available;
+        event.signature = c.sign("membership/v1", &event.body).unwrap();
+        changed.events.push(event);
+        assert!(
+            changed
+                .verify()
+                .unwrap()
+                .member(&target.device.id())
+                .is_err()
+        );
+        assert!(!state.can_revoke_subtree(&c.device.id(), &target.device.id()));
+    }
+    assert!(!state.can_revoke_at(&c.device.id(), &d.device.id(), u64::MAX));
+    assert!(!state.can_revoke_at(&c.device.id(), &c.device.id(), u64::MAX));
+    p.events
+        .push(MembershipEvent::create(&c, &state, MembershipAction::Leave).unwrap());
+    let state = p.verify().unwrap();
+    let mut request = JoinRequest::create(&c, &state).unwrap();
+    request.body.created_at = available;
+    request.signature = c.sign("join/v1", &request.body).unwrap();
+    let mut event = MembershipEvent::create(&b, &state, MembershipAction::Admit(request)).unwrap();
+    event.body.issued_at = available;
+    event.signature = b.sign("membership/v1", &event.body).unwrap();
+    p.events.push(event);
+    let state = p.verify().unwrap();
+    assert!(!state.can_revoke_at(&c.device.id(), &a.device.id(), available));
+    assert!(state.can_revoke_at(&c.device.id(), &a.device.id(), available + 30 * 86400));
 }

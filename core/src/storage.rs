@@ -251,20 +251,21 @@ impl App {
         if hibiki_lib::channel::valid_id(name) && self.proof(name).is_ok() {
             return Ok(name.into());
         }
-        let matches: Vec<_> = self
-            .proofs()?
-            .into_iter()
+        let proofs = self.proofs()?;
+        let matches: Vec<_> = proofs
+            .iter()
             .filter(|p| p.genesis.body.name == name)
             .collect();
         if matches.len() > 1 {
             bail!("multiple trusted channels have this name; use the immutable channel ID");
         }
-        matches
-            .into_iter()
-            .next()
-            .map(|p| p.genesis.body.id)
-            .context("channel not present in this device's trust store")
+        if let Some(proof) = matches.first() {
+            return Ok(proof.genesis.body.id.clone());
+        }
+        hibiki_lib::selection::resolve_id(name, proofs.iter().map(|p| p.genesis.body.id.as_str()))
+            .map_err(Into::into)
     }
+
     pub fn bootstrap(
         &self,
         proof: MembershipProof,

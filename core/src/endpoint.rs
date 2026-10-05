@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, bail};
 use hibiki_lib::{
     assuan::{self, Line, Response},
-    protocol::{SessionInput, SessionOutput},
+    protocol::{CardPreparation, CardTarget, SessionInput, SessionOutput},
 };
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -53,7 +53,40 @@ impl Endpoint {
     pub fn bind_operation(&self, id: Option<String>) {
         *self.operation.lock().unwrap() = id;
     }
-    pub async fn command(&mut self, line: Line) -> Result<()> {
+    pub async fn prepare(&mut self, id: String, target: CardTarget) -> Result<()> {
+        target.validate()?;
+        self.tx
+            .send(SessionInput::PrepareCard { id, target })
+            .await?;
+        Ok(())
+    }
+    pub async fn cancel_preparation(&self, id: String) -> Result<()> {
+        self.tx.send(SessionInput::CancelPreparation { id }).await?;
+        Ok(())
+    }
+    pub async fn prepared(&mut self, id: &str) -> Result<CardPreparation> {
+        loop {
+            match self.rx.recv().await {
+                Some(SessionOutput::CardStatus { id: current, state }) if current == id => {
+                    return Ok(state);
+                }
+                Some(SessionOutput::CardStatus { .. }) => {}
+                _ => bail!("card preparation ended"),
+            }
+        }
+    }
+    pub async fn execute(&mut self, line: Line, preparation: Vec<Line>) -> Result<()> {
+        self.begin()?;
+        self.tx
+            .send(SessionInput::Execute {
+                request: self.request,
+                preparation,
+                line,
+            })
+            .await?;
+        Ok(())
+    }
+    fn begin(&mut self) -> Result<()> {
         if self.active {
             bail!("command already active");
         }
@@ -65,6 +98,10 @@ impl Endpoint {
         self.inquiry = false;
         self.bytes = 0;
         self.lines = 0;
+        Ok(())
+    }
+    pub async fn command(&mut self, line: Line) -> Result<()> {
+        self.begin()?;
         self.tx
             .send(SessionInput::Command {
                 request: self.request,
@@ -74,8 +111,12 @@ impl Endpoint {
         Ok(())
     }
     pub async fn next(&mut self) -> Result<Line> {
-        let Some(SessionOutput::Line { request, line }) = self.rx.recv().await else {
-            bail!("service session ended");
+        let (request, line) = loop {
+            match self.rx.recv().await {
+                Some(SessionOutput::Line { request, line }) => break (request, line),
+                Some(SessionOutput::CardStatus { .. }) => continue,
+                _ => bail!("service session ended"),
+            }
         };
         if request != self.request || !self.active || self.inquiry {
             bail!("unexpected response or request ID");

@@ -18,6 +18,11 @@ name = "hibiki-pinentry"
 path = "src/bin/pinentry.rs"
 
 [dependencies]
+unicode-width = "0.2"
+serde_json.workspace = true
+chrono.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
 hibiki-core.workspace = true
 hibiki-lib.workspace = true
 anyhow.workspace = true
