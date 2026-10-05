@@ -154,6 +154,20 @@ final class AppModel {
             await self.activate()
         }
     }
+    func renameDevice(_ newName: String) async {
+        await perform {
+            guard let core = self.client else { return }
+            let identity = try await core.renameDevice(name: newName)
+            try SecureStorage.saveIdentity(identity)
+            await core.stop()
+            self.eventTask?.cancel()
+            try self.configure(identity: identity)
+            self.name = newName
+            self.defaults.set(newName, forKey: "deviceName")
+            await self.activate()
+            await self.refresh()
+        }
+    }
     func disconnectRelay() async {
         guard !busy else { return }
         busy = true

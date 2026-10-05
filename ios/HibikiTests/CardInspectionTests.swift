@@ -136,7 +136,7 @@ final class CardInspectionTests: XCTestCase {
         let entry = RegisteredCard(card: info, name: "Daily security key", usbEnabled: true, nfcEnabled: true)
         model.registeredCards = [entry]
         model.card = info
-        model.device = DeviceInfo(id: "test-device", name: "iPhone", words: "public verification words", online: false)
+        model.device = DeviceInfo(id: "test-device", name: "iPhone", words: "public verification words", online: false, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
         for language in ["en", "zh-Hans"] {
             model.cardInspection.select(.usb)
             try await render(NavigationStack { CardView(model: model) }, name: "USB-\(language)", language: language)
