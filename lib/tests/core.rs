@@ -359,7 +359,7 @@ fn renaming_preserves_keys_and_cannot_change_another_member() {
 }
 
 #[test]
-fn subtree_revocation_is_explicit_and_preserves_other_branches() {
+fn historical_subtree_revocation_preserves_other_branches() {
     let (a, mut p) = root();
     let b = Identity::generate("B".into()).unwrap();
     let c = Identity::generate("C".into()).unwrap();
@@ -408,19 +408,25 @@ fn subtree_revocation_is_explicit_and_preserves_other_branches() {
 }
 
 #[test]
-fn reverse_revocation_uses_current_admission_and_exact_thirty_day_boundary() {
+fn any_device_revocation_uses_current_admission_and_exact_thirty_day_boundary() {
     let (a, mut p) = root();
     let b = Identity::generate("B".into()).unwrap();
     let c = Identity::generate("C".into()).unwrap();
-    let d = Identity::generate("Sibling".into()).unwrap();
+    let d = Identity::generate("Other branch".into()).unwrap();
+    let e = Identity::generate("Sibling".into()).unwrap();
     admit(&mut p, &a, &b);
     admit(&mut p, &b, &c);
     admit(&mut p, &a, &d);
+    admit(&mut p, &b, &e);
     let state = p.verify().unwrap();
     let available = state
         .reverse_revoke_available_at(&c.device.id(), &a.device.id())
         .unwrap();
-    for target in [&a, &b] {
+    for target in [&a, &b, &d, &e] {
+        assert_eq!(
+            state.reverse_revoke_available_at(&c.device.id(), &target.device.id()),
+            Some(available)
+        );
         assert!(!state.can_revoke_at(&c.device.id(), &target.device.id(), available - 1));
         assert!(state.can_revoke_at(&c.device.id(), &target.device.id(), available));
         let mut changed = p.clone();
@@ -432,6 +438,11 @@ fn reverse_revocation_uses_current_admission_and_exact_thirty_day_boundary() {
             },
         )
         .unwrap();
+        event.body.issued_at = available - 1;
+        event.signature = c.sign("membership/v4", &event.body).unwrap();
+        changed.events.push(event.clone());
+        assert!(changed.verify().is_err());
+        changed.events.pop();
         event.body.issued_at = available;
         event.signature = c.sign("membership/v4", &event.body).unwrap();
         changed.events.push(event);
@@ -444,11 +455,22 @@ fn reverse_revocation_uses_current_admission_and_exact_thirty_day_boundary() {
         );
         assert!(!state.can_revoke_subtree(&c.device.id(), &target.device.id()));
     }
-    assert!(!state.can_revoke_at(&c.device.id(), &d.device.id(), u64::MAX));
     assert!(!state.can_revoke_at(&c.device.id(), &c.device.id(), u64::MAX));
+    assert!(!state.can_revoke_at(&c.device.id(), "unknown", u64::MAX));
+    assert!(!state.can_revoke_at("unknown", &c.device.id(), u64::MAX));
+    assert_eq!(
+        state.reverse_revoke_available_at(&c.device.id(), &c.device.id()),
+        None
+    );
+    assert_eq!(
+        state.reverse_revoke_available_at(&b.device.id(), &c.device.id()),
+        None
+    );
     p.events
         .push(MembershipEvent::create(&c, &state, MembershipAction::Leave).unwrap());
     let state = p.verify().unwrap();
+    assert!(!state.can_revoke_at(&c.device.id(), &d.device.id(), u64::MAX));
+    assert!(!state.can_revoke_at(&d.device.id(), &c.device.id(), u64::MAX));
     let mut request = AdmissionRequest::create(&c, &state, random_id(), 0).unwrap();
     request.body.created_at = available;
     request.signature = c.sign("join/v4", &request.body).unwrap();
@@ -457,8 +479,15 @@ fn reverse_revocation_uses_current_admission_and_exact_thirty_day_boundary() {
     event.signature = b.sign("membership/v4", &event.body).unwrap();
     p.events.push(event);
     let state = p.verify().unwrap();
-    assert!(!state.can_revoke_at(&c.device.id(), &a.device.id(), available));
-    assert!(state.can_revoke_at(&c.device.id(), &a.device.id(), available + 30 * 86400));
+    for target in [&a, &b, &d, &e] {
+        let reset = available + 30 * 86400;
+        assert_eq!(
+            state.reverse_revoke_available_at(&c.device.id(), &target.device.id()),
+            Some(reset)
+        );
+        assert!(!state.can_revoke_at(&c.device.id(), &target.device.id(), reset - 1));
+        assert!(state.can_revoke_at(&c.device.id(), &target.device.id(), reset));
+    }
 }
 
 #[test]

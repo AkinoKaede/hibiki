@@ -1511,7 +1511,7 @@ mod tests {
         .unwrap();
         let external = Database::open(&f.dir.path().join("db")).await.unwrap();
         let (_, affected) = external
-            .admin_revoke(&f.channel[..6], &f.a.device.id()[..6], false)
+            .admin_revoke(&f.channel[..6], &f.a.device.id()[..6])
             .await
             .unwrap();
         assert_eq!(affected, vec![f.a.device.id()]);

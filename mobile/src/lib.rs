@@ -156,7 +156,6 @@ fn device_info(device: &hibiki_lib::identity::Device, online: bool) -> Result<De
         can_revoke: false,
         revoked_by_server: false,
         reverse_revoke_available_at: None,
-        revocation_subtree: vec![],
     })
 }
 #[derive(uniffi::Object)]
@@ -277,9 +276,6 @@ impl MobileClient {
                     info.reverse_revoke_available_at =
                         state.reverse_revoke_available_at(&self.app.identity.device.id(), &info.id);
                     info.can_revoke = state.can_revoke(&self.app.identity.device.id(), &info.id);
-                    if state.can_revoke_subtree(&self.app.identity.device.id(), &info.id) {
-                        info.revocation_subtree = state.revocation_subtree(&info.id);
-                    }
                     Ok(info)
                 })
                 .collect::<Result<_>>()?,
@@ -664,7 +660,6 @@ impl MobileClient {
                     device.revoked_by_server = revoked.contains(&device.id);
                     if device.revoked_by_server {
                         device.can_revoke = false;
-                        device.revocation_subtree.clear();
                     }
                 }
                 out.push(info);
@@ -942,27 +937,17 @@ impl MobileClient {
             .map_err(MobileError::from)?
             .verify()
             .map_err(anyhow::Error::from)?;
-        self.revoke_selected(channel, device, false, state.sequence)
-            .await
+        self.revoke_selected(channel, device, state.sequence).await
     }
     pub async fn revoke_selected(
         &self,
         channel: String,
         device: String,
-        subtree: bool,
         revision: u64,
     ) -> MobileResult<()> {
         let result = async {
             let hub = self.connected()?;
-            management::revoke(
-                &self.app,
-                &hub.connection(),
-                &channel,
-                &device,
-                subtree,
-                revision,
-            )
-            .await?;
+            management::revoke(&self.app, &hub.connection(), &channel, &device, revision).await?;
             hub.refresh(&channel).await?;
             Ok(())
         }

@@ -1563,83 +1563,51 @@
         }
       }
     },
-    "Outside Your Approval Branch": {
+    "Revocation Unavailable": {
       "extractionState": "manual",
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "不属于你的审批分支"
+            "value": "暂时无法撤销"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "不屬於你的核准分支"
+            "value": "暫時無法撤銷"
           }
         }
       }
     },
-    "Revoke Entire Approval Subtree": {
+    "This device will lose access.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "撤销整个审批子树"
+            "value": "此设备将失去访问权限。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "撤銷整個審批子樹"
+            "value": "此裝置將失去存取權限。"
           }
         }
       }
     },
-    "Affected devices: %lld": {
+    "Confirm": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "受影响的设备：%lld"
+            "value": "确认"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "受影響的裝置：%lld"
-          }
-        }
-      }
-    },
-    "These identities will lose access and cannot rejoin this channel.": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "这些身份将失去访问权限，且无法重新加入此频道。"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "這些身分將失去存取權限，且無法重新加入此頻道。"
-          }
-        }
-      }
-    },
-    "Confirm Revocation": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "确认撤销"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "確認撤銷"
+            "value": "確認"
           }
         }
       }
@@ -1676,34 +1644,34 @@
         }
       }
     },
-    "Ancestor Revocation Available": {
+    "Revocation Available": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "可撤销上级的日期"
+            "value": "可撤销日期"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "可撤銷上級的日期"
+            "value": "可撤銷日期"
           }
         }
       }
     },
-    "You can revoke devices below you in the approval chain. After 30 days of your current membership, you can also revoke your approver or ancestors. Subtree removal is optional and applies only to descendants.": {
+    "You can revoke devices below you in the approval chain. After 30 days in the channel, you can revoke any device.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "你可以撤销审批链中的下级设备。本次加入满30天后，也可以撤销审批者或更上级的设备。可选择撤销整个子树，此操作仅适用于下级分支。"
+            "value": "你可以撤销审批链中的下级设备，加入频道30天后可以撤销任意设备。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "你可以撤銷審批鏈中的下級裝置。本次加入滿30天後，也可以撤銷審批者或更上級的裝置。可選擇撤銷整個子樹，此操作僅適用於下級分支。"
+            "value": "你可以撤銷審批鏈中的下級裝置，加入頻道30天後可以撤銷任意裝置。"
           }
         }
       }

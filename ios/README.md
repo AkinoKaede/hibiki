@@ -455,34 +455,33 @@ upgrades through capability negotiation.
 
 Approval records form a directed chain from the channel founder. An active member
 can revoke its direct or indirect descendants immediately. After **30 days since
-its current admission**, it may also revoke its own approver or another ancestor.
-Leaving and joining again restarts that waiting period. Other branches and
-self-revocation remain disallowed; use Leave for self-removal. The server checks
+its current admission**, it may revoke any other active device, including its
+approver, ancestors, siblings and members of other branches. Leaving and joining
+again restarts that waiting period. Use Leave for self-removal. The server checks
 its own clock as well as the signed event; backdated admissions cannot accelerate
 the waiting period.
 
-Revocation affects **only the named device by default**. Use
-`hibiki channel revoke NAME DEVICE_ID --subtree` to explicitly remove that device
-and its approval subtree. Subtree revocation is restricted to descendants so it
-cannot accidentally include the caller. Revoked identities can rejoin with a valid unused invitation, a fresh request and new approval. An
+Upgrade the server and channel devices before using cross-branch revocation;
+older versions reject those membership events.
+
+Revocation affects **only the named device**. Revoked identities can rejoin with a valid unused invitation, a fresh request and new approval. An
 ordinary revocation leaves descendants active, and ancestry remains verifiable
 through departed intermediaries. Readmission must not reverse ancestry or create
 a cycle.
 
-iOS and TUI offer separate actions for one device and an entire subtree. The
-confirmation lists all affected active devices with full IDs and defaults to
+iOS and TUI show the selected device’s full ID before revocation and default to
 cancel. A changed membership revision invalidates the confirmation; submission
-never retries automatically against a changed tree. Ancestor details display the
-date when reverse revocation becomes available. JSON includes `approved_by`,
-`approver_name`, `can_revoke`, `reverse_revoke_available_at`, `revocation_subtree`
-and `revoked_by_server`.
+never retries automatically against a changed tree. Non-descendant details display the
+date when revocation becomes available. JSON includes `approved_by`,
+`approver_name`, `can_revoke`, `reverse_revoke_available_at`
+and `revoked_by_server`. The `reverse_revoke_available_at` field retains its name
+for compatibility and applies to all non-descendants.
 
 The local server administrator can revoke **any** device, including the founder,
 without approval-chain or age restrictions:
 
 ```sh
 hibiki-server channel revoke NAME DEVICE_ID
-hibiki-server channel revoke NAME DEVICE_ID --subtree
 ```
 
 This is a persistent server access revocation, independent of member-signed history.

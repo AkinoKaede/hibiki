@@ -69,7 +69,7 @@ pub fn device_details(device: &DeviceRow) -> String {
         "{approval}{}",
         device
             .reverse_revoke_available_at
-            .map(|t| format!("\nAncestor revocation available: {}", timestamp(t)))
+            .map(|t| format!("\nRevocation available: {}", timestamp(t)))
             .unwrap_or_default()
     );
     format!(

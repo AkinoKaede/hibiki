@@ -75,12 +75,7 @@ enum ChannelCommand {
     /// Permanently delete channel records and stop routing (local administrator only).
     Delete { name: String },
     /// Revoke server access to any device, independently of member approval authority.
-    Revoke {
-        name: String,
-        device_id: String,
-        #[arg(long)]
-        subtree: bool,
-    },
+    Revoke { name: String, device_id: String },
     List {
         #[arg(long)]
         json: bool,
@@ -191,12 +186,8 @@ async fn main() -> Result<()> {
                 let id = db.delete(&name).await?;
                 println!("deleted {name} {id}");
             }
-            ChannelCommand::Revoke {
-                name,
-                device_id,
-                subtree,
-            } => {
-                let (id, affected) = db.admin_revoke(&name, &device_id, subtree).await?;
+            ChannelCommand::Revoke { name, device_id } => {
+                let (id, affected) = db.admin_revoke(&name, &device_id).await?;
                 println!(
                     "Server revoked {} device(s) in channel {id}:\n{}",
                     affected.len(),

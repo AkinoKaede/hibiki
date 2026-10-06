@@ -345,15 +345,44 @@ final class HibikiUITests: XCTestCase {
         if !app.staticTexts["word19 word20 word21 word22 word23 word24"].exists { app.swipeUp() }
         XCTAssertTrue(app.staticTexts["word19 word20 word21 word22 word23 word24"].exists)
         XCTAssertFalse(app.buttons["Revoke"].exists)
-        XCTAssertTrue(app.staticTexts["Outside Your Approval Branch"].exists)
+        XCTAssertTrue(app.staticTexts["Revocation Available"].exists)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.name = "Member details with complete identity"
         screenshot.lifetime = .keepAlways
         add(screenshot)
     }
-    func testSubtreeRevocationIsOptionalAndListsCompleteIdentities() {
+    func testMatureMemberCanRevokeAnotherBranch() {
         let app = XCUIApplication()
-        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online"]
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online", "--ui-invitations-fixture", "--ui-members-mature"]
+        app.launch()
+        let channels = app.tabBars.buttons["Channels"]
+        XCTAssertTrue(channels.waitForExistence(timeout: 10))
+        channels.tap()
+        app.staticTexts["UI Test Channel"].tap()
+        let id = String(repeating: "b", count: 64)
+        let member = app.buttons["member-\(id)"]
+        XCTAssertTrue(member.waitForExistence(timeout: 5))
+        member.tap()
+        for _ in 0..<3 where !app.buttons["Revoke"].isHittable { app.swipeUp() }
+        XCTAssertTrue(app.buttons["Revoke"].isEnabled)
+        XCTAssertFalse(app.buttons["Revoke Entire Approval Subtree"].exists)
+        XCTAssertFalse(app.staticTexts["Revocation Available"].exists)
+        XCTAssertTrue(app.staticTexts["You can revoke devices below you in the approval chain. After 30 days in the channel, you can revoke any device."].exists)
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Revoke another device after 30 days"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        app.buttons["Revoke"].tap()
+        XCTAssertTrue(app.navigationBars["Review Revocation"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["revocationDeviceID"].label, id)
+        XCTAssertTrue(app.buttons["Confirm"].isEnabled)
+        XCTAssertFalse(app.staticTexts[String(repeating: "a", count: 64)].exists)
+        app.buttons["Confirm"].tap()
+        XCTAssertTrue(app.staticTexts["Device No Longer Available"].waitForExistence(timeout: 5))
+    }
+    func testRevocationOnlyIncludesSelectedDevice() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-AppleLanguages", "(en)", "--ui-members-fixture", "--ui-members-online", "--ui-invitations-fixture"]
         app.launch()
         let channels = app.tabBars.buttons["Channels"]
         XCTAssertTrue(channels.waitForExistence(timeout: 10))
@@ -367,14 +396,16 @@ final class HibikiUITests: XCTestCase {
         for _ in 0..<3 where !app.buttons["Revoke"].isHittable { app.swipeUp() }
         app.buttons["Revoke"].tap()
         XCTAssertTrue(app.navigationBars["Review Revocation"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts[childID].exists)
+        XCTAssertEqual(app.staticTexts["revocationDeviceID"].label, childID)
+        XCTAssertTrue(app.buttons["Confirm"].isEnabled)
         XCTAssertFalse(app.staticTexts[grandchildID].exists)
-        app.buttons["Cancel"].tap()
-        app.buttons["Revoke Entire Approval Subtree"].tap()
-        XCTAssertTrue(app.navigationBars["Review Revocation"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts[childID].exists)
-        XCTAssertTrue(app.staticTexts[grandchildID].exists)
-        app.buttons["Cancel"].tap()
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "Revoke only the selected device"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        XCTAssertEqual(app.buttons["cancelRevocation"].label, "Cancel")
+        app.buttons["cancelRevocation"].tap()
+        XCTAssertFalse(app.buttons["Revoke Entire Approval Subtree"].exists)
         XCTAssertTrue(app.buttons["Revoke"].exists)
     }
     func testUnreachableRelayStaysOnSetupAfterRestart() {

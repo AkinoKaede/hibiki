@@ -295,12 +295,7 @@ impl Database {
         Ok(())
     }
     /// Local administrator access revocation. Does not forge member-signed history.
-    pub async fn admin_revoke(
-        &self,
-        name: &str,
-        device: &str,
-        subtree: bool,
-    ) -> Result<(String, Vec<String>)> {
+    pub async fn admin_revoke(&self, name: &str, device: &str) -> Result<(String, Vec<String>)> {
         use crate::entities::operation;
         use hibiki_lib::protocol::{Operation, OperationState};
         let tx = self.connection.begin().await?;
@@ -326,11 +321,7 @@ impl Database {
         let state = proof.verify()?;
         let target =
             hibiki_lib::selection::resolve_id(device, state.members().keys().map(String::as_str))?;
-        let affected = if subtree {
-            state.revocation_subtree(&target)
-        } else {
-            vec![target]
-        };
+        let affected = vec![target];
         for device in &affected {
             revoked::Entity::insert(revoked::ActiveModel {
                 channel: Set(id.clone()),
@@ -633,6 +624,9 @@ impl Database {
     pub async fn append(&self, caller: &str, event: MembershipEvent) -> Result<MembershipProof> {
         if event.body.issuer_device_id != caller || event.body.issued_at > now() + 30 {
             bail!("invalid issuer or timestamp");
+        }
+        if matches!(event.body.action, MembershipAction::RevokeSubtree { .. }) {
+            bail!("subtree revocation is no longer supported; revoke one device at a time");
         }
         let tx = self.connection.begin().await?;
         let id = &event.body.channel_id;

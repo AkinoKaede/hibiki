@@ -277,7 +277,7 @@ final class CardInspectionTests: XCTestCase {
             CardKey(slot: 1, algorithm: "rsa4096", fingerprint: String(repeating: "A1", count: 20), keygrip: String(repeating: "B2", count: 20), publicKey: Data(), createdAt: 1_700_000_000)
         ])
         model.recordedNFCCard = info
-        model.device = DeviceInfo(id: "test-device", name: "iPhone", words: "public verification words", online: false, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
+        model.device = DeviceInfo(id: "test-device", name: "iPhone", words: "public verification words", online: false, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil)
         for language in ["en", "zh-Hans"] {
             model.cardInspection.select(.usb)
             try await render(NavigationStack { CardView(model: model) }, name: "USB-\(language)", language: language)
@@ -327,8 +327,8 @@ final class CardInspectionTests: XCTestCase {
         let model = AppModel(nfcCapability: { false })
         model.connection = "online"
         let words = (1...24).map { "word\($0)" }.joined(separator: " ")
-        let local = DeviceInfo(id: "local", name: "iPhone 16 Pro", words: words, online: true, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
-        let remote = DeviceInfo(id: "remote", name: "Kaede-MacBook-Pro", words: words, online: true, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
+        let local = DeviceInfo(id: "local", name: "iPhone 16 Pro", words: words, online: true, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil)
+        let remote = DeviceInfo(id: "remote", name: "Kaede-MacBook-Pro", words: words, online: true, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil)
         model.device = local
         model.channels = [ChannelInfo(id: "channel", name: "personal", active: true, revision: 1, members: [local, remote])]
         let list = NavigationStack { ChannelView(channelID: "channel", model: model) }

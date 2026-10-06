@@ -32,7 +32,6 @@ pub struct DeviceRow {
     pub can_revoke: bool,
     pub revoked_by_server: bool,
     pub reverse_revoke_available_at: Option<u64>,
-    pub revocation_subtree: Vec<String>,
 }
 #[derive(Clone, Serialize)]
 pub struct PendingRow {
@@ -184,7 +183,6 @@ impl Manager {
                 device.revoked_by_server = revoked.contains(&device.id);
                 if device.revoked_by_server {
                     device.can_revoke = false;
-                    device.revocation_subtree.clear();
                 }
             }
         }
@@ -256,22 +254,9 @@ impl Manager {
         };
         Ok(())
     }
-    pub async fn revoke(
-        &self,
-        channel: &str,
-        device: &str,
-        subtree: bool,
-        revision: u64,
-    ) -> Result<Vec<String>> {
-        hibiki_core::management::revoke(
-            &self.app,
-            &self.connection,
-            channel,
-            device,
-            subtree,
-            revision,
-        )
-        .await
+    pub async fn revoke(&self, channel: &str, device: &str, revision: u64) -> Result<Vec<String>> {
+        hibiki_core::management::revoke(&self.app, &self.connection, channel, device, revision)
+            .await
     }
     pub async fn leave(&mut self, channel: &str) -> Result<()> {
         leave(&self.app, &self.connection, channel).await?;
@@ -352,7 +337,6 @@ fn device_row(app: &App, device: &hibiki_lib::identity::Device) -> Result<Device
         can_revoke: false,
         revoked_by_server: false,
         reverse_revoke_available_at: None,
-        revocation_subtree: vec![],
     })
 }
 fn channel_row(app: &App, state: &VerifiedChannelState) -> Result<ChannelRow> {
@@ -373,9 +357,6 @@ fn channel_row(app: &App, state: &VerifiedChannelState) -> Result<ChannelRow> {
                 row.reverse_revoke_available_at =
                     state.reverse_revoke_available_at(&app.identity.device.id(), &row.id);
                 row.can_revoke = state.can_revoke(&app.identity.device.id(), &row.id);
-                if state.can_revoke_subtree(&app.identity.device.id(), &row.id) {
-                    row.revocation_subtree = state.revocation_subtree(&row.id);
-                }
                 Ok(row)
             })
             .collect::<Result<_>>()?,

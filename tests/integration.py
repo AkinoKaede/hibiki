@@ -511,7 +511,7 @@ def test_all():
             assert json.loads(a.cli('channel', 'pending', channel_id[:6], '--json').stdout)['channel']['id'] == channel_id
             a.cli('use', channel_id[:6])
             a.cli('channel', 'pending', channel_id[:5], '--json', ok=False)
-            # Root -> b -> c: descendants cannot revoke ancestors or siblings.
+            # Root -> b -> c: new members cannot revoke ancestors or siblings.
             b.cli('channel', 'revoke', 'test', a.id[:6], ok=False)
             c.cli('channel', 'revoke', 'test', b.id[:6], ok=False)
             a_members = json.loads(a.cli('device', 'list', '--json').stdout)['channels'][0]['devices']

@@ -35,7 +35,7 @@ final class BackgroundRequestTests: XCTestCase {
         ChannelInfo(id: id, name: id, active: active, revision: 1, members: [])
     }
     private func join(_ id: String, channel: String) -> PendingInfo {
-        PendingInfo(id: id, channel: channel, device: DeviceInfo(id: "peer", name: "PRIVATE DEVICE", words: "", online: true, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: []))
+        PendingInfo(id: id, channel: channel, device: DeviceInfo(id: "peer", name: "PRIVATE DEVICE", words: "", online: true, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil))
     }
 
     func testUSBEventsSurviveBackgroundAndIgnoreStaleSnapshots() async {

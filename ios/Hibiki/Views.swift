@@ -501,10 +501,12 @@ struct MemberDetailView: View {
     let channelID: String
     let deviceID: String
     @Bindable var model: AppModel
-    @State private var revoking = false
-    @State private var revokeSubtree = false
-    @State private var revokeRevision: UInt64 = 0
-    @State private var revokeDevices: [DeviceInfo] = []
+    private struct RevocationSelection: Identifiable {
+        let device: DeviceInfo
+        let revision: UInt64
+        var id: String { device.id }
+    }
+    @State private var revocation: RevocationSelection?
     @State private var ping = DevicePing()
     private var channel: ChannelInfo? { model.channels.first { $0.id == channelID } }
     private var device: DeviceInfo? { channel?.members.first { $0.id == deviceID } }
@@ -548,18 +550,15 @@ struct MemberDetailView: View {
                 if !isSelf {
                     Section {
                         if device.canRevoke {
-                            Button("Revoke", role: .destructive) { prepareRevocation(subtree: false) }.disabled(!canManage)
-                            if !device.revocationSubtree.isEmpty {
-                                Button("Revoke Entire Approval Subtree", role: .destructive) { prepareRevocation(subtree: true) }.disabled(!canManage)
-                            }
+                            Button("Revoke", role: .destructive) { prepareRevocation() }.disabled(!canManage)
                         } else if device.revokedByServer {
                             Label("Revoked by Server", systemImage: "lock.slash")
                         } else if let availableAt = device.reverseRevokeAvailableAt {
-                            LabeledContent("Ancestor Revocation Available") { Text(Date(timeIntervalSince1970: TimeInterval(availableAt)), style: .date) }
+                            LabeledContent("Revocation Available") { Text(Date(timeIntervalSince1970: TimeInterval(availableAt)), style: .date) }
                         } else {
-                            Label("Outside Your Approval Branch", systemImage: "lock.shield")
+                            Label("Revocation Unavailable", systemImage: "lock.shield")
                         }
-                    } footer: { Text("You can revoke devices below you in the approval chain. After 30 days of your current membership, you can also revoke your approver or ancestors. Subtree removal is optional and applies only to descendants.") }
+                    } footer: { Text("You can revoke devices below you in the approval chain. After 30 days in the channel, you can revoke any device.") }
                 }
             } else {
                 ContentUnavailableView("Device No Longer Available", systemImage: "person.crop.circle.badge.minus", description: Text("The device is no longer a member of this channel."))
@@ -569,47 +568,48 @@ struct MemberDetailView: View {
         .navigationTitle(device?.name ?? String(localized: "Device"))
         .navigationBarTitleDisplayMode(.inline)
         .refreshable { await model.refresh() }
-        .sheet(isPresented: $revoking) {
+        .sheet(item: $revocation) { selection in
             NavigationStack {
                 List {
                     Section {
-                        Text(revokeSubtree ? "Revoke Entire Approval Subtree" : "Revoke")
-                        Text("Affected devices: \(revokeDevices.count)")
-                        Text("These identities will lose access and cannot rejoin this channel.")
-                    }
-                    ForEach(revokeDevices, id: \.id) { affected in
-                        Section {
-                            Text(verbatim: affected.name)
-                            Text(verbatim: affected.id).font(.caption.monospaced()).textSelection(.enabled)
-                        }
+                        Text("This device will lose access.")
                     }
                     Section {
-                        Button("Confirm Revocation", role: .destructive) {
-                            revoking = false
-                            Task { await model.perform {
-                                guard canManage, device?.canRevoke == true else { return }
-                                try await model.client?.revokeSelected(channel: channelID, device: deviceID, subtree: revokeSubtree, revision: revokeRevision)
-                                await model.refresh()
-                            } }
-                        }.disabled(!canManage || channel?.revision != revokeRevision)
+                        Text(verbatim: selection.device.name)
+                        Text(verbatim: selection.device.id).font(.caption.monospaced()).textSelection(.enabled).accessibilityIdentifier("revocationDeviceID")
+                    }
+                    Section {
+                        Button("Confirm", role: .destructive) {
+                            revocation = nil
+                            Task {
+                                guard canManage, device?.canRevoke == true, channel?.revision == selection.revision else { return }
+                                await model.perform {
+                                    try await model.client?.revokeSelected(channel: channelID, device: deviceID, revision: selection.revision)
+                                    await model.refresh()
+                                }
+                            }
+                        }.disabled(!canManage || channel?.revision != selection.revision)
                     }
                 }
                 .navigationTitle("Review Revocation")
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel", role: .cancel) { revoking = false }.keyboardShortcut(.cancelAction) } }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button(role: .cancel) { revocation = nil } label: {
+                            Label("Cancel", systemImage: "xmark").labelStyle(.iconOnly)
+                        }.keyboardShortcut(.cancelAction).accessibilityIdentifier("cancelRevocation")
+                    }
+                }
             }
         }
-        .onChange(of: channel?.revision) { _, revision in if revision != revokeRevision { revoking = false } }
+        .onChange(of: channel?.revision) { _, revision in if revision != revocation?.revision { revocation = nil } }
         .onChange(of: canPing) { _, available in if !available { ping.stop() } }
-        .onChange(of: device?.canRevoke) { _, allowed in if allowed != true { revoking = false } }
-        .onChange(of: canManage) { _, available in if !available { revoking = false } }
+        .onChange(of: device?.canRevoke) { _, allowed in if allowed != true { revocation = nil } }
+        .onChange(of: canManage) { _, available in if !available { revocation = nil } }
         .onDisappear { ping.stop() }
     }
-    private func prepareRevocation(subtree: Bool) {
+    private func prepareRevocation() {
         guard let channel, let device, canManage, device.canRevoke else { return }
-        revokeSubtree = subtree
-        revokeRevision = channel.revision
-        revokeDevices = channel.members.filter { subtree ? device.revocationSubtree.contains($0.id) : $0.id == deviceID }
-        revoking = !revokeDevices.isEmpty
+        revocation = RevocationSelection(device: device, revision: channel.revision)
     }
     private func startPing() {
         guard canPing, let client = model.client else { return }

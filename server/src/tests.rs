@@ -246,7 +246,7 @@ async fn committed_admission_retry_survives_inviter_departure_but_not_revocation
     f.db.join(&f.b.device.id(), request.clone(), invite.clone())
         .await
         .unwrap();
-    f.db.admin_revoke(&f.proof.genesis.body.id, &f.b.device.id(), false)
+    f.db.admin_revoke(&f.proof.genesis.body.id, &f.b.device.id())
         .await
         .unwrap();
     assert!(f.db.join(&f.b.device.id(), request, invite).await.is_err());
@@ -391,9 +391,7 @@ async fn admin_revoked_founder_remains_blocked_until_atomic_readmission() {
     let mut f = Fixture::new().await;
     f.admit().await;
     let id = f.proof.genesis.body.id.clone();
-    f.db.admin_revoke(&id, &f.a.device.id(), false)
-        .await
-        .unwrap();
+    f.db.admin_revoke(&id, &f.a.device.id()).await.unwrap();
     assert!(f.db.require_access(&id, &f.a.device.id()).await.is_err());
     let (request, invite) = invitation_request(&f.db, &f.proof, &f.b, &f.a).await;
     f.db.join(&f.a.device.id(), request.clone(), invite)
@@ -420,16 +418,12 @@ async fn repeated_admin_revoke_invalidates_pending_reinstatement() {
     let mut f = Fixture::new().await;
     f.admit().await;
     let id = f.proof.genesis.body.id.clone();
-    f.db.admin_revoke(&id, &f.b.device.id(), false)
-        .await
-        .unwrap();
+    f.db.admin_revoke(&id, &f.b.device.id()).await.unwrap();
     let (request, invite) = f.request().await;
     f.db.join(&f.b.device.id(), request.clone(), invite.clone())
         .await
         .unwrap();
-    f.db.admin_revoke(&id, &f.b.device.id(), false)
-        .await
-        .unwrap();
+    f.db.admin_revoke(&id, &f.b.device.id()).await.unwrap();
     assert!(
         f.db.append(
             &f.a.device.id(),
@@ -455,7 +449,7 @@ async fn issuer_departure_invalidates_unused_invitations_and_pending_requests() 
             .await
             .unwrap();
         if admin {
-            f.db.admin_revoke(&f.proof.genesis.body.id, &f.b.device.id(), false)
+            f.db.admin_revoke(&f.proof.genesis.body.id, &f.b.device.id())
                 .await
                 .unwrap();
         } else {
@@ -481,7 +475,7 @@ async fn issuer_departure_invalidates_unused_invitations_and_pending_requests() 
 }
 
 #[tokio::test]
-async fn member_subtree_and_admin_subtree_remove_only_the_selected_branch() {
+async fn revocation_only_removes_selected_device_and_rejects_new_subtree_events() {
     for admin in [false, true] {
         let mut f = Fixture::new().await;
         f.admit().await;
@@ -499,21 +493,34 @@ async fn member_subtree_and_admin_subtree_remove_only_the_selected_branch() {
             .unwrap();
         if admin {
             let (_, affected) =
-                f.db.admin_revoke(&f.proof.genesis.body.id, &f.b.device.id(), true)
+                f.db.admin_revoke(&f.proof.genesis.body.id, &f.b.device.id())
                     .await
                     .unwrap();
-            assert_eq!(affected.len(), 2);
+            assert_eq!(affected, vec![f.b.device.id()]);
             assert!(
                 f.db.require_access(&f.proof.genesis.body.id, &c.device.id())
                     .await
-                    .is_err()
+                    .is_ok()
             );
         } else {
-            f.append(MembershipAction::RevokeSubtree {
+            let subtree = f.event(
+                &f.a,
+                MembershipAction::RevokeSubtree {
+                    device_id: f.b.device.id(),
+                },
+            );
+            let error = f.db.append(&f.a.device.id(), subtree).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("subtree revocation is no longer supported")
+            );
+            f.append(MembershipAction::Revoke {
                 device_id: f.b.device.id(),
             })
             .await;
-            assert!(f.proof.verify().unwrap().member(&c.device.id()).is_err());
+            assert!(f.proof.verify().unwrap().member(&f.b.device.id()).is_err());
+            assert!(f.proof.verify().unwrap().member(&c.device.id()).is_ok());
         }
         f.admit().await;
         let state = f.proof.verify().unwrap();

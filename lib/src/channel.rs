@@ -68,6 +68,7 @@ pub enum MembershipAction {
         device: Device,
     },
     /// Explicit cascading removal; ordinary Revoke remains target-only.
+    // Retained for replaying historical membership logs; servers reject new events.
     RevokeSubtree {
         device_id: String,
     },
@@ -211,17 +212,17 @@ impl VerifiedChannelState {
             && self.members.contains_key(issuer)
             && self.members.contains_key(target)
             && (self.descends_from(target, issuer)
-                || (self.descends_from(issuer, target)
-                    && self
-                        .admitted_at
-                        .get(issuer)
-                        .is_some_and(|joined| at >= joined.saturating_add(30 * 24 * 60 * 60))))
+                || self
+                    .admitted_at
+                    .get(issuer)
+                    .is_some_and(|joined| at >= joined.saturating_add(30 * 24 * 60 * 60)))
     }
+    /// Availability for revoking any non-descendant; the name is retained for API compatibility.
     pub fn reverse_revoke_available_at(&self, issuer: &str, target: &str) -> Option<u64> {
         (issuer != target
             && self.members.contains_key(issuer)
             && self.members.contains_key(target)
-            && self.descends_from(issuer, target))
+            && !self.descends_from(target, issuer))
         .then(|| {
             self.admitted_at
                 .get(issuer)
@@ -335,7 +336,7 @@ impl MembershipProof {
                 }
                 MembershipAction::Revoke { device_id } => {
                     if !state.can_revoke_at(&b.issuer_device_id, device_id, b.issued_at) {
-                        return Err(Error::Invalid("revocation requires a descendant target, or an ancestor target after 30 days of current membership; use Leave to remove yourself".into()));
+                        return Err(Error::Invalid("revocation requires a descendant target or 30 days of current membership; use Leave to remove yourself".into()));
                     }
                     state.removed_at.insert(device_id.clone(), b.sequence);
                     if state.members.remove(device_id).is_none() {

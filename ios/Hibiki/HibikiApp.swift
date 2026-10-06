@@ -65,15 +65,16 @@ struct HibikiApp: App {
         if CommandLine.arguments.contains("--ui-members-fixture") {
             let model = AppModel(defaults: UserDefaults(suiteName: "hibiki-ui-members-fixture")!, nfcCapability: { CommandLine.arguments.contains("--ui-nfc") })
             let isOnline = CommandLine.arguments.contains("--ui-members-online")
+            let canRevokeOthers = CommandLine.arguments.contains("--ui-members-mature")
             if CommandLine.arguments.contains("--ui-cards-fixture") {
                 model.recordedNFCCard = CardInfo(serial: "D2760001240103040005000012340000", transport: .nfc, keys: [])
 
             }
             let words = (1...24).map { String(format: "word%02d", $0) }.joined(separator: " ")
-            let local = DeviceInfo(id: String(repeating: "a", count: 64), name: "Fixture iPhone", words: words, online: isOnline, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
-            let remote = DeviceInfo(id: String(repeating: "b", count: 64), name: "Work Mac", words: words, online: isOnline, approvedBy: String(repeating: "d", count: 64), approverName: "Approving Mac", canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [])
-            let child = DeviceInfo(id: String(repeating: "e", count: 64), name: "Approved laptop", words: words, online: isOnline, approvedBy: local.id, approverName: local.name, canRevoke: true, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [String(repeating: "e", count: 64), String(repeating: "f", count: 64)])
-            let grandchild = DeviceInfo(id: String(repeating: "f", count: 64), name: "Approved tablet", words: words, online: isOnline, approvedBy: child.id, approverName: child.name, canRevoke: true, revokedByServer: false, reverseRevokeAvailableAt: nil, revocationSubtree: [String(repeating: "f", count: 64)])
+            let local = DeviceInfo(id: String(repeating: "a", count: 64), name: "Fixture iPhone", words: words, online: isOnline, approvedBy: nil, approverName: nil, canRevoke: false, revokedByServer: false, reverseRevokeAvailableAt: nil)
+            let remote = DeviceInfo(id: String(repeating: "b", count: 64), name: "Work Mac", words: words, online: isOnline, approvedBy: String(repeating: "d", count: 64), approverName: "Approving Mac", canRevoke: canRevokeOthers, revokedByServer: false, reverseRevokeAvailableAt: canRevokeOthers ? UInt64(Date().timeIntervalSince1970) - 1 : UInt64(Date().timeIntervalSince1970) + 30 * 86400)
+            let child = DeviceInfo(id: String(repeating: "e", count: 64), name: "Approved laptop", words: words, online: isOnline, approvedBy: local.id, approverName: local.name, canRevoke: true, revokedByServer: false, reverseRevokeAvailableAt: nil)
+            let grandchild = DeviceInfo(id: String(repeating: "f", count: 64), name: "Approved tablet", words: words, online: isOnline, approvedBy: child.id, approverName: child.name, canRevoke: true, revokedByServer: false, reverseRevokeAvailableAt: nil)
             if CommandLine.arguments.contains("--ui-members-online") { model.connection = "online" }
             model.device = local
             model.channels = [ChannelInfo(id: String(repeating: "c", count: 64), name: "UI Test Channel", active: true, revision: 1, members: [local, remote, child, grandchild])]
@@ -120,6 +121,15 @@ private final class InvitationFixtureClient: MobileClient, @unchecked Sendable {
             refreshCount += 1
             if approveOnRefresh, refreshCount >= 2 { fixtureChannels[0].active = true }
             return fixtureChannels
+        }
+    }
+    override func revokeSelected(channel: String, device: String, revision: UInt64) async throws {
+        try lock.withLock {
+            guard let index = fixtureChannels.firstIndex(where: { $0.id == channel }), fixtureChannels[index].revision == revision else {
+                throw MobileError.Failed(message: "Channel changed")
+            }
+            fixtureChannels[index].members.removeAll { $0.id == device }
+            fixtureChannels[index].revision += 1
         }
     }
     override func pairingStatus(channel: String, requestId: String) async throws -> PairingState {

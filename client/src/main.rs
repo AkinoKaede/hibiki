@@ -121,15 +121,17 @@ enum ChannelCommand {
         request_id: Option<String>,
     },
     /// Reject one pending request; the device may submit a new request.
-    Reject { name: String, request_id: String },
+    Reject {
+        name: String,
+        request_id: String,
+    },
     /// Leave a channel or withdraw this device's pending join requests.
-    Leave { name: String },
+    Leave {
+        name: String,
+    },
     Revoke {
         name: String,
         device_id: String,
-        /// Also revoke all descendants in this approval branch.
-        #[arg(long)]
-        subtree: bool,
     },
     List {
         #[arg(long)]
@@ -475,15 +477,11 @@ async fn run() -> Result<()> {
                 );
             }
         }
-        ChannelCommand::Revoke {
-            name,
-            device_id,
-            subtree,
-        } => {
+        ChannelCommand::Revoke { name, device_id } => {
             let id = app.resolve_channel(&name)?;
             let device_id = manager.resolve_device(&id, &device_id).await?;
             let revision = manager.channel(&id).await?.revision;
-            let affected = manager.revoke(&id, &device_id, subtree, revision).await?;
+            let affected = manager.revoke(&id, &device_id, revision).await?;
             println!(
                 "Revoked {} device(s):\n{}",
                 affected.len(),

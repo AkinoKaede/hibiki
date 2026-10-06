@@ -136,7 +136,6 @@ pub async fn revoke(
     conn: &Connection,
     id: &str,
     device: &str,
-    subtree: bool,
     revision: u64,
 ) -> Result<Vec<String>> {
     let mut proof = refresh(app, conn, id).await?;
@@ -144,20 +143,10 @@ pub async fn revoke(
     if state.sequence != revision {
         bail!("channel changed; refresh and review revocation again");
     }
-    let action = if subtree {
-        MembershipAction::RevokeSubtree {
-            device_id: device.into(),
-        }
-    } else {
-        MembershipAction::Revoke {
-            device_id: device.into(),
-        }
+    let action = MembershipAction::Revoke {
+        device_id: device.into(),
     };
-    let affected = if subtree {
-        state.revocation_subtree(device)
-    } else {
-        vec![device.into()]
-    };
+    let affected = vec![device.into()];
     let event = MembershipEvent::create(&app.identity, &state, action)?;
     proof.events.push(event.clone());
     proof.verify()?;

@@ -51,7 +51,7 @@ enum Action {
     Ping(String, String),
     Approve(String, String),
     Reject(String, String),
-    Revoke(String, String, bool, u64),
+    Revoke(String, String, u64),
     Leave(String),
     Invite(String),
     Join(Zeroizing<String>),
@@ -299,7 +299,7 @@ impl Ui {
     }
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
         if let Some(Modal::Confirm {
-            action: Action::Revoke(channel, device, _, revision),
+            action: Action::Revoke(channel, device, revision),
             ..
         }) = &self.modal
             && !snapshot
@@ -479,7 +479,6 @@ impl Ui {
                         ActionChoice::Execute(Action::Revoke(
                             channel.into(),
                             device.into(),
-                            false,
                             s.channels
                                 .iter()
                                 .find(|c| c.id == channel)
@@ -487,21 +486,6 @@ impl Ui {
                                 .revision,
                         )),
                     ));
-                    if let Some(c) = s.channels.iter().find(|c| c.id == channel)
-                        && c.devices
-                            .iter()
-                            .any(|d| d.id == device && !d.revocation_subtree.is_empty())
-                    {
-                        choices.push((
-                            "Revoke entire approval subtree".into(),
-                            ActionChoice::Execute(Action::Revoke(
-                                channel.into(),
-                                device.into(),
-                                true,
-                                c.revision,
-                            )),
-                        ));
-                    }
                 }
             }
             if self.page == 3
@@ -578,38 +562,14 @@ impl Ui {
                         _ => "Reject this request. The applicant may request admission again.",
                     };
                     let mut detail = self.current().map(|r| r.detail).unwrap_or_default();
-                    if let Action::Revoke(channel, device, subtree, _) = &action
+                    if let Action::Revoke(channel, device, _) = &action
                         && let Some(c) = self
                             .snapshot
                             .as_ref()
                             .and_then(|s| s.channels.iter().find(|c| &c.id == channel))
                         && let Some(d) = c.devices.iter().find(|d| &d.id == device)
                     {
-                        let affected: Vec<_> = c
-                            .devices
-                            .iter()
-                            .filter(|item| {
-                                if *subtree {
-                                    d.revocation_subtree.contains(&item.id)
-                                } else {
-                                    item.id == *device
-                                }
-                            })
-                            .collect();
-                        detail = format!(
-                            "Revoke {} device(s){}:\n\n{}",
-                            affected.len(),
-                            if *subtree {
-                                " (entire subtree)"
-                            } else {
-                                " (selected device only)"
-                            },
-                            affected
-                                .iter()
-                                .map(|d| format!("{}\n{}", safe(&d.name), d.id))
-                                .collect::<Vec<_>>()
-                                .join("\n\n")
-                        );
+                        detail = format!("Revoke device:\n\n{}\n{}", safe(&d.name), d.id);
                     }
                     self.modal = Some(Modal::Confirm {
                         title: "Confirm management action".into(),
@@ -1122,8 +1082,8 @@ async fn execute_action(
             manager.reject(&c, &r).await?;
             Ok(("Request rejected.".into(), None))
         }
-        Action::Revoke(c, d, subtree, revision) => {
-            manager.revoke(&c, &d, subtree, revision).await?;
+        Action::Revoke(c, d, revision) => {
+            manager.revoke(&c, &d, revision).await?;
             Ok(("Device membership revoked.".into(), None))
         }
         Action::Leave(c) => {
@@ -1420,7 +1380,6 @@ mod tests {
             can_revoke: false,
             revoked_by_server: false,
             reverse_revoke_available_at: None,
-            revocation_subtree: vec![],
             verification_words: (0..24)
                 .map(|i| format!("word{i}"))
                 .collect::<Vec<_>>()
@@ -1478,9 +1437,9 @@ mod tests {
         before.channels[0].devices[0].can_revoke = true;
         ui.apply_snapshot(before.clone());
         ui.modal = Some(Modal::Confirm {
-            title: "Revoke subtree".into(),
+            title: "Revoke device".into(),
             details: String::new(),
-            action: Action::Revoke("channel".into(), device.id.clone(), true, 1),
+            action: Action::Revoke("channel".into(), device.id.clone(), 1),
             affirmative: false,
             verified: false,
             approval: false,

@@ -37,7 +37,6 @@ pub struct DeviceInfo {
     pub can_revoke: bool,
     pub revoked_by_server: bool,
     pub reverse_revoke_available_at: Option<u64>,
-    pub revocation_subtree: Vec<String>,
 }
 #[derive(Clone, Debug, uniffi::Record)]
 pub struct ChannelInfo {
